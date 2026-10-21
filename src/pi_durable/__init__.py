@@ -2,8 +2,8 @@
 
 The public surface is rebuilt against the vendored 1.3.0 specification. This layer provides strict
 JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Context/abort signal,
-the Storage protocol, the Session kernel, document definitions, task definitions, and the
-in-memory reference backend. The Harness arrives in later tickets.
+the Storage protocol, the Session kernel, document definitions, task definitions, context
+derivation, and the in-memory reference backend. The full Harness arrives in later tickets.
 """
 
 from .documents import (
@@ -34,6 +34,7 @@ from .entries import (
     define_entry,
 )
 from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError
+from .harness.types import ContextView
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
@@ -45,6 +46,7 @@ __all__ = [
     "AssistantEntry",
     "CompactionEntry",
     "CommonDocDefinition",
+    "ContextView",
     "ConversationBusy",
     "ConversationDocFamilyToken",
     "ConversationDocToken",

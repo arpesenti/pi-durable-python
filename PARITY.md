@@ -182,7 +182,7 @@ is green.
 | `CompactionPolicy` | type | `CompactionPolicy` | — | planned |
 | `CompactionReason` | type | `CompactionReason` | — | planned |
 | `CompactionResult` | type | `CompactionResult` | — | planned |
-| `ContextView` | type | `ContextView` | — | planned |
+| `ContextView` | type | `ContextView` | test_harness_context.py | tested |
 | `Conversation` | type | `Conversation` | — | planned |
 | `ConversationAbortOptions` | type | `ConversationAbortOptions` | — | planned |
 | `ConversationCreateOptions` | type | `ConversationCreateOptions` | — | planned |
@@ -527,7 +527,7 @@ SQLite backend and migrations.
 | --- | --- |
 | 1 Terms and invariants | code |
 | 2 Core records | tested |
-| 2.1 Entries and context | planned |
+| 2.1 Entries and context | tested |
 | 2.2 Public Harness surface | planned |
 | 3 Documents | code |
 | 3.1 Definitions | tested |
@@ -536,7 +536,7 @@ SQLite backend and migrations.
 | 3.4 Mutation ownership | tested |
 | 3.5 Bases and checkpoints | tested |
 | 3.6 Versions and migrations | tested |
-| 3.7 Forks | planned |
+| 3.7 Forks | tested |
 | 4 Transactions and storage ownership | tested |
 | 5 Tasks | planned |
 | 5.1 Definition | planned |
@@ -579,6 +579,11 @@ The upstream document-retention suite has two Harness-level cases: one follows a
 change at its next use, and one compares agent event streams with documents evicted. They are
 translated with the Harness in #12-#22; the Session-level suite covers the retention semantics.
 
+The upstream `harness-context` suite is translated in two parts. Its thirteen derivation cases run
+against the Session-level `context()` read. Its nine kept-range cases measure `TaskRuntime.context()`
+extended reads and the range cache's freeze guarantees (section 5) and `contextRetentionMs` expiry
+(section 2.2); they land with the scheduler and Harness in #9-#10 and #12-#22.
+
 ## Allowed deviations
 
 | Area | Upstream | Python |
@@ -603,6 +608,7 @@ translated with the Harness in #12-#22; the Session-level suite covers the reten
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
+| Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | the same read as `SessionImpl.context(conversation_id, context, at=...)` until the Harness `Conversation` and `TaskRuntime` land |
 | Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
 | Promise-returning watcher methods | `stop()` returns the one common promise | `CommittedWatch.stop()` and `closed` return the one common `asyncio.Future`, so each is identity-stable and awaiting a cancellation does not cancel it |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
@@ -623,13 +629,15 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Chord-compatible JSON operation applier | `pi_durable.delta` | tested (`test_memory_storage.py`) |
 | Serialized committed document watches | `pi_durable.session.observation` | tested (`test_session_watches.py`, `test_session_checkpoints_migrations.py`) |
 | Document cache sizes, retention normalization, and the suite default | `pi_durable.session.session` | tested (`test_session_document_retention.py`) |
+| Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
+| Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 
 ## Milestones
 
 - [x] 1. Scaffold: vendored spec, decision record, parity matrix, CI, package layout.
-- [ ] 2. Kernel: types, IDs, JSON, errors, entries, documents, Session/Tx/forks.
+- [x] 2. Kernel: types, IDs, JSON, errors, entries, documents, Session/Tx/forks.
 - [ ] 3. Storage: memory, JSONL, SQLite, conformance suites.
 - [ ] 4. Tasks, scheduler, submissions, document observation.
 - [ ] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.

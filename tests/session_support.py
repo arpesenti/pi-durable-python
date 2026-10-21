@@ -145,6 +145,14 @@ def open_test_session() -> tuple[ControlledStorage, SessionImpl, list[CommitPubl
     return storage, session, publications
 
 
+def document_copy_changes(publication: CommitPublication) -> list[dict[str, Any]]:
+    return [
+        cast(dict[str, Any], change)
+        for change in publication["changes"]
+        if change["type"] == "document.copy"
+    ]
+
+
 def document_changes(publication: CommitPublication) -> list[dict[str, Any]]:
     return [
         cast(dict[str, Any], change)
@@ -168,6 +176,7 @@ __all__ = [
     "context",
     "create_conversation",
     "document_changes",
+    "document_copy_changes",
     "eventually",
     "flush",
     "open_test_session",

@@ -19,6 +19,8 @@ from ..documents import (
     resolve_address,
 )
 from ..errors import SessionFailed, StorageRequestError
+from ..harness.context import read_context
+from ..harness.types import ContextView
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
 from ..json import JsonObject
 from ..types import (
@@ -435,6 +437,22 @@ class SessionImpl:
         async with self._line:
             self._assert_healthy()
             return await job()
+
+    async def context(
+        self,
+        conversation_id: ConversationId,
+        context: Context,
+        at: EntryId | None = None,
+    ) -> ContextView:
+        """Return one conversation's committed transcript and derived model context.
+
+        With ``at``, the context as of that visible entry, as a fork at that entry starts with.
+        Bounds are captured on the Session line; the entries at or below them are immutable, so
+        derivation runs off the line.
+        """
+
+        self.assert_usable()
+        return await read_context(self, self._storage, conversation_id, context, at)
 
     def assert_usable(self) -> None:
         self._assert_healthy()

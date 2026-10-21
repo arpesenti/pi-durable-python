@@ -14,6 +14,7 @@ JSON values that cannot be mutated after construction.
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from typing import (
+    TYPE_CHECKING,
     Any,
     Generic,
     Literal,
@@ -41,6 +42,9 @@ from .ids import (
     require_positive_int,
 )
 from .json import JsonObject, JsonValue, copy_json, freeze_json
+
+if TYPE_CHECKING:
+    from .harness.types import ContextView
 
 __all__ = [
     "ROOT_CONVERSATION_ID",
@@ -1125,6 +1129,15 @@ class Session(Protocol):
     async def watch_doc(self, token: Any, *args: Any) -> Any: ...
 
     async def snapshot_as_of(self, token: Any, *args: Any) -> JsonObject | None: ...
+
+    # Port addition: the Session-level read that `Conversation.context()` exposes. Upstream keeps
+    # it in the Harness, which does not exist yet.
+    async def context(
+        self,
+        conversation_id: ConversationId,
+        context: Context,
+        at: EntryId | None = None,
+    ) -> "ContextView": ...
 
 
 # ── Entry construction ─────────────────────────────────────────────────────
