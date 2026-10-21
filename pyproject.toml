@@ -101,3 +101,7 @@ disable_error_code = ["arg-type", "call-overload", "list-item", "misc", "typeddi
 [[tool.mypy.overrides]]
 module = ["test_sqlite_storage"]
 disable_error_code = ["call-overload", "index", "list-item", "misc", "typeddict-item"]
+
+[[tool.mypy.overrides]]
+module = ["pi_durable.harness.scheduler"]
+disable_error_code = ["arg-type", "assignment", "call-overload", "index", "misc", "return-value", "typeddict-item"]

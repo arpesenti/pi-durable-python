@@ -84,12 +84,12 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `defineExtension` | value | `define_extension` | — | planned |
-| `defineTool` | value | `define_tool` | — | planned |
-| `hook` | value | `hook` | — | planned |
-| `section` | value | `section` | — | planned |
-| `wrapSection` | value | `wrap_section` | — | planned |
-| `wrapTool` | value | `wrap_tool` | — | planned |
+| `defineExtension` | value | `define_extension` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
+| `defineTool` | value | `define_tool` | test_harness_tasks.py | tested |
+| `hook` | value | `hook` | test_harness_tasks.py | tested |
+| `section` | value | `section` | test_harness_registry_agent.py | tested |
+| `wrapSection` | value | `wrap_section` | test_harness_registry_agent.py | tested |
+| `wrapTool` | value | `wrap_tool` | test_harness_registry_agent.py | tested |
 
 ### `./harness/events.ts` → `pi_durable.harness.events`
 
@@ -115,7 +115,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Harness` | value | `Harness` | — | planned |
+| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py | tested |
 
 ### `./harness/inbox.ts` → `pi_durable.harness.inbox`
 
@@ -148,7 +148,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createRegistry` | value | `create_registry` | — | planned |
+| `createRegistry` | value | `create_registry` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py | tested |
 
 ### `./harness/task-graph.ts` → `pi_durable.harness.task_graph`
 
@@ -174,10 +174,10 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Agent` | type | `Agent` | — | planned |
-| `AgentChange` | type | `AgentChange` | — | planned |
-| `AgentState` | type | `AgentState` | — | planned |
-| `AnyTask` | type | `AnyTask` | — | planned |
+| `Agent` | type | `Agent` | test_harness_tasks.py | tested |
+| `AgentChange` | type | `AgentChange` | test_harness_tasks.py | tested |
+| `AgentState` | type | `AgentState` | test_harness_tasks.py | tested |
+| `AnyTask` | type | `AnyTask` | test_harness_tasks.py, test_harness_ownership.py | tested |
 | `CompactionHooks` | type | `CompactionHooks` | — | planned |
 | `CompactionPolicy` | type | `CompactionPolicy` | — | planned |
 | `CompactionReason` | type | `CompactionReason` | — | planned |
@@ -186,38 +186,38 @@ is green.
 | `Conversation` | type | `Conversation` | — | planned |
 | `ConversationAbortOptions` | type | `ConversationAbortOptions` | — | planned |
 | `ConversationCreateOptions` | type | `ConversationCreateOptions` | — | planned |
-| `ConversationHandle` | type | `ConversationHandle` | — | planned |
+| `ConversationHandle` | type | `ConversationHandle` | test_harness_ownership.py | tested |
 | `ConversationInit` | type | `ConversationInit` | — | planned |
 | `ConversationRetryPolicy` | type | `ConversationRetryPolicy` | — | planned |
 | `ConversationStreamOptions` | type | `ConversationStreamOptions` | — | planned |
 | `ConversationWatch` | type | `ConversationWatch` | — | planned |
 | `EnvTarget` | type | `EnvTarget` | — | planned |
-| `Extension` | type | `Extension` | — | planned |
+| `Extension` | type | `Extension` | test_harness_tasks.py, test_harness_ownership.py | tested |
 | `GenerationHooks` | type | `GenerationHooks` | — | planned |
-| `HarnessInspection` | type | `HarnessInspection` | — | planned |
-| `HarnessOptions` | type | `HarnessOptions` | — | planned |
+| `HarnessInspection` | type | `HarnessInspection` | test_harness_tasks.py, test_harness_cancellation_barrier.py | tested |
+| `HarnessOptions` | type | `HarnessOptions` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
 | `HarnessSettings` | type | `HarnessSettings` | — | planned |
 | `HookApi` | type | `HookApi` | — | planned |
-| `HookRegistration` | type | `HookRegistration` | — | planned |
+| `HookRegistration` | type | `HookRegistration` | test_harness_tasks.py | tested |
 | `HookResult` | type | `HookResult` | — | planned |
 | `HooksOf` | type | `HooksOf` | — | planned |
 | `InputEntry` | type | `InputEntry` | — | planned |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | — | planned |
-| `ModelRef` | type | `ModelRef` | — | planned |
+| `ModelRef` | type | `ModelRef` | — | code |
 | `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned |
 | `ProgressPolicy` | type | `ProgressPolicy` | — | planned |
 | `PromptInput` | type | `PromptInput` | — | planned |
-| `PromptSection` | type | `PromptSection` | — | planned |
+| `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py | tested |
 | `QueueMode` | type | `QueueMode` | — | planned |
-| `Registry` | type | `Registry` | — | planned |
-| `RegistryReader` | type | `RegistryReader` | — | planned |
-| `RegistrySnapshot` | type | `RegistrySnapshot` | — | planned |
-| `Settings` | type | `Settings` | — | planned |
+| `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
+| `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py | tested |
+| `RegistrySnapshot` | type | `RegistrySnapshot` | test_harness_tasks.py | tested |
+| `Settings` | type | `Settings` | test_harness_tasks.py | tested |
 | `SettledSubmissionRecord` | type | `SettledSubmissionRecord` | — | planned |
-| `SettledTask` | type | `SettledTask` | — | planned |
+| `SettledTask` | type | `SettledTask` | test_harness_tasks.py | tested |
 | `Submission` | type | `Submission` | — | planned |
 | `SubmissionDraft` | type | `SubmissionDraft` | — | planned |
-| `TaskInspection` | type | `TaskInspection` | — | planned |
+| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py | tested |
 | `ToolControl` | type | `ToolControl` | — | planned |
 | `ToolDiagnostic` | type | `ToolDiagnostic` | — | planned |
 | `ToolExecutionApi` | type | `ToolExecutionApi` | — | planned |
@@ -225,9 +225,9 @@ is green.
 | `ToolExecutionResult` | type | `ToolExecutionResult` | — | planned |
 | `ToolHookCall` | type | `ToolHookCall` | — | planned |
 | `ToolHooks` | type | `ToolHooks` | — | planned |
-| `ToolRegistration` | type | `ToolRegistration` | — | planned |
+| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py | tested |
 | `UserInput` | type | `UserInput` | — | planned |
-| `Wrap` | type | `Wrap` | — | planned |
+| `Wrap` | type | `Wrap` | test_harness_registry_agent.py | tested |
 
 ### `./harness/usage.ts` → `pi_durable.harness.usage`
 
@@ -300,7 +300,7 @@ is green.
 | `EntryId` | type | `EntryId` | test_ids.py, test_types.py | tested |
 | `EntryQuery` | type | `EntryQuery` | test_types.py, test_storage_protocol.py | tested |
 | `EntryRecord` | type | `EntryRecord` | test_entries.py, test_types.py | tested |
-| `HookRunner` | type | `HookRunner` | — | planned |
+| `HookRunner` | type | `HookRunner` | test_harness_tasks.py | tested |
 | `Id` | type | `Id` | test_types.py | tested |
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
@@ -338,7 +338,7 @@ is green.
 | `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
 | `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py | tested |
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
-| `TaskRuntime` | type | `TaskRuntime` | — | planned |
+| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py | tested |
 | `TaskState` | type | `TaskState` | test_types.py | tested |
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
@@ -546,12 +546,12 @@ SQLite backend and migrations.
 | 3.6 Versions and migrations | tested |
 | 3.7 Forks | tested |
 | 4 Transactions and storage ownership | tested |
-| 5 Tasks | planned |
-| 5.1 Definition | planned |
-| 5.2 Effect sandwich | planned |
-| 5.3 Terminal tasks | planned |
-| 5.4 Scheduler, abort, and ownership | planned |
-| 5.5 Structured concurrency | planned |
+| 5 Tasks | tested |
+| 5.1 Definition | tested |
+| 5.2 Effect sandwich | tested |
+| 5.3 Terminal tasks | tested |
+| 5.4 Scheduler, abort, and ownership | tested |
+| 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | planned |
 | 7 Extensions, hooks, tools, and system prompt | planned |
 | 7.1 Extensions, registry, and agent resolution | planned |
@@ -587,10 +587,18 @@ The upstream document-retention suite has two Harness-level cases: one follows a
 change at its next use, and one compares agent event streams with documents evicted. They are
 translated with the Harness in #12-#22; the Session-level suite covers the retention semantics.
 
-The upstream `harness-context` suite is translated in two parts. Its thirteen derivation cases run
-against the Session-level `context()` read. Its nine kept-range cases measure `TaskRuntime.context()`
-extended reads and the range cache's freeze guarantees (section 5) and `contextRetentionMs` expiry
-(section 2.2); they land with the scheduler and Harness in #9-#10 and #12-#22.
+The four scheduler suites are translated for the task core. Deferred to later tickets: the
+`harness-tasks` cases that assert built-in generation/tool cleanup, the `harness-ownership` cases
+that need submissions, tools, or a live `pi.live` run, and the `harness-lifecycle` cases that need
+tool hooks, usage, conversation views, or the task-graph watch. The `harness-lifecycle` open-error,
+close, reopen, registry-change, cancellation, and durable-commit cases are translated now.
+
+The upstream `harness-context` suite is translated in three parts. Its thirteen derivation cases run
+against the Session-level `context()` read. Three of its nine kept-range cases run against
+`TaskRuntime.context()`: extended reads scanning only newer entries and honoring an earlier cutoff,
+returned views staying apart from the kept range, and dropping the range under zero retention. The
+remaining six (clock-driven expiry, busy and late reads, extended-read equivalence, baseline found
+in added entries, and shallow-storage freeze) land with #10 and #22.
 
 ## Allowed deviations
 
@@ -621,7 +629,7 @@ extended reads and the range cache's freeze guarantees (section 5) and `contextR
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
-| Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | the same read as `SessionImpl.context(conversation_id, context, at=...)` until the Harness `Conversation` and `TaskRuntime` land |
+| Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | `context(conversation_id, context, at=...)`; `Conversation.context()` and `TaskRuntime.context()` accept the cutoff as a keyword mapping |
 | Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
 | Promise-returning watcher methods | `stop()` returns the one common promise | `CommittedWatch.stop()` and `closed` return the one common `asyncio.Future`, so each is identity-stable and awaiting a cancellation does not cancel it |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
@@ -643,7 +651,12 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Serialized committed document watches | `pi_durable.session.observation` | tested (`test_session_watches.py`, `test_session_checkpoints_migrations.py`) |
 | Document cache sizes, retention normalization, and the suite default | `pi_durable.session.session` | tested (`test_session_document_retention.py`) |
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
+| Kept context ranges for extended reads and retention | `pi_durable.harness.context` | tested (`test_harness_context_ranges.py`) |
 | Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
+| Task scheduler, ownership indexes, and task runtime | `pi_durable.harness.scheduler` | tested (`test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_cancellation_barrier.py`) |
+| Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`) |
+| Extension registry, agent resolution, and hook dispatch | `pi_durable.harness.registry`, `pi_durable.harness.agent` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`) |
+| Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`) |
 | Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |

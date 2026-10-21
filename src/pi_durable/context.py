@@ -262,14 +262,14 @@ async def await_with_context(awaitable: Awaitable[T], context: Context) -> T:
         return await awaitable
     if signal.aborted:
         _close_coroutine(awaitable)
-        raise AbortError(signal.reason)
+        raise _cancellation_error(signal)
 
     loop = asyncio.get_running_loop()
     waiter: asyncio.Future[None] = loop.create_future()
 
     def abort() -> None:
         if not waiter.done():
-            waiter.set_exception(AbortError(signal.reason))
+            waiter.set_exception(_cancellation_error(signal))
 
     remove = signal.add_listener(abort)
     if signal.aborted:
@@ -286,6 +286,13 @@ async def await_with_context(awaitable: Awaitable[T], context: Context) -> T:
         remove()
         if not waiter.done():
             waiter.cancel()
+
+
+def _cancellation_error(signal: AbortSignal) -> BaseException:
+    """An aborted context rejects with its reason when it is an error, else ``AbortError``."""
+
+    reason = signal.reason
+    return reason if isinstance(reason, BaseException) else AbortError(reason)
 
 
 def _discard_result(task: asyncio.Future[Any]) -> None:

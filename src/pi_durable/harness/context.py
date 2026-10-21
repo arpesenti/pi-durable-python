@@ -49,6 +49,18 @@ class EntryRange(TypedDict):
     maxEntryId: EntryId
 
 
+class ContextRange(TypedDict):
+    """A derived context range, reusable as the previous range of a later read."""
+
+    bounds: ContextBounds
+    entries: list[EntryRecord]
+    view: ContextView
+    edited: set[EntryId]
+    settled: list[MessageRecord]
+    open: list[MessageRecord]
+    baseline: MessageRecord | None
+
+
 class ContextSession(Protocol):
     """The Session seam a context read needs: run a job on the mutation line."""
 
@@ -88,9 +100,7 @@ async def read_context(
 ) -> ContextView:
     """Read one conversation's committed context: bounds on the Session line, entries off it."""
 
-    bounds = await session.read_on_line(
-        lambda: capture_context_bounds(storage, conversation_id, context, at)
-    )
+    bounds = await session.read_on_line(lambda: capture_context_bounds(storage, conversation_id, context, at))
     return await derive_context(storage, conversation_id, bounds, context)
 
 
@@ -124,6 +134,12 @@ def empty_view() -> ContextView:
 def derive_view(bounds: ContextBounds, entries: Sequence[EntryRecord]) -> ContextView:
     """Derive the context view from the oldest-first entries scanned within ``bounds``."""
 
+    return derive_range(bounds, entries)["view"]
+
+
+def derive_range(bounds: ContextBounds, entries: Sequence[EntryRecord]) -> ContextRange:
+    """Derive the context view and the range a later read can extend."""
+
     edits: dict[EntryId, ContextEdit] = {}
     # Edits of every entry in the range count, including older head markers `select_active` drops.
     for entry in entries:
@@ -137,12 +153,105 @@ def derive_view(bounds: ContextBounds, entries: Sequence[EntryRecord]) -> Contex
         [*settled, *order_tool_results(open_messages)],
         baseline,
     )
-    return {
+    view: ContextView = {
         "head": bounds["head"],
         "entries": list(active),
         "contributions": contributions,
         "messages": messages,
     }
+    return {
+        "bounds": bounds,
+        "entries": list(entries),
+        "view": view,
+        "edited": set(edits),
+        "settled": settled,
+        "open": open_messages,
+        "baseline": baseline,
+    }
+
+
+async def read_context_from(
+    session: Any,
+    storage: Storage,
+    conversation_id: ConversationId,
+    context: Context,
+    at: EntryId | None,
+    previous: ContextRange | None,
+) -> tuple[ContextView, ContextRange | None]:
+    """Read the context, reusing ``previous``: with the same head, only newer entries are scanned."""
+
+    bounds = await session.read_on_line(lambda: capture_context_bounds(storage, conversation_id, context, at))
+    if bounds is None:
+        return empty_view(), None
+    freeze_json(bounds["head"])
+    if previous is None or _head_id(previous["bounds"]) != _head_id(bounds):
+        scanned = await scan_range(storage, conversation_id, range_query(bounds), context)
+        range_value = derive_range(bounds, cast(list[EntryRecord], freeze_json(scanned)))
+    elif bounds["tail"] == previous["bounds"]["tail"]:
+        range_value = previous
+    elif bounds["tail"] < previous["bounds"]["tail"]:
+        range_value = derive_range(
+            bounds, [entry for entry in previous["entries"] if entry["id"] <= bounds["tail"]]
+        )
+    else:
+        min_entry_id = cast(EntryId, previous["bounds"]["tail"] + 1)
+        added = await scan_range(
+            storage,
+            conversation_id,
+            {"minEntryId": min_entry_id, "maxEntryId": bounds["tail"]},
+            context,
+        )
+        range_value = extend_range(previous, bounds, cast(list[EntryRecord], freeze_json(added)))
+    view = range_value["view"]
+    return (
+        {
+            "head": view["head"],
+            "entries": list(view["entries"]),
+            "contributions": list(view["contributions"]),
+            "messages": list(view["messages"]),
+        },
+        range_value,
+    )
+
+
+def extend_range(
+    previous: ContextRange,
+    bounds: ContextBounds,
+    added: Sequence[EntryRecord],
+) -> ContextRange:
+    """Extend ``previous`` by entries after its tail under the same head marker."""
+
+    entries = [*previous["entries"], *added]
+    if any("edits" in entry or "head" in entry or entry["id"] in previous["edited"] for entry in added):
+        return derive_range(bounds, entries)
+    contributions = [contribute(entry, None) for entry in added]
+    settled, open_messages = settle(
+        previous["settled"],
+        [*previous["open"], *[message for messages in contributions for message in messages]],
+    )
+    baseline = previous["baseline"]
+    if baseline is None:
+        baseline = find_baseline(bounds["head"], added)
+    view: ContextView = {
+        "head": bounds["head"],
+        "entries": [*previous["view"]["entries"], *added],
+        "contributions": [*previous["view"]["contributions"], *contributions],
+        "messages": lead_with_system([*settled, *order_tool_results(open_messages)], baseline),
+    }
+    return {
+        "bounds": bounds,
+        "entries": entries,
+        "view": view,
+        "edited": previous["edited"],
+        "settled": settled,
+        "open": open_messages,
+        "baseline": baseline,
+    }
+
+
+def _head_id(bounds: ContextBounds) -> EntryId | None:
+    head = bounds["head"]
+    return None if head is None else head["id"]
 
 
 def select_active(
@@ -254,9 +363,7 @@ def lead_with_system(
     if index <= 0:
         return list(messages)
     system = messages[index]
-    if system is not baseline and any(
-        message["role"] != "user" for message in messages[:index]
-    ):
+    if system is not baseline and any(message["role"] != "user" for message in messages[:index]):
         return list(messages)
     return [system, *messages[:index], *messages[index + 1 :]]
 
@@ -368,19 +475,23 @@ __all__ = [
     "EXCLUDED_STOP_REASONS",
     "MISSING_RESULT_TEXT",
     "ContextBounds",
+    "ContextRange",
     "ContextSession",
     "EntryRange",
     "capture_context_bounds",
     "carries_system_message",
     "contribute",
     "derive_context",
+    "derive_range",
     "derive_view",
     "empty_view",
+    "extend_range",
     "find_baseline",
     "lead_with_system",
     "missing_result",
     "order_tool_results",
     "read_context",
+    "read_context_from",
     "range_query",
     "scan_range",
     "select_active",

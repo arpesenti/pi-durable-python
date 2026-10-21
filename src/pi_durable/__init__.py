@@ -3,7 +3,9 @@
 The public surface is rebuilt against the vendored 1.3.0 specification. This layer provides strict
 JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Context/abort signal,
 the Storage protocol, the Session kernel, document definitions, task definitions, context
-derivation, and the in-memory reference backend. The full Harness arrives in later tickets.
+derivation, the in-memory reference backend, and the durable task scheduler with its registry,
+agent resolution, extension hooks, and Harness surface. Built-in generation, tool, and compaction
+tasks, submissions, and the observation surfaces arrive in later tickets.
 """
 
 from .documents import (
@@ -34,7 +36,41 @@ from .entries import (
     define_entry,
 )
 from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError
-from .harness.types import ContextView
+from .harness.define import (
+    define_extension,
+    define_tool,
+    hook,
+    section,
+    wrap_section,
+    wrap_tool,
+)
+from .harness.harness import Harness
+from .harness.registry import create_registry
+from .harness.types import (
+    Agent,
+    AgentChange,
+    AgentState,
+    AnyTask,
+    ContextView,
+    Conversation,
+    ConversationHandle,
+    Extension,
+    HarnessInspection,
+    HarnessOptions,
+    HookRegistration,
+    HookRunner,
+    ModelRef,
+    PromptSection,
+    Registry,
+    RegistryReader,
+    RegistrySnapshot,
+    Settings,
+    SettledTask,
+    TaskInspection,
+    TaskRuntime,
+    ToolRegistration,
+    Wrap,
+)
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
@@ -43,11 +79,17 @@ from .types import Session, Tx
 __version__ = "1.3.0"
 
 __all__ = [
+    "Agent",
+    "AgentChange",
+    "AgentState",
+    "AnyTask",
     "AssistantEntry",
     "CompactionEntry",
     "CommonDocDefinition",
     "ContextView",
+    "Conversation",
     "ConversationBusy",
+    "ConversationHandle",
     "ConversationDocFamilyToken",
     "ConversationDocToken",
     "DocDefinition",
@@ -56,9 +98,20 @@ __all__ = [
     "DocToken",
     "DocumentState",
     "Entry",
+    "Extension",
+    "Harness",
+    "HarnessInspection",
+    "HarnessOptions",
+    "HookRegistration",
+    "HookRunner",
     "MemoryStorage",
+    "ModelRef",
     "PreparedMemoryCommit",
+    "PromptSection",
     "ReadAfterWrite",
+    "Registry",
+    "RegistryReader",
+    "RegistrySnapshot",
     "ResetEntry",
     "RewindableConversationDocFamilyToken",
     "RewindableConversationDocToken",
@@ -67,19 +120,32 @@ __all__ = [
     "SessionDocToken",
     "SessionFailed",
     "SessionImpl",
+    "Settings",
+    "SettledTask",
     "StorageRequestError",
     "SystemEntry",
     "Task",
     "TaskDefinition",
+    "TaskInspection",
+    "TaskRuntime",
     "TaskDocFamilyToken",
     "TaskDocToken",
-    "Tx",
+    "ToolRegistration",
     "ToolResultEntry",
+    "Tx",
+    "Wrap",
     "UserEntry",
     "__version__",
     "create_session",
+    "create_registry",
     "define_doc",
     "define_doc_family",
     "define_entry",
+    "define_extension",
     "define_task",
+    "define_tool",
+    "hook",
+    "section",
+    "wrap_section",
+    "wrap_tool",
 ]

@@ -43,9 +43,7 @@ async def setup() -> Setup:
         conversation_id: ConversationId | None = None,
         at: EntryId | None = None,
     ) -> ContextView:
-        return await session.context(
-            root_id if conversation_id is None else conversation_id, context, at
-        )
+        return await session.context(root_id if conversation_id is None else conversation_id, context, at)
 
     async def fork(at: EntryId) -> ConversationRecord:
         return await session.commit(
@@ -124,9 +122,7 @@ async def test_applies_the_newest_edit_per_target_within_the_active_range() -> N
             "edits": [{"target": first["id"], "action": "replace", "messages": [user("first v3")]}],
         }
     )
-    await s.append(
-        {"kind": "edit", "edits": [{"target": second["id"], "action": "omit"}]}
-    )
+    await s.append({"kind": "edit", "edits": [{"target": second["id"], "action": "omit"}]})
     view = await s.read()
     assert len(view["entries"]) == 5
     assert rendered(view) == ["user:first v3"]
@@ -187,9 +183,7 @@ async def test_leads_with_a_system_message_that_only_user_messages_precede() -> 
     ]
     # Stored order and contributions stay as committed.
     assert [
-        describe_message(message)
-        for contributions in view["contributions"]
-        for message in contributions
+        describe_message(message) for contributions in view["contributions"] for message in contributions
     ][:3] == [
         "user:first",
         "user:steered",
@@ -454,24 +448,14 @@ async def test_returns_the_empty_view_for_a_conversation_without_entries() -> No
 
 
 @pytest.mark.skip(
-    reason="Extends a task's context read and its scanned rows; "
-    "TaskRuntime.context() arrives with #9-#10."
-)
-async def test_extends_a_tasks_context_read_with_only_newer_entries() -> None:
-    raise AssertionError("covered with TaskRuntime.context()")
-
-
-@pytest.mark.skip(
-    reason="Keeps a context read across tasks and for the retention period; "
-    "the Harness arrives in #12-#22."
+    reason="Keeps a context read across tasks and for the retention period; the Harness arrives in #12-#22."
 )
 async def test_keeps_a_context_read_across_tasks_and_for_the_retention_period_once_idle() -> None:
     raise AssertionError("covered with the Harness context retention")
 
 
 @pytest.mark.skip(
-    reason="Compares extended reads with whole reads from a task; "
-    "TaskRuntime arrives with #9-#10."
+    reason="Compares extended reads with whole reads from a task; TaskRuntime arrives with #9-#10."
 )
 async def test_derives_the_same_view_from_extended_reads_as_from_whole_reads() -> None:
     raise AssertionError("covered with the Harness kept-range extension")
@@ -485,16 +469,7 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
     raise AssertionError("covered with the Harness kept-range extension")
 
 
-@pytest.mark.skip(
-    reason="Keeps returned views and kept ranges apart; the kept range arrives with the Harness."
-)
-async def test_keeps_returned_views_and_kept_ranges_apart() -> None:
-    raise AssertionError("covered with the Harness kept-range cache")
-
-
-@pytest.mark.skip(
-    reason="Freezes kept entries deeply; the kept range arrives with the Harness."
-)
+@pytest.mark.skip(reason="Freezes kept entries deeply; the kept range arrives with the Harness.")
 async def test_freezes_kept_entries_deeply_even_when_storage_freezes_them_shallowly() -> None:
     raise AssertionError("covered with the Harness kept-range cache")
 
@@ -511,11 +486,4 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None
     reason="Drops an idle context read on a timer; the Harness context retention arrives in #12-#22."
 )
 async def test_drops_an_idle_context_read_on_a_timer_when_nothing_else_runs() -> None:
-    raise AssertionError("covered with the Harness context retention")
-
-
-@pytest.mark.skip(
-    reason="Drops a context read once idle with zero retention; the Harness arrives in #12-#22."
-)
-async def test_drops_a_context_read_once_idle_with_zero_retention() -> None:
     raise AssertionError("covered with the Harness context retention")

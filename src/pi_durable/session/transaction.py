@@ -1034,15 +1034,18 @@ class Transaction:
         def stamp_enabled(enabled: bool) -> int | None:
             return self._host.now() if enabled else None
 
-        started_at = (
-            (candidate or {}).get("startedAt")
-            or value.get("startedAt")
-            or stamp_enabled(status == "running")
+        def first_set(*values: int | None) -> int | None:
+            return next((item for item in values if item is not None), None)
+
+        started_at = first_set(
+            (candidate or {}).get("startedAt"),
+            value.get("startedAt"),
+            stamp_enabled(status == "running"),
         )
-        ended_at = (
-            (candidate or {}).get("endedAt")
-            or value.get("endedAt")
-            or stamp_enabled(status == "terminal")
+        ended_at = first_set(
+            (candidate or {}).get("endedAt"),
+            value.get("endedAt"),
+            stamp_enabled(status == "terminal"),
         )
         if started_at == value.get("startedAt") and ended_at == value.get("endedAt"):
             return value

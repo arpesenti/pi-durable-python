@@ -351,6 +351,18 @@ class SessionImpl:
         return self._failure
 
     @property
+    def now(self) -> int:
+        """The Session's current Harness clock value."""
+
+        return self._clock()
+
+    @property
+    def storage(self) -> Storage:
+        """The Session's guarded Storage, as the Harness components use it."""
+
+        return cast(Storage, self._storage)
+
+    @property
     def failed(self) -> asyncio.Future[SessionFailed]:
         return self._failed
 
@@ -367,6 +379,7 @@ class SessionImpl:
         except RuntimeError:
             return
         loop.create_task(self._close_after_failure())
+        self.report(error)
 
     async def _close_after_failure(self) -> None:
         try:
@@ -457,30 +470,49 @@ class SessionImpl:
     def assert_usable(self) -> None:
         self._assert_healthy()
         if self._closing is not None:
-            raise RuntimeError("Session is closed")
+            raise self._closed_error()
+
+    def _closed_error(self) -> Exception:
+        """The error a closed Session rejects with; a Harness names itself."""
+
+        return RuntimeError("Session is closed")
 
     def _assert_healthy(self) -> None:
         if self._failure is not None:
             raise SessionFailed(self._failure)
 
     async def close(self, context: Context) -> None:
-        if self._closing is None:
-            loop = asyncio.get_running_loop()
-            closing: asyncio.Future[None] = loop.create_future()
-            closing.add_done_callback(lambda future: future.exception())
-            self._closing = closing
-            self._notify_close()
-            try:
-                loop.create_task(self._run_close())
-            except BaseException:
-                self._closing = None
-                raise
+        self._begin_close()
+        await self._wait_close(context)
+
+    def _begin_close(self) -> None:
+        """Seal admission and start the shutdown; a repeated close shares the same future."""
+
+        if self._closing is not None:
+            return
+        loop = asyncio.get_running_loop()
+        closing: asyncio.Future[None] = loop.create_future()
+        closing.add_done_callback(lambda future: future.exception())
+        self._closing = closing
+        self._notify_close()
+        try:
+            loop.create_task(self._run_close())
+        except BaseException:
+            self._closing = None
+            raise
+
+    async def _wait_close(self, context: Context) -> None:
+        assert self._closing is not None
         await _await_with_context(self._closing, context)
 
     async def _run_close(self) -> None:
         assert self._closing is not None
         error: BaseException | None = None
         try:
+            try:
+                await self.before_close()
+            except Exception as close_error:
+                self.report(close_error)
             async with self._line:
                 self._commit_listeners.clear()
                 self._documents.clear()
@@ -918,6 +950,9 @@ class SessionImpl:
 
     async def conversation_created(self, tx: Transaction, record: ConversationRecord) -> None:
         """A plain Session stages nothing extra for a new conversation."""
+
+    async def before_close(self) -> None:
+        """Run after close seals admission and before the line closes Storage; a Harness joins tasks here."""
 
     # ── Internal ───────────────────────────────────────────────────────────
 
