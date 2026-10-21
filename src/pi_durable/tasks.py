@@ -208,6 +208,8 @@ class TaskRuntime:
                 if staged_children or self._scheduler.has_live_owned_work(self.task_id):
                     next_state = {"status": "completing", "outcome": next_state["outcome"]}
             record = {**current, "state": next_state}
+            # A state the task commits itself is progress: the restart count resets.
+            record.pop("restarts", None)
             await tx.set_task(record)
             holder["record"] = record
 
@@ -340,7 +342,6 @@ class TaskRuntime:
         for timer in list(self._timers):
             timer.cancel()
         self._timers.clear()
-        self._scheduler.forget_invocation(self.task_id)
 
     @property
     def progressed(self) -> bool:

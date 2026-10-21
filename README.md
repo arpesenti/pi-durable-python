@@ -250,11 +250,15 @@ Harness adds:
 - durable tool calls as child tasks; arguments and results are committed, and a restart
   re-runs only `replay="safe"` tools (others receive an `interrupted` error result)
 
-A conversation is busy while a run task is live. Input arriving while busy is queued as a
-steer or follow-up; writes queue as passive entries. At each assistant turn boundary, writes
-and selected steers are placed; at the final boundary follow-ups also place, and any placed
-input starts the next run. `Conversation.abort()` withdraws queued inputs, aborts the
-conversation's ordinary task scope, and waits for it to be idle.
+A conversation is busy while a run task is live. Input arriving while busy — or while an
+idle conversation still has a non-empty inbox, for example after a failed run — is queued as
+a steer or follow-up; writes queue as passive entries and trigger a final boundary in the
+same commit. At each assistant turn boundary, writes and selected steers are placed; at the
+final boundary follow-ups also place, and any placed input starts the next run. Order is by
+submission ID, and `steeringMode`/`followUpMode` select one or all per mode. A queued or
+immediate head write older than the active range start settles `unanswered` with reason
+`stale`, so it cannot resurrect history a reset cut. `Conversation.abort()` withdraws queued
+inputs, aborts the conversation's ordinary task scope, and waits for it to be idle.
 
 ## Models and tools
 
@@ -341,8 +345,8 @@ generation and tool tasks, agent/prompt resolution, and the three storage backen
 Not ported (raising a clear `NotImplementedError` where an API exists):
 
 - compaction (`Conversation.compact`)
-- conversation/file watches (`Conversation.watch`) — `Conversation.view()` returns a
-  structural snapshot instead
+- conversation watches (`Conversation.watch`) — `Conversation.view()` returns a structural
+  snapshot instead
 - task-graph watches (`watchTaskGraph`)
 - nested tool calls (`api.execute_tool`)
 - Code Mode, tool search, image processing, and the built-in coding tools
@@ -350,6 +354,8 @@ Not ported (raising a clear `NotImplementedError` where an API exists):
   `on_wake` callback is implemented)
 - provider retries, tool output truncation/spill, structured-output validation, and
   parallel-vs-sequential tool-round policy
+- exact `pi.live` presentation fields (`generation`, retry/deferred state, nested slots);
+  the port keeps `run` and the current round's `tools` slots
 - telemetry spans/metrics and the `Context` cancellation parameter (asyncio cancellation
   replaces it)
 

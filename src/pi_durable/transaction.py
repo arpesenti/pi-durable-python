@@ -609,10 +609,6 @@ class Transaction:
         definition = entry.definition
         target = entry.target
         if target is None:
-            if definition is None:
-                return None
-            if not entry.retire_on_commit:
-                return None
             return None
         kind = target["kind"]
         if kind == "fork-copy":

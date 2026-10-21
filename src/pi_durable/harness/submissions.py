@@ -30,6 +30,11 @@ class Submission:
         return record
 
     async def wait(self, context: Any = None) -> dict[str, Any]:
+        record = await self.status()
+        if record["status"] in ("done", "unanswered"):
+            return record
+        # Waiting asks for progress, so it never waits on a paused Harness.
+        self._harness.resume()
         while True:
             record = await self.status()
             if record["status"] in ("done", "unanswered"):
@@ -47,8 +52,8 @@ def input_item(submission: Mapping[str, Any], mode: str) -> dict[str, Any]:
         "type": INPUT,
         "content": copy_json(submission.get("content")),
     }
-    if submission.get("entry") is not None:
-        item["entry"] = copy_json(submission["entry"])
+    if isinstance(submission.get("inputEntry"), Mapping):
+        item["entry"] = copy_json(submission["inputEntry"])
     return item
 
 
@@ -87,8 +92,14 @@ async def apply_boundary(
     final: bool,
     settings: Any,
     now: int,
+    active_start: int | None = None,
 ) -> dict[str, Any]:
-    """Place the items this boundary selects. Run inside the committing transaction."""
+    """Place the items this boundary selects. Run inside the committing transaction.
+
+    ``active_start`` is the newest head marker's ``head`` at the start of the active range.
+    A write whose head targets an older entry is stale: it settles ``unanswered`` and writes
+    no entry, so it cannot resurrect history a reset or summary cut.
+    """
     inbox = await tx.doc(InboxDoc, conversation_id)
     items = list(inbox.get("items") or [])
     selected = select_boundary_items(
@@ -104,7 +115,19 @@ async def apply_boundary(
     placed_writes: list[int] = []
     for item in selected:
         if item["type"] == WRITE:
-            entry = await tx.append_entry(conversation_id, copy_json(item["entry"]))
+            draft = copy_json(item["entry"])
+            head = draft.get("head")
+            if (
+                head is not None
+                and head != "self"
+                and active_start is not None
+                and int(head) < active_start
+            ):
+                tx.settle_submission(item["id"], {"status": "unanswered", "reason": "stale"})
+                continue
+            entry = await tx.append_entry(conversation_id, draft)
+            if head is not None:
+                active_start = entry["id"] if head == "self" else int(head)
             tx.place_submission(item["id"], entry["id"])
             placed_writes.append(item["id"])
             continue
@@ -136,7 +159,6 @@ def queued_submission(
             "type": WRITE,
             "conversationId": conversation_id,
             "status": "queued",
-            "entry": copy_json(draft["entry"]),
         }
     else:
         record = {
@@ -146,7 +168,8 @@ def queued_submission(
             "content": copy_json(draft.get("content")),
         }
         if draft.get("entry") is not None:
-            record["entry"] = copy_json(draft["entry"])
+            # The custom input entry lives in the inbox item until placement.
+            record["inputEntry"] = copy_json(draft["entry"])
     if request_id is not None:
         record["requestId"] = request_id
     return record

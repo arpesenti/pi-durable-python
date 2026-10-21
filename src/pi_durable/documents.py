@@ -66,9 +66,6 @@ class DocDefinition:
                 )
         elif self.history is not None or self.fork is not None:
             raise DocumentDefinitionError(f"Document {self.kind} has {self.scope} scope and cannot declare history/fork")
-        if self.family and self.scope == "session":
-            # Session families are allowed; the constraint is only that initial takes a seed.
-            pass
 
 
 @dataclass(frozen=True)

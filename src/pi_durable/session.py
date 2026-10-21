@@ -25,7 +25,7 @@ from .documents import (
     materialize_document_value,
     resolve_address,
 )
-from .errors import SessionClosed, SessionFailed
+from .errors import SessionClosed, SessionFailed, StorageRequestError
 from .json import copy_json
 from .state import CommittedWatch, DocumentState
 from .storage.base import Storage
@@ -495,6 +495,9 @@ class Session(TransactionHost):
         try:
             return await operation
         except asyncio.CancelledError:
+            raise
+        except StorageRequestError:
+            # An invalid request fails only that read.
             raise
         except BaseException as error:
             self._fail(error)

@@ -51,7 +51,7 @@ LiveDoc = define_doc(
     scope="conversation",
     history="latest",
     fork="initial",
-    initial=lambda: {"run": None, "step": None, "text": "", "tools": [], "nestedTools": {}, "compactions": {}},
+    initial=dict,
     checkpoint_when=ALWAYS_CHECKPOINT,
 )
 
@@ -71,7 +71,7 @@ UsageDoc = define_doc(
     scope="conversation",
     history="latest",
     fork="initial",
-    initial=lambda: {"total": empty_usage(), "models": {}, "tools": {}},
+    initial=lambda: {"models": {}, "tools": {}},
     checkpoint_when=ALWAYS_CHECKPOINT,
 )
 

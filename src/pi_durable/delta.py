@@ -17,10 +17,6 @@ Path = Sequence[str | int]
 Op = list[Any]
 
 
-def _container(value: Any) -> Any:
-    return value
-
-
 def _child(container: Any, segment: str | int, path: str) -> Any:
     if isinstance(segment, str):
         if not isinstance(container, dict):
@@ -218,30 +214,12 @@ class Tracker:
 
     def __init__(self, value: Any) -> None:
         self.value = copy_json(value)
-        self.open_changes: list[Change] = []
 
     def begin_change(self) -> Change:
-        change = Change(base=self.value, value=copy_json(self.value))
-        self.open_changes.append(change)
-        return change
+        return Change(base=self.value, value=copy_json(self.value))
 
     def adopt(self, prepared: Prepared) -> None:
         self.value = prepared.value
-        if prepared_ops_are_base(prepared.ops):
-            # A root replacement keeps only the new value; the tracker is already there.
-            pass
-
-    def abort_all(self) -> None:
-        for change in self.open_changes:
-            change.abort()
-        self.open_changes.clear()
-
-    def settle_all(self) -> None:
-        self.open_changes.clear()
-
-
-def prepared_ops_are_base(ops: Sequence[Op]) -> bool:
-    return is_base(ops)
 
 
 def track(value: Any) -> Tracker:

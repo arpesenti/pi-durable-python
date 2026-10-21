@@ -15,7 +15,7 @@ from ..errors import ConversationBusy
 from ..json import copy_json
 from ..scheduler import TaskScheduler
 from ..session import Session
-from ..types import TransactionScope
+from ..types import TaskOptions, TransactionScope
 from .agent import Agent, configure, read_agent_state, resolve_agent
 from .docs import AgentDoc, InboxDoc, LiveDoc, ProviderDoc, UsageDoc, add_usage
 from .generation import (
@@ -38,6 +38,7 @@ from .submissions import (
     STEER,
     WRITE,
     Submission,
+    apply_boundary,
     input_item,
     queued_submission,
     withdraw_queued_inputs,
@@ -187,6 +188,7 @@ class Harness(Session):
             report=self._scheduler_report,
             env=self._scheduler_env,
             read_context=lambda conversation_id, at: read_context(self, conversation_id, at),
+            settle_outcome=self._settle_scheduler_outcome,
         )
         self.scheduler.harness = self
         self.scheduler.conversation_handle = self._runtime_conversation
@@ -479,7 +481,6 @@ class Harness(Session):
             if not isinstance(draft.get("entry"), dict):
                 raise TypeError("A write submission requires an entry draft")
         request_id = draft.get("requestId")
-        admitted = {"scheduled": False}
 
         async def run(tx: Any) -> dict[str, Any]:
             if request_id is not None:
@@ -493,56 +494,111 @@ class Harness(Session):
                 task = await tx.task(run_state["taskId"])
                 busy = task is not None and task["state"]["status"] != "terminal"
                 if not busy:
-                    live["run"] = None
-            if kind == INPUT:
-                record = await tx.create_submission(
-                    queued_submission(
-                        conversation_id=conversation_id,
-                        draft=draft,
-                        request_id=request_id,
-                    )
+                    live.pop("run", None)
+            inbox = await tx.doc(InboxDoc, conversation_id)
+            inbox_waiting = bool(inbox.get("items"))
+            active_start = None
+            if inbox_waiting or (
+                kind == WRITE and draft["entry"].get("head") not in (None, "self")
+            ):
+                # Read the active range on the Session line, before the first table write.
+                marker = await tx.latest_head_marker(conversation_id)
+                active_start = marker["head"] if marker is not None else None
+            record = await tx.create_submission(
+                queued_submission(
+                    conversation_id=conversation_id,
+                    draft=draft,
+                    request_id=request_id,
                 )
+            )
+            if kind == INPUT:
+                mode = STEER if when_busy == "steer" else FOLLOW_UP
                 if busy:
                     if when_busy == "reject":
                         raise ConversationBusy(conversation_id)
-                    mode = STEER if when_busy == "steer" else FOLLOW_UP
-                    inbox = await tx.doc(InboxDoc, conversation_id)
-                    inbox["items"].append(input_item({**record, "content": draft.get("content")}, mode))
+                    inbox["items"].append(
+                        input_item(
+                            {
+                                **record,
+                                "content": draft.get("content"),
+                                "inputEntry": draft.get("entry"),
+                            },
+                            mode,
+                        )
+                    )
                     return record
-                entry = await tx.append_entry(
-                    conversation_id,
-                    self._input_entry(conversation_id, draft),
-                )
+                if inbox_waiting:
+                    # An idle conversation with a non-empty inbox queues the new input
+                    # behind the waiting items and runs a final boundary in this commit.
+                    inbox["items"].append(
+                        input_item(
+                            {
+                                **record,
+                                "content": draft.get("content"),
+                                "inputEntry": draft.get("entry"),
+                            },
+                            mode,
+                        )
+                    )
+                    await self._start_boundary_run(
+                        tx, conversation_id, live, active_start=active_start
+                    )
+                    return record
+                entry = await tx.append_entry(conversation_id, self._input_entry(conversation_id, draft))
                 tx.place_submission(record["id"], entry["id"])
                 task_id = await tx.create_task(
                     GenerationTask,
                     {"submissionIds": [record["id"]]},
-                    __import__("pi_durable.types", fromlist=["TaskOptions"]).TaskOptions(
-                        ownership={"kind": "conversation"}
-                    ),
+                    TaskOptions(ownership={"kind": "conversation"}),
                 )
-                live["run"] = {
-                    "taskId": task_id,
-                    "submissionIds": [record["id"]],
-                    "startedAt": self.now(),
-                }
-                admitted["scheduled"] = True
+                live["run"] = {"taskId": task_id, "inputs": [record["id"]]}
                 return record
-            record = await tx.create_submission(
-                queued_submission(conversation_id=conversation_id, draft=draft, request_id=request_id)
-            )
             if busy:
-                inbox = await tx.doc(InboxDoc, conversation_id)
                 inbox["items"].append(write_item({**record, "entry": draft["entry"]}))
+                return record
+            if inbox_waiting:
+                inbox["items"].append(write_item({**record, "entry": draft["entry"]}))
+                await self._start_boundary_run(
+                    tx, conversation_id, live, active_start=active_start
+                )
+                return record
+            head = draft["entry"].get("head")
+            if (
+                head is not None
+                and head != "self"
+                and active_start is not None
+                and int(head) < active_start
+            ):
+                tx.settle_submission(record["id"], {"status": "unanswered", "reason": "stale"})
                 return record
             entry = await tx.append_entry(conversation_id, copy_json(draft["entry"]))
             tx.place_submission(record["id"], entry["id"])
             return record
 
         record = await self.commit_with(run, TransactionScope(conversation_id=conversation_id))
-        if admitted["scheduled"]:
-            self.resume()
+        # Submitting enables scheduling, including for work queued behind a run.
+        self.resume()
         return Submission(self, record["id"])
+
+    async def _start_boundary_run(
+        self, tx: Any, conversation_id: int, live: Any, active_start: int | None = None
+    ) -> None:
+        """Apply a final boundary and create the successor run it selects, in this commit."""
+        boundary = await apply_boundary(
+            tx,
+            conversation_id=conversation_id,
+            final=True,
+            settings=self.settings,
+            now=self.now(),
+            active_start=active_start,
+        )
+        if boundary["inputs"]:
+            task_id = await tx.create_task(
+                GenerationTask,
+                {"submissionIds": boundary["inputs"]},
+                TaskOptions(ownership={"kind": "conversation"}),
+            )
+            live["run"] = {"taskId": task_id, "inputs": boundary["inputs"]}
 
     def _input_entry(self, conversation_id: int, draft: Mapping[str, Any]) -> dict[str, Any]:
         custom = draft.get("entry")
@@ -595,8 +651,12 @@ class Harness(Session):
             tx.settle_submission(submission_id, {"status": "unanswered", "reason": "aborted"})
 
         await self.commit_with(run, TransactionScope(conversation_id=conversation_id))
-        self.scheduler._wake.set()
+        self.scheduler.notify()
         return "aborted"
+
+    async def active_start(self, conversation_id: int) -> int | None:
+        marker = await self.storage.find_latest_head_marker(conversation_id, None)
+        return None if marker is None else int(marker["head"])
 
     async def placed_input_ids(self, conversation_id: int) -> list[int]:
         records = await self._scan_submissions(conversation_id, "placed")
@@ -683,50 +743,63 @@ class Harness(Session):
                 break
         for conversation in conversations:
             state = await self.snapshot(UsageDoc, conversation["id"])
-            if state is not None:
-                add_usage(total, state["total"])
+            if state is None:
+                continue
+            for bucket in (state.get("models") or {}).values():
+                add_usage(total, bucket)
+            for bucket in (state.get("tools") or {}).values():
+                add_usage(total, bucket)
         return total
 
     async def task_graph(self, context: Any = None) -> dict[str, Any]:
+        """Every live task as one structural graph, keyed by decimal task ID."""
         inspection = await self.inspect()
-        nodes: list[dict[str, Any]] = []
-        edges: list[dict[str, Any]] = []
+        tasks: dict[str, Any] = {}
         for entry in inspection.tasks:
             record = entry["record"]
-            node = {
-                "id": f"task:{record['id']}",
-                "type": "task",
-                "taskId": record["id"],
-                "name": record["kind"],
+            status = record["state"]["status"]
+            checkpoint = record["state"].get("checkpoint") or {}
+            phase = checkpoint.get("phase")
+            if status in ("pending", "running"):
+                state: dict[str, Any] = {"status": status, "phase": phase}
+            elif status == "waiting":
+                state = {
+                    "status": "waiting",
+                    "phase": phase,
+                    "on": list(record["state"].get("on") or []),
+                    "policy": record["state"].get("policy", "allSettled"),
+                }
+            elif status == "sleeping":
+                state = {"status": "sleeping", "phase": phase, "until": int(record["state"]["until"])}
+            elif status == "completing":
+                state = {"status": "completing", "outcome": record["state"]["outcome"]["status"]}
+            else:
+                continue
+            node: dict[str, Any] = {
+                "id": record["id"],
+                "kind": record["kind"],
                 "conversationId": record["conversationId"],
-                "status": entry["state"]["kind"],
-                "state": entry["state"],
+                "background": bool(record.get("background")),
+                "abortRequested": bool(record.get("abortRequested")),
+                "state": state,
+                "conversations": await self._owned_conversation_ids(record["id"]),
             }
             if record.get("owner") is not None:
-                node["ownerTaskId"] = record["owner"]
-                edges.append({"from": f"task:{record['owner']}", "to": node["id"], "kind": "owns"})
-            nodes.append(node)
-        for record in inspection.submissions:
-            node = {
-                "id": f"submission:{record['id']}",
-                "type": "submission",
-                "submissionId": record["id"],
-                "conversationId": record["conversationId"],
-                "status": record["status"],
-                "mode": record["type"],
-            }
-            nodes.append(node)
-            edges.append({"from": f"conversation:{record['conversationId']}", "to": node["id"], "kind": "admitted"})
-        for entry in inspection.tasks:
-            record = entry["record"]
-            edges.append(
-                {
-                    "from": f"conversation:{record['conversationId']}",
-                    "to": f"task:{record['id']}",
-                    "kind": "runs-in",
-                }
-            )
-        return {"nodes": nodes, "edges": edges}
+                node["owner"] = record["owner"]
+            if entry["state"]["kind"] == "blocked":
+                node["blocked"] = entry["state"]["reason"]
+            tasks[str(record["id"])] = node
+        return {"tasks": tasks}
+
+    async def _owned_conversation_ids(self, task_id: int) -> list[int]:
+        ids: list[int] = []
+        cursor = None
+        while True:
+            page = await self.storage.scan_conversations({"ownerTaskId": task_id}, 256, cursor)
+            ids.extend(record["id"] for record in page["items"])
+            cursor = page.get("next")
+            if cursor is None:
+                return sorted(ids)
 
     # ── View ───────────────────────────────────────────────────────────────
 
@@ -751,6 +824,39 @@ class Harness(Session):
     async def _runtime_conversation(self, conversation_id: int, runtime: Any) -> Conversation | None:
         record = await self.storage.conversation(conversation_id)
         return None if record is None else Conversation(self, conversation_id)
+
+    # ── Scheduler-written outcome cleanup ──────────────────────────────────
+
+    async def _settle_scheduler_outcome(
+        self, tx: Any, record: Mapping[str, Any], outcome: Mapping[str, Any]
+    ) -> None:
+        """Clean up the effects a faulted or orphaned built-in task can no longer settle."""
+        conversation_id = record["conversationId"]
+        kind = record["kind"]
+        if kind == ToolTask.definition.name:
+            live = await tx.doc(LiveDoc, conversation_id)
+            for slot in live.get("tools") or []:
+                if slot.get("taskId") == record["id"]:
+                    slot["status"] = "done"
+            live.pop("nestedTools", None)
+            return
+        if kind != GenerationTask.definition.name:
+            return
+        live = await tx.doc(LiveDoc, conversation_id)
+        run = live.get("run")
+        if not run or run.get("taskId") != record["id"]:
+            return
+        faulted = outcome.get("status") == "faulted"
+        reason = "faulted" if faulted else str(outcome.get("reason") or "orphaned")
+        detail = outcome.get("error", {}).get("message") if faulted else None
+        for submission_id in run.get("inputs") or run.get("submissionIds") or []:
+            settlement: dict[str, Any] = {"status": "unanswered", "reason": reason}
+            if detail is not None:
+                settlement["detail"] = {"message": detail}
+            tx.settle_submission(submission_id, settlement)
+        live.pop("run", None)
+        live.pop("generation", None)
+        live.pop("tools", None)
 
     # ── Close ──────────────────────────────────────────────────────────────
 

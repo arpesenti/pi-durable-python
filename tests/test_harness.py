@@ -235,7 +235,7 @@ async def test_busy_conversation_queues_steers_followups_and_writes():
         "pi.assistant",
     ]
     assert (await harness.snapshot(InboxDoc, root.id))["items"] == []
-    assert (await harness.snapshot(LiveDoc, root.id))["run"] is None
+    assert (await harness.snapshot(LiveDoc, root.id)).get("run") is None
     assert len(faux.requests) == 2
     await harness.close()
 
@@ -265,7 +265,7 @@ async def test_conversation_abort_withdraws_queued_inputs_and_aborts_the_run():
     assert first_record["reason"] == "aborted"
     assert queued_record["status"] == "unanswered"
     assert queued_record["reason"] == "aborted"
-    assert (await harness.snapshot(LiveDoc, root.id))["run"] is None
+    assert (await harness.snapshot(LiveDoc, root.id)).get("run") is None
     assert [task["record"]["kind"] for task in (await harness.inspect()).tasks] == []
     await harness.close()
 
@@ -323,7 +323,7 @@ async def test_agent_without_model_fails_the_run_durably():
     record = await asyncio.wait_for(submission.wait(), 5)
     assert record["status"] == "unanswered"
     assert record["reason"] == "no_model"
-    assert (await harness.snapshot(LiveDoc, root.id))["run"] is None
+    assert (await harness.snapshot(LiveDoc, root.id)).get("run") is None
     await harness.close()
 
 
@@ -355,8 +355,11 @@ async def test_inspect_and_task_graph_report_live_work():
     assert inspection.tasks[0]["state"]["kind"] == "running"
     assert [item["id"] for item in inspection.submissions] == [submission.id]
     graph = await harness.task_graph()
-    assert any(node["type"] == "task" for node in graph["nodes"])
-    assert any(edge["kind"] == "runs-in" for edge in graph["edges"])
+    assert len(graph["tasks"]) == 1
+    node = next(iter(graph["tasks"].values()))
+    assert node["kind"] == "pi.generation"
+    assert node["state"]["status"] == "running"
+    assert node["id"] == inspection.tasks[0]["record"]["id"]
     held.set()
     await asyncio.wait_for(submission.wait(), 5)
     assert (await harness.inspect()).tasks == []

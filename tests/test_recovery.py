@@ -90,6 +90,20 @@ async def test_open_counts_a_restart_and_resumes_the_task(storage_factory):
     await harness.close()
 
 
+async def test_progress_clears_the_restart_count(storage_factory):
+    runs = []
+    task = make_task(runs)
+    storage, task_id = await seed_running_task(storage_factory, task)
+    record = await storage.task(task_id)
+    # Pretend earlier crashes left a high count without reaching this session's limit.
+    await storage.commit([{"type": "task", "value": {**record, "restarts": 4}}])
+    harness = await open_harness(storage, task, limit=10)
+    harness.resume()
+    settled = await asyncio.wait_for(harness.wait_for_task(task_id), 5)
+    assert "restarts" not in settled
+    await harness.close()
+
+
 async def test_restart_limit_parks_the_task_until_retry(storage_factory):
     runs = []
     reports = []
@@ -117,6 +131,8 @@ async def test_abandon_on_restart_marks_and_aborts_the_task(storage_factory):
     task = make_task(runs)
     storage, task_id = await seed_running_task(storage_factory, task, abandon=True)
     harness = await open_harness(storage, task)
+    # Opening alone marks nothing; the first scheduling pass abandons the task.
+    assert not (await harness.get_task(task_id)).get("abortRequested")
     harness.resume()
     settled = await asyncio.wait_for(harness.wait_for_task(task_id), 5)
     assert settled["state"]["outcome"] == {"status": "aborted", "reason": "aborted"}

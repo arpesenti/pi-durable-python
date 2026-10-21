@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..json import copy_json
+from ..types import Cursor, Page
 from .memory import MemoryStorage
 
 
@@ -32,46 +33,54 @@ class JournalStorage:
     async def mint_id(self) -> int:
         return await self._mirror.mint_id()
 
-    async def conversation(self, conversation_id: int):
+    async def conversation(self, conversation_id: int) -> dict[str, Any] | None:
         return await self._mirror.conversation(conversation_id)
 
-    async def scan_conversations(self, query, limit, cursor=None):
+    async def scan_conversations(
+        self, query: Mapping[str, Any], limit: int, cursor: Cursor | None = None
+    ) -> Page:
         return await self._mirror.scan_conversations(query, limit, cursor)
 
-    async def entry(self, conversation_id: int, entry_id: int):
+    async def entry(self, conversation_id: int, entry_id: int) -> Mapping[str, Any] | None:
         return await self._mirror.entry(conversation_id, entry_id)
 
-    async def entry_by_id(self, entry_id: int):
+    async def entry_by_id(self, entry_id: int) -> dict[str, Any] | None:
         return await self._mirror.entry_by_id(entry_id)
 
-    async def find_latest_head_marker(self, conversation_id: int, at_or_before: int | None = None):
+    async def find_latest_head_marker(
+        self, conversation_id: int, at_or_before: int | None = None
+    ) -> Mapping[str, Any] | None:
         return await self._mirror.find_latest_head_marker(conversation_id, at_or_before)
 
-    async def scan_entries(self, query, limit, cursor=None):
+    async def scan_entries(self, query: Mapping[str, Any], limit: int, cursor: Cursor | None = None) -> Page:
         return await self._mirror.scan_entries(query, limit, cursor)
 
-    async def task(self, task_id: int):
+    async def task(self, task_id: int) -> dict[str, Any] | None:
         return await self._mirror.task(task_id)
 
-    async def scan_tasks(self, query, limit, cursor=None):
+    async def scan_tasks(self, query: Mapping[str, Any], limit: int, cursor: Cursor | None = None) -> Page:
         return await self._mirror.scan_tasks(query, limit, cursor)
 
-    async def submission(self, submission_id: int):
+    async def submission(self, submission_id: int) -> dict[str, Any] | None:
         return await self._mirror.submission(submission_id)
 
-    async def scan_submissions(self, query, limit, cursor=None):
+    async def scan_submissions(
+        self, query: Mapping[str, Any], limit: int, cursor: Cursor | None = None
+    ) -> Page:
         return await self._mirror.scan_submissions(query, limit, cursor)
 
-    async def submission_by_request(self, conversation_id: int, request_id: str):
+    async def submission_by_request(self, conversation_id: int, request_id: str) -> dict[str, Any] | None:
         return await self._mirror.submission_by_request(conversation_id, request_id)
 
-    async def find_document(self, address, at):
+    async def find_document(self, address: Mapping[str, Any], at: int | str) -> dict[str, Any] | None:
         return await self._mirror.find_document(address, at)
 
-    async def document(self, document_id: int, at):
+    async def document(self, document_id: int, at: int | str) -> Mapping[str, Any] | None:
         return await self._mirror.document(document_id, at)
 
-    async def scan_documents(self, query, limit, cursor=None):
+    async def scan_documents(
+        self, query: Mapping[str, Any], limit: int, cursor: Cursor | None = None
+    ) -> Page:
         return await self._mirror.scan_documents(query, limit, cursor)
 
     async def close(self) -> None:

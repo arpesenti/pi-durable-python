@@ -100,7 +100,7 @@ def page(values: Sequence[Any], limit: int, order: ScanOrder = "ascending") -> P
     if limit < 0:
         raise StorageRequestError("limit must not be negative")
     items = list(values[:limit])
-    if len(values) <= limit:
+    if len(values) <= limit or not items:
         return make_page(items)
     return make_page(items, next_cursor(items[-1]["id"], order))
 

@@ -45,13 +45,8 @@ class TaskFaulted(RuntimeError):
     """A task phase threw or made no durable progress."""
 
 
-class DocumentAbsent(LookupError):
-    """A document address is absent where the operation required one."""
-
-
 __all__ = [
     "ConversationBusy",
-    "DocumentAbsent",
     "InvocationEnded",
     "ReadAfterWrite",
     "SessionClosed",

@@ -261,7 +261,6 @@ async def _add_usage(tx: Any, conversation_id: int, usage: Mapping[str, Any] | N
     if not usage:
         return
     doc = await tx.doc(UsageDoc, conversation_id)
-    add_usage(doc["total"], usage)
     models = doc["models"]
     if key not in models:
         models[key] = {"input": 0, "output": 0, "total": 0, "cost": 0.0}
@@ -328,7 +327,6 @@ async def _appended_tool_result(
         )
         if usage:
             doc = await tx.doc(UsageDoc, conversation_id)
-            add_usage(doc["total"], usage)
             if key not in doc["tools"]:
                 doc["tools"][key] = {"input": 0, "output": 0, "total": 0, "cost": 0.0}
             add_usage(doc["tools"][key], usage)
@@ -388,6 +386,7 @@ async def generation_turn(task: dict[str, Any], runtime: Any) -> None:
     calls = [item for item in message.get("content") or [] if item.get("type") == "toolCall"]
     placed = await harness.placed_input_ids(conversation_id)
     settings = harness.settings
+    active_start = await harness.active_start(conversation_id)
 
     if calls:
 
@@ -423,10 +422,9 @@ async def generation_turn(task: dict[str, Any], runtime: Any) -> None:
                 final=False,
                 settings=settings,
                 now=runtime.now(),
+                active_start=active_start,
             )
             live = await tx.doc(LiveDoc, conversation_id)
-            live["step"] = "tools"
-            live["text"] = ""
             live["tools"] = slots
             return {
                 "status": "waiting",
@@ -449,20 +447,19 @@ async def generation_turn(task: dict[str, Any], runtime: Any) -> None:
             final=True,
             settings=settings,
             now=runtime.now(),
+            active_start=active_start,
         )
         live = await tx.doc(LiveDoc, conversation_id)
-        live["step"] = None
-        live["text"] = ""
-        live["tools"] = []
-        next_run = None
+        live.pop("tools", None)
         if boundary["inputs"]:
             next_task = await tx.create_task(
                 GenerationTask,
                 {"submissionIds": boundary["inputs"]},
                 TaskOptions(ownership={"kind": "conversation"}),
             )
-            next_run = {"taskId": next_task, "submissionIds": boundary["inputs"], "startedAt": runtime.now()}
-        live["run"] = copy_json(next_run)
+            live["run"] = {"taskId": next_task, "inputs": boundary["inputs"]}
+        else:
+            live.pop("run", None)
         return {
             "status": "terminal",
             "outcome": {"status": "completed", "result": {"entryId": entry["id"]}},
@@ -493,10 +490,8 @@ async def _fail_run(
                 },
             )
         live = await tx.doc(LiveDoc, conversation_id)
-        live["step"] = None
-        live["text"] = ""
-        live["tools"] = []
-        live["run"] = None
+        live.pop("tools", None)
+        live.pop("run", None)
         inbox = await tx.doc(InboxDoc, conversation_id)
         if settings.after_failed_run == "withdraw":
             await withdraw_queued_inputs(tx, conversation_id, reason="run_failed")
@@ -507,6 +502,7 @@ async def _fail_run(
                 final=True,
                 settings=settings,
                 now=runtime.now(),
+                active_start=await harness.active_start(conversation_id),
             )
             if boundary["inputs"]:
                 next_task = await tx.create_task(
@@ -514,11 +510,7 @@ async def _fail_run(
                     {"submissionIds": boundary["inputs"]},
                     TaskOptions(ownership={"kind": "conversation"}),
                 )
-                live["run"] = {
-                    "taskId": next_task,
-                    "submissionIds": boundary["inputs"],
-                    "startedAt": runtime.now(),
-                }
+                live["run"] = {"taskId": next_task, "inputs": boundary["inputs"]}
         return {
             "status": "terminal",
             "outcome": {"status": "failed", "error": {"message": message}},
@@ -537,10 +529,8 @@ async def generation_abort(task: dict[str, Any], runtime: Any) -> None:
             tx.settle_submission(submission_id, {"status": "unanswered", "reason": "aborted"})
         await withdraw_queued_inputs(tx, conversation_id, reason="aborted")
         live = await tx.doc(LiveDoc, conversation_id)
-        live["step"] = None
-        live["text"] = ""
-        live["tools"] = []
-        live["run"] = None
+        live.pop("tools", None)
+        live.pop("run", None)
         return {"status": "terminal", "outcome": {"status": "aborted", "reason": "aborted"}}
 
     await runtime.commit(commit)
@@ -633,8 +623,35 @@ async def _execute_tool(task: dict[str, Any], runtime: Any) -> None:
 
 
 async def tool_abort(task: dict[str, Any], runtime: Any) -> None:
+    """Commit an aborted tool result, then end the tool task aborted."""
+    conversation_id = task["conversationId"]
+    call = task["input"]["call"]
+
     async def commit(tx: Any, current: dict[str, Any]) -> dict[str, Any]:
-        return {"status": "terminal", "outcome": {"status": "aborted", "reason": "aborted"}}
+        entry = await tx.append_entry(
+            conversation_id,
+            {
+                "kind": "pi.tool-result",
+                "model": [
+                    tool_result_message(
+                        call["id"],
+                        call.get("name"),
+                        [text_content("Tool call aborted.")],
+                        is_error=True,
+                        timestamp=runtime.now(),
+                    )
+                ],
+                "data": {
+                    "diagnostics": [
+                        {"severity": "error", "message": "Tool call aborted.", "code": "aborted"}
+                    ]
+                },
+            },
+        )
+        return {
+            "status": "terminal",
+            "outcome": {"status": "aborted", "reason": "aborted", "result": {"entryId": entry["id"]}},
+        }
 
     await runtime.commit(commit)
 

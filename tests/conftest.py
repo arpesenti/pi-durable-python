@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from typing import Any
 
@@ -30,6 +31,9 @@ class StorageFactory:
 
 
 @pytest.fixture(params=["memory", "jsonl", "sqlite"])
-async def storage_factory(request: pytest.FixtureRequest) -> StorageFactory:
+async def storage_factory(request: pytest.FixtureRequest):
     factory = StorageFactory(request.param)
-    yield factory
+    try:
+        yield factory
+    finally:
+        shutil.rmtree(factory.directory, ignore_errors=True)

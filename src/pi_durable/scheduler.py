@@ -50,6 +50,7 @@ class TaskScheduler:
         report: Callable[[BaseException, Mapping[str, Any], Mapping[str, Any] | None], None],
         env: Callable[[int], Awaitable[Any]],
         read_context: Callable[[int, int | None], Awaitable[dict[str, Any]]],
+        settle_outcome: Callable[[Any, Mapping[str, Any], Mapping[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self.session = session
         self.registry = registry
@@ -59,6 +60,7 @@ class TaskScheduler:
         self._report = report
         self._env = env
         self._read_context = read_context
+        self._settle_outcome = settle_outcome
         self.conversation_handle: Callable[[int, TaskRuntime], Awaitable[Any]] | None = None
         self.harness: Any = None
         self._live: dict[int, dict[str, Any]] = {}
@@ -114,10 +116,6 @@ class TaskScheduler:
             "conversationId": record["conversationId"],
         }
 
-    def forget_invocation(self, task_id: int) -> None:
-        # The invocation itself cleans up its slot; this hook exists for runtimes that end early.
-        pass
-
     # ── Open / recover ─────────────────────────────────────────────────────
 
     async def open(self) -> None:
@@ -134,13 +132,8 @@ class TaskScheduler:
             if state["status"] != "running":
                 continue
             updated = copy_json(record)
-            if updated.get("abandonOnRestart"):
-                updated["abortRequested"] = True
-                updated["abortReason"] = "restart"
-                updated["state"] = {"status": "pending", "checkpoint": state.get("checkpoint")}
-            else:
-                updated["restarts"] = int(updated.get("restarts") or 0) + 1
-                updated["state"] = {"status": "pending", "checkpoint": state.get("checkpoint")}
+            updated["restarts"] = int(updated.get("restarts") or 0) + 1
+            updated["state"] = {"status": "pending", "checkpoint": state.get("checkpoint")}
             changes.append(updated)
         if changes:
             await self._write_records(changes)
@@ -294,7 +287,7 @@ class TaskScheduler:
             raise ValueError(f"Task {task_id} does not exist")
         if record["state"]["status"] == "terminal":
             return "terminal"
-        await self._mark(task_id, set())
+        await self._mark(task_id, set(), reason=None)
         invocation = self._invocations.get(task_id)
         if invocation is not None:
             try:
@@ -314,39 +307,62 @@ class TaskScheduler:
         self._wake.set()
         return "marked"
 
-    async def _mark(self, task_id: int, visited: set[int]) -> None:
+    async def _mark(self, task_id: int, visited: set[int], *, reason: str | None = None) -> None:
         if task_id in visited:
             return
         visited.add(task_id)
         record = await self.get_task(task_id)
         if record is None or record["state"]["status"] == "terminal":
             return
-        if not record.get("abortRequested"):
+        if not record.get("abortRequested") or (
+            reason is None and record.get("abortReason") is not None
+        ):
 
-            def mark(current: dict[str, Any]) -> dict[str, Any]:
+            def mark(current: dict[str, Any], reason: str | None = reason) -> dict[str, Any]:
                 updated = copy_json(current)
+                was_marked = bool(current.get("abortRequested"))
                 updated["abortRequested"] = True
-                updated.pop("abortReason", None)
+                if reason is None:
+                    updated.pop("abortReason", None)
+                elif not was_marked:
+                    updated["abortReason"] = "restart"
                 return updated
 
             await self._update_task(task_id, mark)
         runtime = self._runtimes.get(task_id)
         if runtime is not None:
             runtime.signal.set()
+        if reason is None:
+            cascade_reason = None
+        elif record.get("abortReason") == "restart" or not record.get("abortRequested"):
+            cascade_reason = "restart"
+        else:
+            cascade_reason = record.get("abortReason")
         # Cascade to direct children and the conversations this task owns.
         for child in list(self._live.values()):
             if child.get("owner") == task_id and not child.get("background"):
-                await self._mark(child["id"], visited)
+                await self._mark(child["id"], visited, reason=cascade_reason)
         for conversation in await self._conversations_owned_by(task_id):
             for task in await self._tasks_in_conversation(conversation):
                 if not task.get("background"):
-                    await self._mark(task["id"], visited)
+                    await self._mark(task["id"], visited, reason=cascade_reason)
+
+    async def _mark_owned(self, task_id: int, *, reason: str | None = None) -> None:
+        """Mark the ordinary owned work of a task, without marking the task itself."""
+        visited: set[int] = set()
+        for child in list(self._live.values()):
+            if child.get("owner") == task_id and not child.get("background"):
+                await self._mark(child["id"], visited, reason=reason)
+        for conversation in await self._conversations_owned_by(task_id):
+            for task in await self._tasks_in_conversation(conversation):
+                if not task.get("background"):
+                    await self._mark(task["id"], visited, reason=reason)
 
     async def abort_scope(self, conversation_id: int, *, background: bool = False) -> None:
         visited: set[int] = set()
         for task in await self._tasks_in_conversation(conversation_id):
             if background or not task.get("background"):
-                await self._mark(task["id"], visited)
+                await self._mark(task["id"], visited, reason=None)
         self._wake.set()
 
     async def _conversations_owned_by(self, task_id: int) -> list[int]:
@@ -412,6 +428,10 @@ class TaskScheduler:
         return [cid for cid, owner in self._conversation_owners.items() if owner == task_id]
 
     # ── Wake ───────────────────────────────────────────────────────────────
+
+    def notify(self) -> None:
+        """Wake the scheduling loop; used by admission, abort, and retry paths."""
+        self._wake.set()
 
     def wake(self) -> dict[str, Any]:
         active = False
@@ -499,10 +519,10 @@ class TaskScheduler:
             elif status == "sleeping" and int(state["until"]) <= self.now():
                 await self._set_state(record["id"], {"status": "pending", "checkpoint": state["checkpoint"]})
             elif status == "completing":
-                if not self.has_live_owned_work(record["id"]):
-                    await self._set_state(
-                        record["id"], {"status": "terminal", "outcome": state["outcome"]}
-                    )
+                if state["outcome"].get("status") != "completed" and self.has_live_owned_work(record["id"]):
+                    # A held non-completed outcome is cancellation intent for the work below.
+                    await self._mark_owned(record["id"])
+                await self._finalize_completing(record["id"])
 
     async def _spawn_ready(self) -> None:
         for record in list(self._live.values()):
@@ -521,12 +541,44 @@ class TaskScheduler:
             task_id = record["id"]
             if task_id in self._reserved or task_id in self._invocations:
                 continue
+            if record.get("abandonOnRestart") and not record.get("abortRequested"):
+                # Opening alone marks nothing; the first reservation pass abandons the task.
+                await self._mark(task_id, set(), reason="restart")
+                continue
+            owner_cancelled, owner_reason = self._owner_cancellation(record)
+            if not record.get("abortRequested") and owner_cancelled:
+                await self._mark(task_id, set(), reason=owner_reason)
+                continue
             if self._parked(record):
                 self._report_parked(record)
                 continue
             definition = self._definition(record)
+            if (
+                record.get("abortRequested")
+                and record.get("abortReason") != "restart"
+                and definition is not None
+                and int(record.get("restarts") or 0) >= self.restart_limit
+            ):
+                await self._finish(
+                    task_id,
+                    {
+                        "status": "faulted",
+                        "error": {
+                            "message": (
+                                f"Abort handler of task {task_id} was cut off "
+                                f"{record.get('restarts')} times"
+                            )
+                        },
+                    },
+                    report={"type": "task_faulted", "reason": "restart_limit"},
+                )
+                continue
             if definition is None:
-                if record.get("abortRequested") and not self.has_live_owned_work(task_id):
+                if (
+                    record.get("abortRequested")
+                    and record.get("abortReason") != "restart"
+                    and not self.has_live_owned_work(task_id)
+                ):
                     await self._finish(
                         task_id,
                         {"status": "orphaned", "reason": "missing_task"},
@@ -535,7 +587,11 @@ class TaskScheduler:
                 continue
             stored_version = int(record["version"])
             if stored_version > definition.version:
-                if record.get("abortRequested") and not self.has_live_owned_work(task_id):
+                if (
+                    record.get("abortRequested")
+                    and record.get("abortReason") != "restart"
+                    and not self.has_live_owned_work(task_id)
+                ):
                     await self._finish(
                         task_id,
                         {"status": "orphaned", "reason": "incompatible_task"},
@@ -631,6 +687,12 @@ class TaskScheduler:
                 raise TaskFaulted(
                     f"Task {task_id} phase {record['state'].get('checkpoint', {}).get('phase')!r} returned without durable progress"
                 )
+            if mode == "abort":
+                latest = runtime.last_record or await self.get_task(task_id)
+                if latest is None or latest["state"]["status"] not in ("terminal", "completing"):
+                    raise TaskFaulted(
+                        f"Abort handler of task {task_id} returned without a terminal outcome"
+                    )
         except TaskAborted:
             pass
         except asyncio.CancelledError:
@@ -691,19 +753,65 @@ class TaskScheduler:
         *,
         report: Mapping[str, Any] | None = None,
     ) -> None:
-        def change(current: dict[str, Any]) -> dict[str, Any] | None:
-            if current["state"]["status"] == "terminal":
-                return None
-            updated = copy_json(current)
-            updated["state"] = {"status": "terminal", "outcome": copy_json(outcome)}
-            return updated
+        """Write a scheduler-decided outcome, holding it while ordinary owned work is live."""
 
-        await self._update_task(task_id, change)
+        async def run(tx: Any) -> None:
+            current = await tx._current_task(task_id)
+            if current is None or current["state"]["status"] in ("terminal", "completing"):
+                return
+            updated = copy_json(current)
+            if self.has_live_owned_work(task_id):
+                updated["state"] = {"status": "completing", "outcome": copy_json(outcome)}
+            else:
+                updated["state"] = {"status": "terminal", "outcome": copy_json(outcome)}
+                if outcome.get("status") in ("faulted", "orphaned") and self._settle_outcome is not None:
+                    await self._settle_outcome(tx, current, outcome)
+            await tx.set_task(updated)
+
+        await self.session.commit_with(run, TransactionScope(task_id=task_id))
+        if outcome.get("status") != "completed" and self.has_live_owned_work(task_id):
+            await self._mark_owned(task_id)
         if report is not None:
             record = await self.get_task(task_id)
             if record is not None:
                 info = {**report, "task": self.task_info(record)}
                 self.report(RuntimeError(str(outcome.get("error", outcome))), info)
+
+    async def _finalize_completing(self, task_id: int) -> None:
+        """Turn a held outcome terminal once no ordinary owned work is live."""
+        if self.has_live_owned_work(task_id):
+            return
+
+        async def run(tx: Any) -> None:
+            current = await tx._current_task(task_id)
+            if current is None or current["state"]["status"] != "completing":
+                return
+            outcome = current["state"]["outcome"]
+            updated = copy_json(current)
+            updated["state"] = {"status": "terminal", "outcome": copy_json(outcome)}
+            if outcome.get("status") in ("faulted", "orphaned") and self._settle_outcome is not None:
+                await self._settle_outcome(tx, current, outcome)
+            await tx.set_task(updated)
+
+        await self.session.commit_with(run, TransactionScope(task_id=task_id))
+
+    def _owner_cancellation(self, record: Mapping[str, Any]) -> tuple[bool, str | None]:
+        """Whether an owner above this task carries cancellation intent, and why."""
+        owner_id = record.get("owner")
+        visited: set[int] = set()
+        while owner_id is not None and owner_id not in visited:
+            visited.add(owner_id)
+            owner = self._live.get(owner_id)
+            if owner is None:
+                return False, None
+            if owner.get("abortRequested"):
+                reason = "restart" if owner.get("abortReason") == "restart" else None
+                return True, reason
+            state = owner["state"]
+            if state["status"] == "completing" and state["outcome"].get("status") != "completed":
+                return True, None
+            owner_id = owner.get("owner")
+        return False, None
 
     async def _update_task(
         self, task_id: int, change: Callable[[dict[str, Any]], dict[str, Any] | None]

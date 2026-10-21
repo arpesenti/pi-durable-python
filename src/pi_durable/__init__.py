@@ -18,7 +18,6 @@ from .documents import (
 from .draft import DocumentDraft
 from .errors import (
     ConversationBusy,
-    DocumentAbsent,
     InvocationEnded,
     ReadAfterWrite,
     SessionClosed,
@@ -123,7 +122,6 @@ __all__ = [
     "Cursor",
     "DocDefinition",
     "DocToken",
-    "DocumentAbsent",
     "DocumentDraft",
     "DocumentId",
     "DocumentState",
