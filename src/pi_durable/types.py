@@ -839,7 +839,7 @@ class WatchHandle(Protocol, Generic[JsonValueT_co]):
         """Install the sole asynchronous listener. Never invokes it inline."""
         ...
 
-    async def stop(self) -> WatchEnd:
+    def stop(self) -> asyncio.Future[WatchEnd]:
         """Idempotently stop future callbacks and return this watch's terminal result."""
         ...
 

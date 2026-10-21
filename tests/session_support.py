@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, cast
 
 from pi_durable import MemoryStorage
@@ -29,6 +30,33 @@ async def flush() -> None:
 
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+
+
+class Deferred:
+    """A one-shot signal: resolvable from a callback and awaitable by the test."""
+
+    def __init__(self) -> None:
+        self._future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    @property
+    def promise(self) -> asyncio.Future[None]:
+        return self._future
+
+    def resolve(self) -> None:
+        if not self._future.done():
+            self._future.set_result(None)
+
+
+async def eventually(check: Callable[[], Awaitable[bool]], timeout: float = 2.0) -> None:
+    """Await until ``check`` is true, polling like the upstream test helper does."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if await check():
+            return
+        if time.monotonic() > deadline:
+            raise AssertionError("condition was not met in time")
+        await asyncio.sleep(0.01)
 
 
 class Gate:
@@ -135,10 +163,12 @@ async def create_conversation(session: SessionImpl) -> ConversationId:
 
 __all__ = [
     "ControlledStorage",
+    "Deferred",
     "Gate",
     "context",
     "create_conversation",
     "document_changes",
+    "eventually",
     "flush",
     "open_test_session",
 ]

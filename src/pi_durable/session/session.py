@@ -6,12 +6,13 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from ..context import BACKGROUND_CONTEXT, Context, without_abort_signal
 from ..documents import (
     AnyDocToken,
     DocDefinition,
+    address_id,
     check_record_scope,
     check_record_version,
     materialize_document,
@@ -47,15 +48,44 @@ from ..types import (
 from .observation import CommittedWatch, ObservedDocumentValue, observed_operations
 from .transaction import LoadedDocument, Transaction, TransactionScope
 
+#: Default document retention: ten minutes, as for kept contexts.
 _DEFAULT_DOCUMENT_RETENTION_MS = 600_000
 
+#: Longest delay a loop timer accepts; a longer retention waits in several steps.
+_MAX_TIMER_DELAY_MS = 2_147_483_647
 
-def _document_retention(value: int | None) -> int:
-    """Return a retention as given when valid, otherwise the default."""
+_default_document_retention: int | float = _DEFAULT_DOCUMENT_RETENTION_MS
 
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return _DEFAULT_DOCUMENT_RETENTION_MS
+
+def set_default_document_retention(ms: int | float) -> None:
+    """Internal, for tests: the retention of every Session that keeps the default."""
+
+    global _default_document_retention
+    _default_document_retention = ms
+
+
+def document_retention(ms: int | float | None) -> int | float:
+    """Return a retention as given when it is a number of milliseconds, ``0`` or more.
+
+    ``Infinity`` keeps documents; a value that is not a number of milliseconds means the
+    default, as v1.3.0 does.
+    """
+
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0:
+        return ms
+    return _default_document_retention
+
+
+def _schedule_document_timer(
+    delay_ms: float, run: Callable[[], None]
+) -> asyncio.TimerHandle | None:
+    """Schedule one eviction that never keeps the process alive.
+
+    An asyncio timer cannot keep a process alive once its loop ends, so every Python loop can
+    keep one. ``None`` means this loop cannot, and then only commits evict (spec §4).
+    """
+
+    return asyncio.get_running_loop().call_later(delay_ms / 1000.0, run)
 
 
 def create_session(storage: Storage, options: dict[str, Any] | None = None, **kwargs: Any) -> SessionImpl:
@@ -85,6 +115,15 @@ def _validate_document(definition: DocDefinition, loaded: LoadedDocument) -> Non
     check_record_version(definition, loaded.record, loaded.stored_version)
 
 
+def _record_address_id(record: DocumentRecord) -> str:
+    """Return the cache identity of one committed document record."""
+
+    address: DocumentAddress = {"kind": record["kind"], "scope": record["scope"]}
+    if "key" in record:
+        address["key"] = record["key"]
+    return address_id(address)
+
+
 @dataclass(slots=True)
 class Delivery:
     """One state delivery: hydration at sequence 0, then one per committed update."""
@@ -99,16 +138,36 @@ class _WatchAttachment:
 
     record_id: DocumentId
     watch: CommittedWatch
+    release: Callable[[], None]
+
+
+@dataclass(slots=True)
+class _DocumentSweep:
+    """The pending eviction: a timer for the oldest idle document, or a line job at once."""
+
+    at: int | float
+    timer: asyncio.TimerHandle | None = None
+
+
+class DocumentCacheSizes(TypedDict):
+    """Internal, for tests: how many documents the cache holds and pins, and its sweep jobs."""
+
+    cached: int
+    idle: int
+    attached: int
+    sweeps: int
 
 
 class DocumentState:
     """Disposable, read-only committed state bound to one document incarnation."""
 
     __slots__ = (
+        "_closed",
         "_disposed",
         "_listeners",
         "_observed_version",
         "_record_id",
+        "_release",
         "_session",
         "_sequence",
         "_value",
@@ -120,14 +179,17 @@ class DocumentState:
         record_id: DocumentId,
         value: JsonObject,
         observed_version: int,
+        release: Callable[[], None],
     ) -> None:
         self._session = session
         self._record_id = record_id
         self._value: JsonObject | None = value
         self._observed_version = observed_version
+        self._release = release
         self._sequence = 0
         self._listeners: list[Callable[[Any, Context, Delivery], Any]] = []
         self._disposed = False
+        self._closed = False
 
     @property
     def value(self) -> JsonObject | None:
@@ -156,10 +218,16 @@ class DocumentState:
             return
         self._disposed = True
         self._listeners.clear()
+        self._release_pin()
         self._session._detach_state(self)
 
+    def _release_pin(self) -> None:
+        """A retired incarnation keeps its last value but pins nothing (spec §4)."""
+
+        self._release()
+
     def _advance(self, value: JsonObject | None, context: Context) -> None:
-        if self._disposed:
+        if self._disposed or self._closed:
             return
         self._value = value
         self._sequence += 1
@@ -168,7 +236,13 @@ class DocumentState:
             self._deliver(listener, value, without_abort_signal(context), delivery)
 
     def _close_session(self) -> None:
+        """Keep the last value at the Session's seal and receive no commit that settles later."""
+
+        if self._closed:
+            return
+        self._closed = True
         self._listeners.clear()
+        self._release_pin()
 
     @staticmethod
     def _deliver(
@@ -222,9 +296,17 @@ class SessionImpl:
         self,
         storage: Storage,
         now: Callable[[], int] | None = None,
-        document_retention_ms: int | Callable[[], int | None] | None = None,
+        document_retention_ms: int | float | Callable[[], int | float | None] | None = None,
     ) -> None:
         self._documents: dict[str, LoadedDocument] = {}
+        # Cached documents with no observer attached, by address, oldest use first.
+        self._idle_documents: dict[str, int | float] = {}
+        # Observers attached per incarnation (record ID); a cached incarnation with any stays.
+        self._attached_documents: dict[DocumentId, int] = {}
+        self._document_sweep: _DocumentSweep | None = None
+        self._sweep_jobs = 0
+        self._sweep_tasks: set[asyncio.Task[None]] = set()
+        self._document_timers_unavailable = False
         self._states: list[DocumentState] = []
         self._watches: list[_WatchAttachment] = []
         self._commit_listeners: list[Callable[[CommitPublication, Context], Any]] = []
@@ -237,7 +319,6 @@ class SessionImpl:
         self._closed: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._failed.add_done_callback(lambda future: future.exception())
         self._clock_fn = now or _now_ms
-        self._retention_setting = document_retention_ms
 
         def clock() -> int:
             try:
@@ -245,7 +326,15 @@ class SessionImpl:
             except Exception:
                 return _now_ms()
 
+        def retention() -> int | float:
+            try:
+                value = document_retention_ms() if callable(document_retention_ms) else document_retention_ms
+                return document_retention(value)
+            except Exception:
+                return document_retention(None)
+
         self._clock = clock
+        self._document_retention_ms = retention
         self._storage = GuardedStorage(storage, self)
         self._host = _SessionHost(self)
 
@@ -314,10 +403,12 @@ class SessionImpl:
                 self._assert_healthy()
             except BaseException:
                 await tx.settle_failure()
+                self._sweep_documents()
                 raise
             try:
                 writes = await tx.settle_success()
             except BaseException:
+                self._sweep_documents()
                 raise
             if not writes:
                 tx.discard()
@@ -333,6 +424,8 @@ class SessionImpl:
             except BaseException as error:
                 self.fail(error)
                 raise
+            for document in documents:
+                self._touch_document(_record_address_id(document["record"]))
             self._publish(seq, writes, documents, context)
             self._sweep_documents()
             return result
@@ -373,6 +466,8 @@ class SessionImpl:
             async with self._line:
                 self._commit_listeners.clear()
                 self._documents.clear()
+                self._idle_documents.clear()
+                self._attached_documents.clear()
                 for state in list(self._states):
                     state._close_session()
                 self._states.clear()
@@ -399,6 +494,11 @@ class SessionImpl:
                     self._closing.set_exception(error)
 
     def _notify_close(self) -> None:
+        self._cancel_document_sweep()
+        for task in list(self._sweep_tasks):
+            task.cancel()
+        for state in list(self._states):
+            state._close_session()
         listeners = self._close_listeners
         self._close_listeners = []
         for listener in listeners:
@@ -449,13 +549,16 @@ class SessionImpl:
                 if not ops:
                     continue
                 state._observed_version = version
-                state._advance(change["value"], context)
+                # A retired incarnation never changes again: its observers pin nothing.
                 if change["value"] is None:
-                    self._detach_state(state)
+                    state._release_pin()
+                state._advance(change["value"], context)
         for entry in list(self._watches):
             for change in documents:
                 if change["type"] != "document" or change["record"]["id"] != entry.record_id:
                     continue
+                if change["value"] is None:
+                    entry.release()
                 entry.watch.advance(change, context)
         for listener in list(self._commit_listeners):
             try:
@@ -468,15 +571,19 @@ class SessionImpl:
     # ── Document cache ─────────────────────────────────────────────────────
 
     def _cached(self, address_id: str) -> LoadedDocument | None:
-        return self._documents.get(address_id)
+        cached = self._documents.get(address_id)
+        if cached is not None:
+            self._touch_document(address_id)
+        return cached
 
     def _install(self, document: LoadedDocument) -> None:
         self._documents[document.address_id] = document
+        self._touch_document(document.address_id)
 
     def _evict(self, address_id: str, record_id: DocumentId) -> None:
         cached = self._documents.get(address_id)
         if cached is not None and cached.record["id"] == record_id:
-            del self._documents[address_id]
+            self._drop_document(address_id)
 
     async def _load_document(
         self,
@@ -487,9 +594,10 @@ class SessionImpl:
     ) -> LoadedDocument | None:
         cached = self._documents.get(address_id)
         if cached is not None and cached.value_version == definition.version:
+            self._touch_document(address_id)
             return cached
         if cached is not None:
-            self._documents.pop(address_id, None)
+            self._drop_document(address_id)
         record = await self._storage.find_document(address, "current", context)
         if record is None:
             return None
@@ -505,7 +613,7 @@ class SessionImpl:
             deltas_since_base=stored["deltasSinceBase"],
             value=value,
         )
-        self._documents[address_id] = loaded
+        self._install(loaded)
         return loaded
 
     def _detach_state(self, state: DocumentState) -> None:
@@ -517,6 +625,7 @@ class SessionImpl:
 
         async with self._line:
             self._documents.clear()
+            self._idle_documents.clear()
 
     # ── Document reads and observation ─────────────────────────────────────
 
@@ -529,6 +638,7 @@ class SessionImpl:
         # which holds the mutation line until Storage settles.
         cached = self._documents.get(resolved.id)
         if cached is not None and cached.value_version == definition.version:
+            self._touch_document(resolved.id)
             _validate_document(definition, cached)
             return cached.value
         async with self._line:
@@ -550,7 +660,12 @@ class SessionImpl:
             if loaded is None:
                 return None
             _validate_document(definition, loaded)
-            state = DocumentState(self, loaded.record["id"], loaded.value, loaded.value_version)
+            # Close seals admission while the load was underway: no observer, and so no pin, remains.
+            self.assert_usable()
+            release = self._pin_document(loaded.address_id, loaded.record["id"])
+            state = DocumentState(
+                self, loaded.record["id"], loaded.value, loaded.value_version, release
+            )
             self._states.append(state)
             return state
 
@@ -598,9 +713,13 @@ class SessionImpl:
 
     def _attach_watch(self, definition: DocDefinition, loaded: LoadedDocument) -> CommittedWatch:
         _validate_document(definition, loaded)
+        # Close seals admission while the load was underway: no watch, and so no pin, remains.
+        self.assert_usable()
+        release = self._pin_document(loaded.address_id, loaded.record["id"])
 
         def detach() -> None:
             self._watches = [entry for entry in self._watches if entry.watch is not watch]
+            release()
 
         watch = CommittedWatch(
             cast(ObservedDocumentValue, loaded.value),
@@ -608,7 +727,7 @@ class SessionImpl:
             self.report,
             loaded.value_version,
         )
-        self._watches.append(_WatchAttachment(loaded.record["id"], watch))
+        self._watches.append(_WatchAttachment(loaded.record["id"], watch, release))
         return watch
 
     async def snapshot_as_of(self, token: AnyDocToken, *args: Any) -> JsonObject | None:
@@ -644,29 +763,138 @@ class SessionImpl:
                 raise ValueError(f"Historical document {record['id']} ({record['kind']}) cannot be read")
             return materialize_document(definition, stored)
 
-    def _retention(self) -> int:
-        value = self._retention_setting
+    @property
+    def document_cache_sizes(self) -> DocumentCacheSizes:
+        """Internal, for tests: cached, idle, and pinned documents, and sweep jobs so far."""
+
+        return DocumentCacheSizes(
+            cached=len(self._documents),
+            idle=len(self._idle_documents),
+            attached=len(self._attached_documents),
+            sweeps=self._sweep_jobs,
+        )
+
+    def _touch_document(self, address_id: str) -> None:
+        """Note a use: an unattached document becomes the newest idle one and schedules a sweep."""
+
+        cached = self._documents.get(address_id)
+        if cached is None or cached.record["id"] in self._attached_documents:
+            return
+        now = self._clock()
+        since = self._idle_documents.get(address_id)
+        # A hot document moves to the back at most once per granule, a tenth of the retention up to
+        # 1 s: it may then leave a granule early, which costs a reload, while a commit-heavy
+        # workload skips the reordering.
+        if since is not None and now - since < min(1_000, self._document_retention_ms() / 10):
+            return
+        self._idle_documents.pop(address_id, None)
+        self._idle_documents[address_id] = now
+        # A pending sweep for the oldest document comes first unless the retention was shortened.
+        if self._document_sweep is None or self._document_sweep.at > now + self._document_retention_ms():
+            self._schedule_document_sweep()
+
+    def _drop_document(self, address_id: str) -> None:
+        self._documents.pop(address_id, None)
+        self._idle_documents.pop(address_id, None)
+
+    def _pin_document(self, address_id: str, record_id: DocumentId) -> Callable[[], None]:
+        """Pin one incarnation for one observer; the returned release unpins it once."""
+
+        self._attached_documents[record_id] = self._attached_documents.get(record_id, 0) + 1
+        self._idle_documents.pop(address_id, None)
+        pinned = True
+
+        def release() -> None:
+            nonlocal pinned
+            if not pinned:
+                return
+            pinned = False
+            count = self._attached_documents.get(record_id, 1) - 1
+            if count > 0:
+                self._attached_documents[record_id] = count
+                return
+            self._attached_documents.pop(record_id, None)
+            cached = self._documents.get(address_id)
+            if cached is not None and cached.record["id"] == record_id:
+                self._touch_document(address_id)
+
+        return release
+
+    def _schedule_document_sweep(self) -> None:
+        """Schedule the eviction of the oldest idle document, or right away when retention is 0."""
+
+        if self._closing is not None or not self._idle_documents:
+            return
+        # A synchronous observer method (`stop()`, `dispose()`) may run without a loop: then only
+        # the next commit evicts, as where timers cannot be unreferenced.
         try:
-            if callable(value):
-                value = value()
-            return _document_retention(value)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        at = next(iter(self._idle_documents.values())) + self._document_retention_ms()
+        if self._document_sweep is not None and self._document_sweep.at <= at:
+            return
+        if self._document_sweep is not None and self._document_sweep.timer is not None:
+            self._document_sweep.timer.cancel()
+        sweep = _DocumentSweep(at=at)
+        delay = at - self._clock()
+
+        def run() -> None:
+            self._sweep_jobs += 1
+            self._queue_sweep_job(sweep)
+
+        # The pending sweep stays set until its job runs, so touches while the line is busy queue
+        # no more than one.
+        self._document_sweep = sweep
+        if delay <= 0:
+            loop.call_soon(run)
+            return
+        if self._document_timers_unavailable:
+            self._document_sweep = None
+            return
+        timer = _schedule_document_timer(min(delay, _MAX_TIMER_DELAY_MS), run)
+        if timer is None:
+            self._document_timers_unavailable = True
+            self._document_sweep = None
+            return
+        sweep.timer = timer
+
+    def _cancel_document_sweep(self) -> None:
+        sweep = self._document_sweep
+        self._document_sweep = None
+        if sweep is not None and sweep.timer is not None:
+            sweep.timer.cancel()
+
+    def _queue_sweep_job(self, sweep: _DocumentSweep) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._run_sweep_job(sweep))
+        self._sweep_tasks.add(task)
+        task.add_done_callback(self._sweep_tasks.discard)
+
+    async def _run_sweep_job(self, sweep: _DocumentSweep) -> None:
+        try:
+            async with self._line:
+                if self._document_sweep is sweep:
+                    self._document_sweep = None
+                if self._closing is None:
+                    self._sweep_documents()
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            return _document_retention(None)
+            pass
 
     def _sweep_documents(self) -> None:
-        """Evict idle documents immediately when the retention is zero.
+        """On the line: evict the idle documents whose retention passed, then schedule the next."""
 
-        Positive retention timers arrive with the observation ticket; an observed document is
-        pinned by its state and must survive any sweep.
-        """
-
-        if self._retention() != 0:
-            return
-        attached = {state._record_id for state in self._states}
-        attached.update(entry.record_id for entry in self._watches if not entry.watch.retired)
-        for address_id, document in list(self._documents.items()):
-            if document.record["id"] not in attached:
-                del self._documents[address_id]
+        expired = self._clock() - self._document_retention_ms()
+        for cached_id, since in list(self._idle_documents.items()):
+            if since > expired:
+                break
+            self._drop_document(cached_id)
+        self._schedule_document_sweep()
 
     # ── Host callbacks ─────────────────────────────────────────────────────
 
@@ -896,4 +1124,11 @@ def _abort_error(signal: Any) -> BaseException:
     return AbortError(reason)
 
 
-__all__ = ["DocumentState", "SessionImpl", "create_session"]
+__all__ = [
+    "DocumentCacheSizes",
+    "DocumentState",
+    "SessionImpl",
+    "create_session",
+    "document_retention",
+    "set_default_document_retention",
+]

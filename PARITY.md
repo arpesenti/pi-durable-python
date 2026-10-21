@@ -287,14 +287,14 @@ is green.
 | `DocumentCopySource` | type | `DocumentCopySource` | test_types.py | tested |
 | `DocumentCreate` | type | `DocumentCreate` | test_types.py | tested |
 | `DocumentId` | type | `DocumentId` | test_ids.py, test_types.py | tested |
-| `DocumentObserver` | type | `DocumentObserver` | test_session_checkpoints_migrations.py | code |
+| `DocumentObserver` | type | `DocumentObserver` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 | `DocumentPoint` | type | `DocumentPoint` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentQuery` | type | `DocumentQuery` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentReader` | type | `DocumentReader` | — | planned |
 | `DocumentRecord` | type | `DocumentRecord` | test_types.py | tested |
 | `DocumentSemantics` | type | `DocumentSemantics` | test_types.py | tested |
-| `DocumentState` | type | `DocumentState` | test_session_states.py | tested |
-| `DocumentWatch` | type | `DocumentWatch` | test_session_checkpoints_migrations.py | code |
+| `DocumentState` | type | `DocumentState` | test_session_states.py, test_session_document_retention.py | tested |
+| `DocumentWatch` | type | `DocumentWatch` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 | `Entry` | type | `Entry` | test_entries.py | tested |
 | `EntryDraft` | type | `EntryDraft` | test_entries.py, test_types.py | tested |
 | `EntryId` | type | `EntryId` | test_ids.py, test_types.py | tested |
@@ -343,8 +343,8 @@ is green.
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
-| `WatchEnd` | type | `WatchEnd` | test_session_checkpoints_migrations.py | code |
-| `WatchHandle` | type | `WatchHandle` | test_session_checkpoints_migrations.py | code |
+| `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
+| `WatchHandle` | type | `WatchHandle` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 
 ## Optional subpaths
 
@@ -537,7 +537,7 @@ SQLite backend and migrations.
 | 3.5 Bases and checkpoints | tested |
 | 3.6 Versions and migrations | tested |
 | 3.7 Forks | planned |
-| 4 Transactions and storage ownership | code |
+| 4 Transactions and storage ownership | tested |
 | 5 Tasks | planned |
 | 5.1 Definition | planned |
 | 5.2 Effect sandwich | planned |
@@ -562,7 +562,7 @@ SQLite backend and migrations.
 | 8.7 Compaction | planned |
 | 9 Document observation and Chord | code |
 | 9.1 Document state | tested |
-| 9.2 `watchDoc` | code |
+| 9.2 `watchDoc` | tested |
 | 9.3 Conversation view | planned |
 | 9.4 Agent events (experimental) | planned |
 | 9.5 Task graph view | planned |
@@ -575,6 +575,10 @@ SQLite backend and migrations.
 | 12 API footguns | planned |
 | 13 Non-goals | n/a |
 
+The upstream document-retention suite has two Harness-level cases: one follows a Harness settings
+change at its next use, and one compares agent event streams with documents evicted. They are
+translated with the Harness in #12-#22; the Session-level suite covers the retention semantics.
+
 ## Allowed deviations
 
 | Area | Upstream | Python |
@@ -585,6 +589,7 @@ SQLite backend and migrations.
 | Host execution backend | `NodeExecutionEnv` | `PosixExecutionEnv` |
 | Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()` |
 | PowerShell tool | exported | excluded |
+| Document eviction timers | `setTimeout(...).unref()`, commits-only where timers cannot be unreferenced | `asyncio` timers never keep the process alive, so every loop keeps one; a loop that cannot schedule one evicts on commits only |
 | Windows support | supported | unsupported |
 | Images | `./images` subpath | excluded; `ImageProcessor` protocol only |
 | Code Mode | `./codemode` subpath | excluded |
@@ -599,6 +604,7 @@ SQLite backend and migrations.
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
 | Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
+| Promise-returning watcher methods | `stop()` returns the one common promise | `CommittedWatch.stop()` and `closed` return the one common `asyncio.Future`, so each is identity-stable and awaiting a cancellation does not cancel it |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
 | ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
 | Version | `1.3.0` | `1.3.0` lockstep |
@@ -615,7 +621,8 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`) |
 | Mutable document drafts backed by strict-JSON copies | `pi_durable.session.drafts` | tested (`test_session_states.py`, `test_session_tables.py`) |
 | Chord-compatible JSON operation applier | `pi_durable.delta` | tested (`test_memory_storage.py`) |
-| Serialized committed document watches | `pi_durable.session.observation` | code (`test_session_checkpoints_migrations.py`; full watch suite in #5) |
+| Serialized committed document watches | `pi_durable.session.observation` | tested (`test_session_watches.py`, `test_session_checkpoints_migrations.py`) |
+| Document cache sizes, retention normalization, and the suite default | `pi_durable.session.session` | tested (`test_session_document_retention.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 

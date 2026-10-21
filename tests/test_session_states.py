@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from session_support import (
@@ -282,3 +283,28 @@ async def test_exposes_trusted_shared_values_without_freezing() -> None:
     assert type(state.value) is dict
     assert type(state.value["retained"]) is dict
     state.dispose()
+
+
+async def test_keeps_its_last_value_and_ignores_a_commit_that_settles_during_close() -> None:
+    """Spec §9.1: closing ends the state at its seal and the last value stays readable."""
+
+    storage, session, _publications = await create_state()
+    state = await session.document_state(StateDoc, context)
+    assert state is not None
+    baseline = state.value
+    deliveries: list[Any] = []
+    state.subscribe(lambda value, _context, _delivery: deliveries.append(value))
+    gate = storage.hold_commits()
+
+    async def change(tx: Any) -> None:
+        (await tx.doc(StateDoc)).value = 1
+
+    commit = asyncio.ensure_future(session.commit(change, context))
+    await gate.entered.wait()
+    closing = asyncio.ensure_future(session.close(context))
+    await flush()
+    gate.release()
+    await commit
+    await closing
+    assert state.value is baseline
+    assert [value["value"] for value in deliveries] == [0]

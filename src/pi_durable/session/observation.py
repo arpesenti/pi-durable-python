@@ -52,6 +52,7 @@ class CommittedWatch:
         "_cancellation_remove",
         "_cancellation_signal",
         "_closed",
+        "_terminal",
         "_detach",
         "_end",
         "_listener",
@@ -77,6 +78,9 @@ class CommittedWatch:
         self._report = report
         self._observed_version = observed_version
         self._closed: asyncio.Future[WatchEnd] = asyncio.get_running_loop().create_future()
+        # Awaiting a cancellation must not cancel the watch's own terminal result; `closed` and
+        # every `stop()` return this same shielded value, as v1.3.0 returns one common promise.
+        self._terminal: asyncio.Future[WatchEnd] = asyncio.shield(self._closed)
         self._pending: list[tuple[ObservedDocumentValue, list[Op], Context]] = []
         self._listener: Callable[[ObservedDocumentValue, list[Op], Context], Any] | None = None
         self._started = False
@@ -95,7 +99,7 @@ class CommittedWatch:
 
     @property
     def closed(self) -> asyncio.Future[WatchEnd]:
-        return self._closed
+        return self._terminal
 
     @property
     def retired(self) -> bool:
@@ -118,11 +122,11 @@ class CommittedWatch:
         if self._pending:
             self._schedule()
 
-    async def stop(self) -> WatchEnd:
+    def stop(self) -> asyncio.Future[WatchEnd]:
         """Idempotently stop future callbacks and return this watch's terminal result."""
 
         self._terminate({"reason": "stopped"})
-        return await asyncio.shield(self._closed)
+        return self._terminal
 
     def observe_cancellation(self, signal: AbortSignal) -> None:
         if self._cancellation_signal is not None:
