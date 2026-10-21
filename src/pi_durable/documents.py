@@ -6,6 +6,8 @@ shape; Python callers configure definitions with snake_case names and may also p
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -21,6 +23,12 @@ from .json import JsonObject, copy_json
 from .types import CheckpointInfo, DocumentAddress, DocumentCreate, DocumentRecord, StoredDocument
 
 DocScope: TypeAlias = Literal["session", "conversation", "task"]
+
+#: Positional arities of the definition callbacks without the optional receiver.
+_SINGLETON_INITIAL_ARITY = 0
+_FAMILY_INITIAL_ARITY = 1
+_MIGRATE_ARITY = 2
+_CHECKPOINT_ARITY = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +96,40 @@ def _definition_values(definition: Mapping[str, Any] | None, kwargs: Mapping[str
     return values
 
 
+def _bind_receiver(
+    callback: Callable[..., Any] | None,
+    definition: DocDefinition,
+    arity: int,
+) -> Callable[..., Any] | None:
+    """Bind a definition callback that declares the definition as its receiver.
+
+    v1.3.0 invokes `initial`, `migrate`, and `checkpointWhen` as methods, so `this` is the
+    definition. Python callables are plain functions; one whose first parameter is named `self`
+    or `definition` and that declares exactly one extra positional parameter receives the
+    definition bound to it.
+    """
+
+    if callback is None:
+        return None
+    try:
+        parameters = list(inspect.signature(callback).parameters.values())
+    except (TypeError, ValueError):
+        return callback
+    if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        return callback
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) != arity + 1:
+        return callback
+    if positional[0].name not in ("self", "definition"):
+        return callback
+    return functools.partial(callback, definition)
+
+
 def _build_definition(values: Mapping[str, Any], *, family: bool) -> DocDefinition:
     kind = values.get("kind")
     if not isinstance(kind, str):
@@ -116,7 +158,7 @@ def _build_definition(values: Mapping[str, Any], *, family: bool) -> DocDefiniti
     checkpoint_when = values.get("checkpoint_when")
     if checkpoint_when is not None and not callable(checkpoint_when):
         raise TypeError(f"Document {kind} checkpoint_when must be callable")
-    return DocDefinition(
+    definition = DocDefinition(
         kind=kind,
         version=version,
         scope=scope,
@@ -127,6 +169,24 @@ def _build_definition(values: Mapping[str, Any], *, family: bool) -> DocDefiniti
         migrate=migrate,
         checkpoint_when=checkpoint_when,
     )
+    # Bind definition callbacks that declare the definition as their receiver, after constructing
+    # the final value so the receiver is the token's own definition.
+    object.__setattr__(
+        definition,
+        "initial",
+        _bind_receiver(
+            initial, definition, _FAMILY_INITIAL_ARITY if family else _SINGLETON_INITIAL_ARITY
+        ),
+    )
+    object.__setattr__(
+        definition, "migrate", _bind_receiver(migrate, definition, _MIGRATE_ARITY)
+    )
+    object.__setattr__(
+        definition,
+        "checkpoint_when",
+        _bind_receiver(checkpoint_when, definition, _CHECKPOINT_ARITY),
+    )
+    return definition
 
 
 def define_doc(

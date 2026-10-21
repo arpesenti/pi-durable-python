@@ -24,6 +24,13 @@ from pi_durable.types import (
 context: Context = BACKGROUND_CONTEXT
 
 
+async def flush() -> None:
+    """Let queued watch deliveries, commit listeners, and scheduled drain tasks run."""
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
 class Gate:
     """A gate that holds calls until released and reports when the first held call arrives."""
 
@@ -132,5 +139,6 @@ __all__ = [
     "context",
     "create_conversation",
     "document_changes",
+    "flush",
     "open_test_session",
 ]

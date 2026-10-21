@@ -10,18 +10,16 @@ from session_support import (
     context,
     create_conversation,
     document_changes,
+    flush,
     open_test_session,
 )
 
 from pi_durable import define_doc, define_doc_family
 from pi_durable.documents import DocToken
+from pi_durable.errors import SessionFailed
 from pi_durable.ids import ConversationId, TaskId, id_from_number
+from pi_durable.json import copy_json
 from pi_durable.session.session import SessionImpl
-
-
-async def flush() -> None:
-    await asyncio.sleep(0)
-
 
 live_init_count = 0
 
@@ -763,3 +761,128 @@ async def test_emits_and_replays_array_deletion_operations() -> None:
     await session.unload_documents()
     reloaded = await session.snapshot(LiveDoc, conversation_id, context)
     assert reloaded is not None and reloaded["items"] == ["b"]
+
+
+async def test_never_creates_on_snapshot_and_returns_none_when_absent() -> None:
+    storage, session, _publications = open_test_session()
+    conversation_id = await create_conversation(session)
+    before = len(storage.commits)
+    assert await session.snapshot(LiveDoc, conversation_id, context) is None
+    assert await session.snapshot(CounterDoc, context) is None
+    assert await session.snapshot(MemberDoc, "k", context) is None
+    assert len(storage.commits) == before
+    assert storage.mint_count == 1
+
+
+async def test_fails_the_session_after_a_storage_failure_and_publishes_nothing() -> None:
+    storage, session, publications, conversation_id = await setup_live()
+    await flush()
+    before = await session.snapshot(LiveDoc, conversation_id, context)
+    assert before is not None
+    published = len(publications)
+    storage.fail_next_commit(RuntimeError("disk vanished"))
+
+    async def change(tx: Any) -> None:
+        (await tx.doc(LiveDoc, conversation_id)).message = "uncertain"
+
+    with pytest.raises(RuntimeError, match="disk vanished"):
+        await session.commit(change, context)
+    await flush()
+    assert len(publications) == published
+    assert "message" not in before
+    with pytest.raises(SessionFailed):
+        await session.snapshot(LiveDoc, conversation_id, context)
+    with pytest.raises(SessionFailed):
+        await session.commit(lambda tx: None, context)
+    await session.close(context)
+
+
+async def test_keeps_the_previous_revision_unchanged_through_storage_settlement() -> None:
+    storage, session, _publications, conversation_id = await setup_live()
+    before = await session.snapshot(LiveDoc, conversation_id, context)
+    assert before is not None
+    unchanged = copy_json(before)
+    gate = storage.hold_commits()
+
+    async def change(tx: Any) -> None:
+        live = await tx.doc(LiveDoc, conversation_id)
+        live["items"].push("c")
+        live["nested"]["count"] = 9
+
+    commit = asyncio.ensure_future(session.commit(change, context))
+    await gate.entered.wait()
+    assert await session.snapshot(LiveDoc, conversation_id, context) is before
+    assert before == unchanged
+    gate.release()
+    await commit
+    after = await session.snapshot(LiveDoc, conversation_id, context)
+    assert after is not None
+    assert after["items"] == ["a", "b", "c"]
+    assert before == unchanged
+
+
+async def test_delivers_complete_publications_synchronously_after_adoption() -> None:
+    _storage, session, publications, conversation_id = await setup_live()
+    published = len(publications)
+    delivered: list[Any] = []
+    unsubscribe = session.subscribe_commits(
+        lambda _publication, listener_context: delivered.append(listener_context)
+    )
+
+    async def change(tx: Any) -> str:
+        (await tx.doc(LiveDoc, conversation_id)).message = "m"
+        return "done"
+
+    result = await session.commit(change, context)
+    assert result == "done"
+    assert delivered == [context]
+    assert len(publications) == published + 1
+    unsubscribe()
+
+
+async def test_publishes_close_synchronously_and_supports_unsubscription() -> None:
+    _storage, session, _publications = open_test_session()
+    calls: list[str] = []
+    session.subscribe_close(lambda: calls.append("active"))
+    unsubscribe = session.subscribe_close(lambda: calls.append("removed"))
+    unsubscribe()
+    await session.close(context)
+    assert calls == ["active"]
+
+
+async def test_settles_admitted_commits_before_close_and_rejects_later_admission() -> None:
+    storage, session, _publications, conversation_id = await setup_live()
+    gate = storage.hold_commits()
+
+    async def admitted(tx: Any) -> None:
+        (await tx.doc(LiveDoc, conversation_id)).message = "admitted"
+
+    committed = asyncio.ensure_future(session.commit(admitted, context))
+    await gate.entered.wait()
+
+    async def queued(tx: Any) -> None:
+        (await tx.doc(LiveDoc, conversation_id)).message = "queued"
+
+    queued_commit = asyncio.ensure_future(session.commit(queued, context))
+    admitted_snapshot = asyncio.ensure_future(session.snapshot(MemberDoc, "absent", context))
+    closed = asyncio.ensure_future(session.close(context))
+    # Let the admitted tasks start and close() seal admission before later calls arrive.
+    await flush()
+    with pytest.raises(RuntimeError, match="closed"):
+        await session.commit(lambda tx: None, context)
+    with pytest.raises(RuntimeError, match="closed"):
+        await session.snapshot(LiveDoc, conversation_id, context)
+    gate.release()
+    await committed
+    await queued_commit
+    assert await admitted_snapshot is None
+    await closed
+    with pytest.raises(RuntimeError):
+        await storage.find_document(
+            {
+                "kind": "test.live",
+                "scope": {"kind": "conversation", "conversationId": conversation_id},
+            },
+            "current",
+            context,
+        )

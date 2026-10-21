@@ -44,6 +44,7 @@ from ..types import (
     TaskQuery,
     TaskRecord,
 )
+from .observation import CommittedWatch, ObservedDocumentValue, observed_operations
 from .transaction import LoadedDocument, Transaction, TransactionScope
 
 _DEFAULT_DOCUMENT_RETENTION_MS = 600_000
@@ -77,6 +78,13 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _validate_document(definition: DocDefinition, loaded: LoadedDocument) -> None:
+    """Reject typed access whose token disagrees with the stored incarnation or cannot use it."""
+
+    check_record_scope(definition, loaded.record)
+    check_record_version(definition, loaded.record, loaded.stored_version)
+
+
 @dataclass(slots=True)
 class Delivery:
     """One state delivery: hydration at sequence 0, then one per committed update."""
@@ -85,15 +93,38 @@ class Delivery:
     sequence: int
 
 
+@dataclass(slots=True)
+class _WatchAttachment:
+    """One watch subscribed to a committed incarnation, and the incarnation it pins."""
+
+    record_id: DocumentId
+    watch: CommittedWatch
+
+
 class DocumentState:
     """Disposable, read-only committed state bound to one document incarnation."""
 
-    __slots__ = ("_disposed", "_listeners", "_record_id", "_session", "_sequence", "_value")
+    __slots__ = (
+        "_disposed",
+        "_listeners",
+        "_observed_version",
+        "_record_id",
+        "_session",
+        "_sequence",
+        "_value",
+    )
 
-    def __init__(self, session: SessionImpl, record_id: DocumentId, value: JsonObject) -> None:
+    def __init__(
+        self,
+        session: SessionImpl,
+        record_id: DocumentId,
+        value: JsonObject,
+        observed_version: int,
+    ) -> None:
         self._session = session
         self._record_id = record_id
         self._value: JsonObject | None = value
+        self._observed_version = observed_version
         self._sequence = 0
         self._listeners: list[Callable[[Any, Context, Delivery], Any]] = []
         self._disposed = False
@@ -195,6 +226,7 @@ class SessionImpl:
     ) -> None:
         self._documents: dict[str, LoadedDocument] = {}
         self._states: list[DocumentState] = []
+        self._watches: list[_WatchAttachment] = []
         self._commit_listeners: list[Callable[[CommitPublication, Context], Any]] = []
         self._close_listeners: list[Callable[[], Any]] = []
         self._line = asyncio.Lock()
@@ -374,6 +406,10 @@ class SessionImpl:
                 listener()
             except Exception as error:
                 self.report(error)
+        watches = self._watches
+        self._watches = []
+        for entry in watches:
+            entry.watch.close_session(self._failure)
 
     def subscribe_commits(
         self,
@@ -395,7 +431,7 @@ class SessionImpl:
         documents: list[DocumentCommitChange],
         context: Context,
     ) -> None:
-        if not self._commit_listeners and not self._states:
+        if not self._commit_listeners and not self._states and not self._watches:
             return
         changes: list[CommitChange] = [
             cast(CommitChange, write)
@@ -408,9 +444,19 @@ class SessionImpl:
             for change in documents:
                 if change["type"] != "document" or change["record"]["id"] != state._record_id:
                     continue
+                ops, version = observed_operations(state._observed_version, change)
+                # A migration-only base changes nothing for an observer of the new version.
+                if not ops:
+                    continue
+                state._observed_version = version
                 state._advance(change["value"], context)
                 if change["value"] is None:
                     self._detach_state(state)
+        for entry in list(self._watches):
+            for change in documents:
+                if change["type"] != "document" or change["record"]["id"] != entry.record_id:
+                    continue
+                entry.watch.advance(change, context)
         for listener in list(self._commit_listeners):
             try:
                 result = listener(publication, context)
@@ -479,13 +525,18 @@ class SessionImpl:
         definition = token.definition
         resolved = resolve_address(definition, args)
         context = args[resolved.next_argument]
+        # A cached document serves its committed revision without waiting for an in-flight commit,
+        # which holds the mutation line until Storage settles.
+        cached = self._documents.get(resolved.id)
+        if cached is not None and cached.value_version == definition.version:
+            _validate_document(definition, cached)
+            return cached.value
         async with self._line:
             self._assert_healthy()
             loaded = await self._load_document(definition, resolved.id, resolved.address, context)
         if loaded is None:
             return None
-        check_record_scope(definition, loaded.record)
-        check_record_version(definition, loaded.record, loaded.stored_version)
+        _validate_document(definition, loaded)
         return loaded.value
 
     async def document_state(self, token: AnyDocToken, *args: Any) -> DocumentState | None:
@@ -498,14 +549,67 @@ class SessionImpl:
             loaded = await self._load_document(definition, resolved.id, resolved.address, context)
             if loaded is None:
                 return None
-            check_record_scope(definition, loaded.record)
-            check_record_version(definition, loaded.record, loaded.stored_version)
-            state = DocumentState(self, loaded.record["id"], loaded.value)
+            _validate_document(definition, loaded)
+            state = DocumentState(self, loaded.record["id"], loaded.value, loaded.value_version)
             self._states.append(state)
             return state
 
-    async def watch_doc(self, token: AnyDocToken, *args: Any) -> Any:
-        raise NotImplementedError("watch_doc arrives with document observation")
+    async def watch_doc(self, token: AnyDocToken, *args: Any) -> CommittedWatch | None:
+        self.assert_usable()
+        definition = token.definition
+        resolved = resolve_address(definition, args)
+        context = args[resolved.next_argument]
+        signal = context.abort_signal
+        cancelled = signal is not None and signal.aborted
+        remove_listener: Callable[[], None] | None = None
+        if signal is not None:
+
+            def mark_cancelled() -> None:
+                nonlocal cancelled
+                cancelled = True
+
+            remove_listener = signal.add_listener(mark_cancelled)
+
+        def raise_if_cancelled() -> None:
+            if cancelled:
+                assert signal is not None
+                signal.raise_if_aborted()
+
+        try:
+            async with self._line:
+                self._assert_healthy()
+                raise_if_cancelled()
+                loaded = await self._load_document(
+                    definition, resolved.id, resolved.address, context
+                )
+                raise_if_cancelled()
+                if loaded is None:
+                    return None
+                watch = self._attach_watch(definition, loaded)
+            if cancelled:
+                watch.cancel()
+                raise_if_cancelled()
+            if signal is not None:
+                watch.observe_cancellation(signal)
+            return watch
+        finally:
+            if remove_listener is not None:
+                remove_listener()
+
+    def _attach_watch(self, definition: DocDefinition, loaded: LoadedDocument) -> CommittedWatch:
+        _validate_document(definition, loaded)
+
+        def detach() -> None:
+            self._watches = [entry for entry in self._watches if entry.watch is not watch]
+
+        watch = CommittedWatch(
+            cast(ObservedDocumentValue, loaded.value),
+            detach,
+            self.report,
+            loaded.value_version,
+        )
+        self._watches.append(_WatchAttachment(loaded.record["id"], watch))
+        return watch
 
     async def snapshot_as_of(self, token: AnyDocToken, *args: Any) -> JsonObject | None:
         self.assert_usable()
@@ -513,6 +617,8 @@ class SessionImpl:
         resolved = resolve_address(definition, args)
         if resolved.address["scope"]["kind"] != "conversation":
             raise TypeError("Session.snapshot_as_of() requires a conversation document")
+        if definition.history != "rewindable":
+            raise TypeError("Session.snapshot_as_of() requires a rewindable conversation document")
         conversation_id = resolved.address["scope"]["conversationId"]
         at_value = args[resolved.next_argument]
         if not isinstance(at_value, int) or isinstance(at_value, bool) or at_value < 1:
@@ -557,6 +663,7 @@ class SessionImpl:
         if self._retention() != 0:
             return
         attached = {state._record_id for state in self._states}
+        attached.update(entry.record_id for entry in self._watches if not entry.watch.retired)
         for address_id, document in list(self._documents.items()):
             if document.record["id"] not in attached:
                 del self._documents[address_id]

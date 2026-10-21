@@ -15,7 +15,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
 
-from ..delta import Op
+from ..delta import MAX_DELTA_OPERATIONS, Op
 from ..json import JsonObject, JsonValue, copy_json
 
 T = TypeVar("T")
@@ -745,6 +745,9 @@ class DocumentDraft(DraftObject):
         value = cast(JsonObject, self._node.materialize())
         ops: list[Op] = []
         self._node.emit([], ops)
+        # Chord folds a batch larger than its operation budget into one root replacement.
+        if len(ops) > MAX_DELTA_OPERATIONS:
+            ops = [["r", value]]
         return PreparedDraft(value=value, ops=ops)
 
 

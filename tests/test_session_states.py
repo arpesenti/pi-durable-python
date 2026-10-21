@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
-from session_support import context, create_conversation, document_changes, open_test_session
+from session_support import (
+    context,
+    create_conversation,
+    document_changes,
+    flush,
+    open_test_session,
+)
 
 from pi_durable import define_doc, define_doc_family
 from pi_durable.session.session import SessionImpl
-
-
-async def flush() -> None:
-    await asyncio.sleep(0)
-
 
 StateDoc = define_doc(
     {

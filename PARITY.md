@@ -287,14 +287,14 @@ is green.
 | `DocumentCopySource` | type | `DocumentCopySource` | test_types.py | tested |
 | `DocumentCreate` | type | `DocumentCreate` | test_types.py | tested |
 | `DocumentId` | type | `DocumentId` | test_ids.py, test_types.py | tested |
-| `DocumentObserver` | type | `DocumentObserver` | — | planned |
+| `DocumentObserver` | type | `DocumentObserver` | test_session_checkpoints_migrations.py | code |
 | `DocumentPoint` | type | `DocumentPoint` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentQuery` | type | `DocumentQuery` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentReader` | type | `DocumentReader` | — | planned |
 | `DocumentRecord` | type | `DocumentRecord` | test_types.py | tested |
 | `DocumentSemantics` | type | `DocumentSemantics` | test_types.py | tested |
 | `DocumentState` | type | `DocumentState` | test_session_states.py | tested |
-| `DocumentWatch` | type | `DocumentWatch` | — | planned |
+| `DocumentWatch` | type | `DocumentWatch` | test_session_checkpoints_migrations.py | code |
 | `Entry` | type | `Entry` | test_entries.py | tested |
 | `EntryDraft` | type | `EntryDraft` | test_entries.py, test_types.py | tested |
 | `EntryId` | type | `EntryId` | test_ids.py, test_types.py | tested |
@@ -343,8 +343,8 @@ is green.
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
-| `WatchEnd` | type | `WatchEnd` | — | planned |
-| `WatchHandle` | type | `WatchHandle` | — | planned |
+| `WatchEnd` | type | `WatchEnd` | test_session_checkpoints_migrations.py | code |
+| `WatchHandle` | type | `WatchHandle` | test_session_checkpoints_migrations.py | code |
 
 ## Optional subpaths
 
@@ -534,8 +534,8 @@ SQLite backend and migrations.
 | 3.2 Records and lifetimes | tested |
 | 3.3 Access and creation | code |
 | 3.4 Mutation ownership | tested |
-| 3.5 Bases and checkpoints | planned |
-| 3.6 Versions and migrations | planned |
+| 3.5 Bases and checkpoints | tested |
+| 3.6 Versions and migrations | tested |
 | 3.7 Forks | planned |
 | 4 Transactions and storage ownership | code |
 | 5 Tasks | planned |
@@ -560,9 +560,9 @@ SQLite backend and migrations.
 | 8.5 Tool rounds | planned |
 | 8.6 Usage | planned |
 | 8.7 Compaction | planned |
-| 9 Document observation and Chord | planned |
-| 9.1 Document state | planned |
-| 9.2 `watchDoc` | planned |
+| 9 Document observation and Chord | code |
+| 9.1 Document state | tested |
+| 9.2 `watchDoc` | code |
 | 9.3 Conversation view | planned |
 | 9.4 Agent events (experimental) | planned |
 | 9.5 Task graph view | planned |
@@ -596,6 +596,9 @@ SQLite backend and migrations.
 | Model access | `pi-ai` dependency | `Model` protocol + OpenAI/Anthropic extras |
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
+| Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
+| `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
+| Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
 | ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
 | Version | `1.3.0` | `1.3.0` lockstep |
@@ -612,6 +615,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`) |
 | Mutable document drafts backed by strict-JSON copies | `pi_durable.session.drafts` | tested (`test_session_states.py`, `test_session_tables.py`) |
 | Chord-compatible JSON operation applier | `pi_durable.delta` | tested (`test_memory_storage.py`) |
+| Serialized committed document watches | `pi_durable.session.observation` | code (`test_session_checkpoints_migrations.py`; full watch suite in #5) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 

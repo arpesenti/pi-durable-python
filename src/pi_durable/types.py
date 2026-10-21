@@ -11,7 +11,8 @@ and :func:`entry_record` assigns its identity, resolving ``head: "self"``; both 
 JSON values that cannot be mutated after construction.
 """
 
-from collections.abc import Mapping, Sequence
+import asyncio
+from collections.abc import Callable, Mapping, Sequence
 from typing import (
     Any,
     Generic,
@@ -61,7 +62,9 @@ __all__ = [
     "DocumentPoint",
     "DocumentQuery",
     "DocumentRecord",
+    "DocumentObserver",
     "DocumentSemantics",
+    "DocumentWatch",
     "EntryDraft",
     "EntryId",
     "EntryQuery",
@@ -96,6 +99,9 @@ __all__ = [
     "Tx",
     "TypedEntry",
     "TypedEntryDraft",
+    "WatchEnd",
+    "WatchEnded",
+    "WatchHandle",
     "entry_draft",
     "entry_record",
 ]
@@ -104,6 +110,7 @@ MessageRecord: TypeAlias = dict[str, JsonValue]
 """One model-facing message. The pi-ai adapter supplies its concrete shape."""
 Op: TypeAlias = list[Any]
 """One Chord delta operation, represented as its JSON array."""
+JsonValueT_co = TypeVar("JsonValueT_co", covariant=True)
 
 
 # ── Identity, conversation, and entry records ──────────────────────────────
@@ -795,6 +802,56 @@ CommitChange: TypeAlias = TableCommitChange | DocumentCommitChange
 class CommitPublication(TypedDict):
     seq: Seq
     changes: list[CommitChange]
+
+
+class WatchEnded(TypedDict):
+    reason: Literal["stopped", "cancelled", "session_closed", "retired"]
+
+
+class WatchListenerErrorEnd(TypedDict):
+    reason: Literal["listener_error"]
+    error: BaseException
+
+
+class WatchSessionFailedEnd(TypedDict):
+    reason: Literal["session_failed"]
+    error: object
+
+
+WatchEnd: TypeAlias = WatchEnded | WatchListenerErrorEnd | WatchSessionFailedEnd
+"""Terminal result of one document watch."""
+
+
+class WatchHandle(Protocol, Generic[JsonValueT_co]):
+    """Serialized exact-frame observation of an immutable value with bounded pending delivery."""
+
+    @property
+    def value(self) -> JsonValueT_co:
+        """Acquisition revision before start; latest delivered immutable revision afterward."""
+        ...
+
+    @property
+    def closed(self) -> asyncio.Future[WatchEnd]:
+        """Settle when the watch terminates; an already-running callback remains caller-owned."""
+        ...
+
+    def start(self, listener: Callable[[JsonValueT_co, list[Op], Context], Any]) -> None:
+        """Install the sole asynchronous listener. Never invokes it inline."""
+        ...
+
+    async def stop(self) -> WatchEnd:
+        """Idempotently stop future callbacks and return this watch's terminal result."""
+        ...
+
+
+DocumentWatch: TypeAlias = WatchHandle[JsonObject | None]
+"""Serialized exact-frame observation of one document incarnation."""
+
+
+class DocumentObserver(Protocol):
+    """Non-creating document watch acquisition shared by Session and later invocation APIs."""
+
+    async def watch_doc(self, token: Any, *args: Any) -> DocumentWatch | None: ...
 
 
 # ── Queries and pages ───────────────────────────────────────────────────────

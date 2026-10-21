@@ -34,6 +34,9 @@ Op: TypeAlias = list[Any]
 
 RESERVED_SEGMENTS = frozenset({"__proto__", "constructor", "prototype"})
 
+MAX_DELTA_OPERATIONS = 4_096
+"""Beyond this many operations a batch folds into one root replacement, as Chord does."""
+
 
 class UnsafePathError(Exception):
     """An operation addresses an unsafe or malformed path segment."""
@@ -224,6 +227,7 @@ def apply_immutable_batches(target: JsonValue, batches: Iterable[Sequence[Op]]) 
 
 
 __all__ = [
+    "MAX_DELTA_OPERATIONS",
     "Op",
     "PathError",
     "RESERVED_SEGMENTS",
