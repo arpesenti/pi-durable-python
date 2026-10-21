@@ -44,22 +44,22 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `AssistantEntry` | value | `AssistantEntry` | — | planned |
-| `CompactionEntry` | value | `CompactionEntry` | — | planned |
-| `defineEntry` | value | `define_entry` | — | planned |
-| `ResetEntry` | value | `ResetEntry` | — | planned |
-| `SystemEntry` | value | `SystemEntry` | — | planned |
-| `ToolResultEntry` | value | `ToolResultEntry` | — | planned |
-| `UserEntry` | value | `UserEntry` | — | planned |
+| `AssistantEntry` | value | `AssistantEntry` | test_entries.py | tested |
+| `CompactionEntry` | value | `CompactionEntry` | test_entries.py | tested |
+| `defineEntry` | value | `define_entry` | test_entries.py | tested |
+| `ResetEntry` | value | `ResetEntry` | test_entries.py | tested |
+| `SystemEntry` | value | `SystemEntry` | test_entries.py | tested |
+| `ToolResultEntry` | value | `ToolResultEntry` | test_entries.py | tested |
+| `UserEntry` | value | `UserEntry` | test_entries.py | tested |
 
 ### `./errors.ts` → `pi_durable.errors`
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `ConversationBusy` | value | `ConversationBusy` | — | planned |
-| `ReadAfterWrite` | value | `ReadAfterWrite` | — | planned |
-| `SessionFailed` | value | `SessionFailed` | — | planned |
-| `StorageRequestError` | value | `StorageRequestError` | — | planned |
+| `ConversationBusy` | value | `ConversationBusy` | test_errors.py | tested |
+| `ReadAfterWrite` | value | `ReadAfterWrite` | test_errors.py | tested |
+| `SessionFailed` | value | `SessionFailed` | test_errors.py | tested |
+| `StorageRequestError` | value | `StorageRequestError` | test_errors.py | tested |
 
 ### `./harness/agent.ts` → `pi_durable.harness.agent`
 
@@ -264,85 +264,85 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `ROOT_CONVERSATION_ID` | value | `ROOT_CONVERSATION_ID` | — | planned |
-| `CheckpointInfo` | type | `CheckpointInfo` | — | planned |
-| `CommitChange` | type | `CommitChange` | — | planned |
-| `CommitPublication` | type | `CommitPublication` | — | planned |
+| `ROOT_CONVERSATION_ID` | value | `ROOT_CONVERSATION_ID` | test_ids.py | tested |
+| `CheckpointInfo` | type | `CheckpointInfo` | test_types.py | tested |
+| `CommitChange` | type | `CommitChange` | test_types.py | tested |
+| `CommitPublication` | type | `CommitPublication` | test_types.py | tested |
 | `CommonDocDefinition` | type | `CommonDocDefinition` | — | planned |
-| `ContextEdit` | type | `ContextEdit` | — | planned |
+| `ContextEdit` | type | `ContextEdit` | test_types.py | tested |
 | `ConversationDocFamilyToken` | type | `ConversationDocFamilyToken` | — | planned |
 | `ConversationDocToken` | type | `ConversationDocToken` | — | planned |
-| `ConversationId` | type | `ConversationId` | — | planned |
-| `ConversationOwnership` | type | `ConversationOwnership` | — | planned |
-| `ConversationQuery` | type | `ConversationQuery` | — | planned |
-| `ConversationRecord` | type | `ConversationRecord` | — | planned |
-| `Cursor` | type | `Cursor` | — | planned |
+| `ConversationId` | type | `ConversationId` | test_ids.py, test_types.py | tested |
+| `ConversationOwnership` | type | `ConversationOwnership` | test_types.py | tested |
+| `ConversationQuery` | type | `ConversationQuery` | test_types.py, test_storage_protocol.py | tested |
+| `ConversationRecord` | type | `ConversationRecord` | test_types.py, test_storage_protocol.py | tested |
+| `Cursor` | type | `Cursor` | test_types.py, test_storage_protocol.py | tested |
 | `DocDefinition` | type | `DocDefinition` | — | planned |
 | `DocFamilyDefinition` | type | `DocFamilyDefinition` | — | planned |
 | `DocFamilyToken` | type | `DocFamilyToken` | — | planned |
 | `DocToken` | type | `DocToken` | — | planned |
-| `DocumentAddress` | type | `DocumentAddress` | — | planned |
-| `DocumentCommitChange` | type | `DocumentCommitChange` | — | planned |
-| `DocumentContent` | type | `DocumentContent` | — | planned |
-| `DocumentCopySource` | type | `DocumentCopySource` | — | planned |
-| `DocumentCreate` | type | `DocumentCreate` | — | planned |
-| `DocumentId` | type | `DocumentId` | — | planned |
+| `DocumentAddress` | type | `DocumentAddress` | test_types.py, test_storage_protocol.py | tested |
+| `DocumentCommitChange` | type | `DocumentCommitChange` | test_types.py | tested |
+| `DocumentContent` | type | `DocumentContent` | test_types.py | tested |
+| `DocumentCopySource` | type | `DocumentCopySource` | test_types.py | tested |
+| `DocumentCreate` | type | `DocumentCreate` | test_types.py | tested |
+| `DocumentId` | type | `DocumentId` | test_ids.py, test_types.py | tested |
 | `DocumentObserver` | type | `DocumentObserver` | — | planned |
-| `DocumentPoint` | type | `DocumentPoint` | — | planned |
-| `DocumentQuery` | type | `DocumentQuery` | — | planned |
+| `DocumentPoint` | type | `DocumentPoint` | test_types.py, test_storage_protocol.py | tested |
+| `DocumentQuery` | type | `DocumentQuery` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentReader` | type | `DocumentReader` | — | planned |
-| `DocumentRecord` | type | `DocumentRecord` | — | planned |
-| `DocumentSemantics` | type | `DocumentSemantics` | — | planned |
+| `DocumentRecord` | type | `DocumentRecord` | test_types.py | tested |
+| `DocumentSemantics` | type | `DocumentSemantics` | test_types.py | tested |
 | `DocumentState` | type | `DocumentState` | — | planned |
 | `DocumentWatch` | type | `DocumentWatch` | — | planned |
-| `Entry` | type | `Entry` | — | planned |
-| `EntryDraft` | type | `EntryDraft` | — | planned |
-| `EntryId` | type | `EntryId` | — | planned |
-| `EntryQuery` | type | `EntryQuery` | — | planned |
-| `EntryRecord` | type | `EntryRecord` | — | planned |
+| `Entry` | type | `Entry` | test_entries.py | tested |
+| `EntryDraft` | type | `EntryDraft` | test_entries.py, test_types.py | tested |
+| `EntryId` | type | `EntryId` | test_ids.py, test_types.py | tested |
+| `EntryQuery` | type | `EntryQuery` | test_types.py, test_storage_protocol.py | tested |
+| `EntryRecord` | type | `EntryRecord` | test_entries.py, test_types.py | tested |
 | `HookRunner` | type | `HookRunner` | — | planned |
-| `Id` | type | `Id` | — | planned |
-| `JoinPolicy` | type | `JoinPolicy` | — | planned |
-| `JsonObject` | type | `JsonObject` | — | planned |
-| `LatestConversationSemantics` | type | `LatestConversationSemantics` | — | planned |
-| `NextTaskState` | type | `NextTaskState` | — | planned |
-| `Page` | type | `Page` | — | planned |
+| `Id` | type | `Id` | test_types.py | tested |
+| `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
+| `JsonObject` | type | `JsonObject` | test_types.py | tested |
+| `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
+| `NextTaskState` | type | `NextTaskState` | test_types.py | tested |
+| `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
 | `PhaseHandler` | type | `PhaseHandler` | — | planned |
 | `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | — | planned |
 | `RewindableConversationDocToken` | type | `RewindableConversationDocToken` | — | planned |
-| `RewindableConversationSemantics` | type | `RewindableConversationSemantics` | — | planned |
-| `RunningTask` | type | `RunningTask` | — | planned |
-| `ScanOrder` | type | `ScanOrder` | — | planned |
-| `Seq` | type | `Seq` | — | planned |
+| `RewindableConversationSemantics` | type | `RewindableConversationSemantics` | test_types.py | tested |
+| `RunningTask` | type | `RunningTask` | test_types.py | tested |
+| `ScanOrder` | type | `ScanOrder` | test_types.py | tested |
+| `Seq` | type | `Seq` | test_ids.py, test_types.py | tested |
 | `Session` | type | `Session` | — | planned |
 | `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | — | planned |
 | `SessionDocToken` | type | `SessionDocToken` | — | planned |
 | `SessionEnd` | type | `SessionEnd` | — | planned |
-| `Storage` | type | `Storage` | — | planned |
-| `StorageWrite` | type | `StorageWrite` | — | planned |
-| `StoredDocument` | type | `StoredDocument` | — | planned |
-| `SubmissionCreate` | type | `SubmissionCreate` | — | planned |
-| `SubmissionId` | type | `SubmissionId` | — | planned |
-| `SubmissionQuery` | type | `SubmissionQuery` | — | planned |
-| `SubmissionRecord` | type | `SubmissionRecord` | — | planned |
-| `SubmissionSettlement` | type | `SubmissionSettlement` | — | planned |
-| `TableCommitChange` | type | `TableCommitChange` | — | planned |
+| `Storage` | type | `Storage` | test_storage_protocol.py | tested |
+| `StorageWrite` | type | `StorageWrite` | test_types.py, test_storage_protocol.py | tested |
+| `StoredDocument` | type | `StoredDocument` | test_types.py, test_storage_protocol.py | tested |
+| `SubmissionCreate` | type | `SubmissionCreate` | test_types.py | tested |
+| `SubmissionId` | type | `SubmissionId` | test_ids.py, test_types.py | tested |
+| `SubmissionQuery` | type | `SubmissionQuery` | test_types.py, test_storage_protocol.py | tested |
+| `SubmissionRecord` | type | `SubmissionRecord` | test_types.py, test_storage_protocol.py | tested |
+| `SubmissionSettlement` | type | `SubmissionSettlement` | test_types.py | tested |
+| `TableCommitChange` | type | `TableCommitChange` | test_types.py | tested |
 | `Task` | type | `Task` | — | planned |
 | `TaskDefinition` | type | `TaskDefinition` | — | planned |
 | `TaskDocFamilyToken` | type | `TaskDocFamilyToken` | — | planned |
 | `TaskDocToken` | type | `TaskDocToken` | — | planned |
-| `TaskId` | type | `TaskId` | — | planned |
-| `TaskOptions` | type | `TaskOptions` | — | planned |
-| `TaskOutcome` | type | `TaskOutcome` | — | planned |
-| `TaskOutcomeError` | type | `TaskOutcomeError` | — | planned |
-| `TaskOwnership` | type | `TaskOwnership` | — | planned |
-| `TaskQuery` | type | `TaskQuery` | — | planned |
-| `TaskRecord` | type | `TaskRecord` | — | planned |
+| `TaskId` | type | `TaskId` | test_ids.py, test_types.py | tested |
+| `TaskOptions` | type | `TaskOptions` | test_types.py | tested |
+| `TaskOutcome` | type | `TaskOutcome` | test_types.py | tested |
+| `TaskOutcomeError` | type | `TaskOutcomeError` | test_types.py | tested |
+| `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
+| `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py | tested |
+| `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
 | `TaskRuntime` | type | `TaskRuntime` | — | planned |
-| `TaskState` | type | `TaskState` | — | planned |
+| `TaskState` | type | `TaskState` | test_types.py | tested |
 | `Tx` | type | `Tx` | — | planned |
-| `TypedEntry` | type | `TypedEntry` | — | planned |
-| `TypedEntryDraft` | type | `TypedEntryDraft` | — | planned |
+| `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
+| `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
 | `WatchEnd` | type | `WatchEnd` | — | planned |
 | `WatchHandle` | type | `WatchHandle` | — | planned |
 
@@ -526,7 +526,7 @@ SQLite backend and migrations.
 | Section | Status |
 | --- | --- |
 | 1 Terms and invariants | planned |
-| 2 Core records | planned |
+| 2 Core records | tested |
 | 2.1 Entries and context | planned |
 | 2.2 Public Harness surface | planned |
 | 3 Documents | planned |
@@ -566,7 +566,7 @@ SQLite backend and migrations.
 | 9.3 Conversation view | planned |
 | 9.4 Agent events (experimental) | planned |
 | 9.5 Task graph view | planned |
-| 10 Storage contract | planned |
+| 10 Storage contract | code |
 | 10.1 Failures | planned |
 | 11 Backends | planned |
 | 11.1 Memory | planned |
@@ -594,6 +594,9 @@ SQLite backend and migrations.
 | Storage interoperability | shared format | incidental, not a contract |
 | `Context` | Chord `Context` | minimal abort signal + value bag |
 | Model access | `pi-ai` dependency | `Model` protocol + OpenAI/Anthropic extras |
+| Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
+| Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
+| ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
 | Version | `1.3.0` | `1.3.0` lockstep |
 
 ## Port additions
@@ -602,6 +605,9 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 
 | Addition | Module | Status |
 | --- | --- | --- |
+| Context, abort signal, and context-scoped values | `pi_durable.context` | tested (`test_context.py`) |
+| Strict JSON validation, copying, and frozen values | `pi_durable.json` | tested (`test_json.py`) |
+| Entry draft validation and immutable record construction | `pi_durable.types` | tested (`test_entries.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 
