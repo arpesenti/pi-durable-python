@@ -122,7 +122,8 @@ class TaskRuntime:
 
     @property
     def registry(self) -> Any:
-        return self._scheduler.registry
+        registry = self._scheduler.registry
+        return registry.snapshot() if hasattr(registry, "snapshot") else registry
 
     @property
     def settings(self) -> Any:

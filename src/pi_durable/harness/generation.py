@@ -7,6 +7,7 @@ assistant message and tool result is committed before the next request.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Mapping, Sequence
@@ -380,6 +381,8 @@ async def generation_turn(task: dict[str, Any], runtime: Any) -> None:
     try:
         response = await harness.complete(agent, request)
         message, usage = _normalize_response(response, runtime.now())
+    except asyncio.CancelledError:
+        raise
     except BaseException as error:  # noqa: BLE001 - model failure becomes a durable run outcome
         await _fail_run(harness, runtime, task, "model_error", error_message(error))
         return
@@ -416,7 +419,7 @@ async def generation_turn(task: dict[str, Any], runtime: Any) -> None:
                         "status": "running",
                     }
                 )
-            await apply_boundary(
+            boundary = await apply_boundary(
                 tx,
                 conversation_id=conversation_id,
                 final=False,
@@ -426,6 +429,11 @@ async def generation_turn(task: dict[str, Any], runtime: Any) -> None:
             )
             live = await tx.doc(LiveDoc, conversation_id)
             live["tools"] = slots
+            if boundary["inputs"]:
+                # Placed steering inputs belong to this run until its answer.
+                live_run = live.get("run")
+                if live_run is not None and live_run.get("taskId") == task["id"]:
+                    live_run["inputs"] = [*live_run.get("inputs", []), *boundary["inputs"]]
             return {
                 "status": "waiting",
                 "checkpoint": {**checkpoint, "round": int(checkpoint.get("round") or 0) + 1},
@@ -543,7 +551,7 @@ async def _execute_tool(task: dict[str, Any], runtime: Any) -> None:
     runtime.check_active()
     agent = await harness.resolve_agent(conversation_id)
     tool = next(
-        (candidate for candidate in agent.callable_tools if candidate.name == call.get("name")),
+        (candidate for candidate in agent.tools if candidate.name == call.get("name")),
         None,
     )
     if tool is None:
@@ -602,6 +610,8 @@ async def _execute_tool(task: dict[str, Any], runtime: Any) -> None:
             usage = result.usage
         else:
             output = result
+    except asyncio.CancelledError:
+        raise
     except BaseException as error:  # noqa: BLE001 - a tool throw becomes an error result
         is_error = True
         output = f"{call.get('name')} failed: {error_message(error)}"

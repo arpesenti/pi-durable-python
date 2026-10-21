@@ -45,8 +45,6 @@ from .submissions import (
     write_item,
 )
 
-DEFAULT_SETTINGS = HarnessSettings()
-
 
 @dataclass
 class HarnessInspection:
@@ -277,7 +275,17 @@ class Harness(Session):
     ) -> None:
         merged = dict(info)
         if from_ is not None and from_.get("type") == "extension":
-            merged = {"type": "extension_error", **({"extension": from_.get("extension")} if from_.get("extension") else {})}
+            merged = {
+                "type": "extension_error",
+                **({"extension": from_.get("extension")} if from_.get("extension") else {}),
+            }
+            if info.get("task") is not None:
+                merged["task"] = info["task"]
+        elif from_ is not None and from_.get("type") == "host":
+            merged = {
+                "type": "host_error",
+                **({"callback": from_.get("callback")} if from_.get("callback") else {}),
+            }
             if info.get("task") is not None:
                 merged["task"] = info["task"]
         self.report(error, merged)
@@ -300,6 +308,8 @@ class Harness(Session):
             if inspect.isawaitable(value):
                 value = await value
             return value
+        except asyncio.CancelledError:
+            raise
         except BaseException as error:  # noqa: BLE001 - a host callback failure is reported
             self.report(error, {"type": "host_error", "callback": "env"})
             return None
@@ -629,9 +639,22 @@ class Harness(Session):
                     event.set()
                     return
 
+        # Register before the re-read so a settlement cannot slip between the check and wait.
         unsubscribe = self.subscribe_commits(listener)
         try:
-            await event.wait()
+            try:
+                unsubscribe_close = self.subscribe_close(event.set)
+            except Exception:  # noqa: BLE001 - close already sealed admission
+                unsubscribe_close = None
+                event.set()
+            try:
+                record = await self.storage.submission(submission_id)
+                if record is not None and record["status"] in ("done", "unanswered"):
+                    return
+                await event.wait()
+            finally:
+                if unsubscribe_close is not None:
+                    unsubscribe_close()
         finally:
             unsubscribe()
 

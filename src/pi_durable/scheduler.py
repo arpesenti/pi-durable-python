@@ -221,7 +221,9 @@ class TaskScheduler:
 
     async def wait_for_task(self, task_id: int) -> dict[str, Any]:
         record = await self.get_task(task_id)
-        if record is not None and record["state"]["status"] == "terminal":
+        if record is None:
+            raise ValueError(f"Task {task_id} does not exist")
+        if record["state"]["status"] == "terminal":
             return record
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._waiters.setdefault(task_id, []).append(future)
@@ -895,9 +897,6 @@ class TaskScheduler:
                     }
             results.append({"record": copy_json(record), "state": view})
         return results
-
-    async def inspect_submissions(self, conversation_id: int | None = None) -> list[dict[str, Any]]:
-        return []
 
     # ── Derived states ─────────────────────────────────────────────────────
 
