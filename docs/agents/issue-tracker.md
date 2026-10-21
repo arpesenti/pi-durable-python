@@ -13,6 +13,18 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
+## Ticket lifecycle
+
+A ticket is an input *and* an output. Work is finished when the tracker says so, not when the commit lands.
+
+1. **Claim.** `gh issue edit <n> --add-assignee @me` is the session's first write. Assigning separates "being worked on" from "untouched or shipped-unclosed", which an open `ready-for-agent` ticket otherwise cannot tell apart.
+2. **Name the ticket in the commit subject**, using the existing convention: `Implement document history (#4)`.
+3. **Close via keyword in the commit body.** One line after the subject: `Closes #4`. GitHub closes the ticket when that commit reaches the default branch, so the tracker stays correct even if a run ends mid-session.
+4. **Write the receipt.** Post one comment: the closing commit sha, the source and test paths the ticket produced, and the PARITY.md rows now `tested`. Tick the acceptance checkboxes.
+5. **Close by hand when the keyword did not fire** — the commit is still on a branch, or it landed via a rebase that dropped the body: `gh issue close <n> --comment "<receipt>"`. Keep the triage label; a closed issue still shows how it was scoped.
+
+Done means: the ticket is closed, every acceptance box is ticked, and one comment names the commit that satisfies it.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
