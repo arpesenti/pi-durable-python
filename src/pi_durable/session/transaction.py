@@ -60,7 +60,7 @@ from ..types import (
     TaskRecord,
     entry_record,
 )
-from .drafts import DocumentDraft
+from .drafts import DocumentDraft, PreparedDraft
 from .forks import prepare_fork_document_copies
 
 AnyTaskRecord = TaskRecord
@@ -151,7 +151,7 @@ class DocumentEntry:
     acquisition: asyncio.Future[DocumentDraft] | None = None
     target: DocumentTarget | None = None
     retire_on_commit: bool = False
-    candidate: JsonObject | None = None
+    prepared: PreparedDraft | None = None
 
 
 @dataclass(slots=True)
@@ -654,7 +654,7 @@ class Transaction:
         try:
             for document in self._documents:
                 if document.draft is not None:
-                    document.candidate = document.draft._candidate()
+                    document.prepared = document.draft._prepare()
             return await self._assemble()
         except Exception:
             for document in self._documents:
@@ -923,8 +923,8 @@ class Transaction:
                     {"type": "document.copy", "record": target.record, "source": target.source},
                 ),
             )
-        candidate = document.candidate
-        assert candidate is not None
+        prepared = document.prepared
+        assert prepared is not None
         if isinstance(target, _CreatedTarget):
             return DocumentPlan(
                 address_id=document.address_id,
@@ -935,23 +935,22 @@ class Transaction:
                     {
                         "type": "document.create",
                         "record": target.record,
-                        "content": {"version": target.version, "kind": "base", "value": candidate},
+                        "content": {"version": target.version, "kind": "base", "value": prepared.value},
                     },
                 ),
                 change=_PlanChange(
                     loaded=None,
                     definition=document.definition,
                     version=target.version,
-                    value=candidate,
+                    value=prepared.value,
                     ops=[],
                 ),
             )
         loaded = target.document
         definition = document.definition
         assert definition is not None
-        different = candidate != loaded.value
-        value = candidate if different else loaded.value
-        ops: list[Op] = [["r", candidate]] if different else []
+        ops = prepared.ops
+        value = prepared.value
         if loaded.stored_version < definition.version:
             content = cast(
                 StorageWrite,

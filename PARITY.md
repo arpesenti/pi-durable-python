@@ -37,8 +37,8 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `defineDoc` | value | `define_doc` | test_session_states.py, test_session_tables.py | tested |
-| `defineDocFamily` | value | `define_doc_family` | test_session_states.py, test_session_tables.py | tested |
+| `defineDoc` | value | `define_doc` | test_session_definitions.py, test_session_documents.py, test_session_states.py, test_session_tables.py | tested |
+| `defineDocFamily` | value | `define_doc_family` | test_session_definitions.py, test_session_documents.py, test_session_states.py, test_session_tables.py | tested |
 
 ### `./entries.ts` → `pi_durable.entries`
 
@@ -268,19 +268,19 @@ is green.
 | `CheckpointInfo` | type | `CheckpointInfo` | test_types.py | tested |
 | `CommitChange` | type | `CommitChange` | test_types.py | tested |
 | `CommitPublication` | type | `CommitPublication` | test_types.py | tested |
-| `CommonDocDefinition` | type | `CommonDocDefinition` | test_session_states.py | code |
+| `CommonDocDefinition` | type | `CommonDocDefinition` | test_session_definitions.py | tested |
 | `ContextEdit` | type | `ContextEdit` | test_types.py | tested |
-| `ConversationDocFamilyToken` | type | `ConversationDocFamilyToken` | — | planned |
-| `ConversationDocToken` | type | `ConversationDocToken` | — | planned |
+| `ConversationDocFamilyToken` | type | `ConversationDocFamilyToken` | test_session_definitions.py | tested |
+| `ConversationDocToken` | type | `ConversationDocToken` | test_session_definitions.py | tested |
 | `ConversationId` | type | `ConversationId` | test_ids.py, test_types.py | tested |
 | `ConversationOwnership` | type | `ConversationOwnership` | test_types.py | tested |
 | `ConversationQuery` | type | `ConversationQuery` | test_types.py, test_storage_protocol.py | tested |
 | `ConversationRecord` | type | `ConversationRecord` | test_types.py, test_storage_protocol.py | tested |
 | `Cursor` | type | `Cursor` | test_types.py, test_storage_protocol.py | tested |
-| `DocDefinition` | type | `DocDefinition` | test_session_states.py | tested |
-| `DocFamilyDefinition` | type | `DocFamilyDefinition` | test_session_states.py | code |
-| `DocFamilyToken` | type | `DocFamilyToken` | test_session_states.py | tested |
-| `DocToken` | type | `DocToken` | test_session_states.py | tested |
+| `DocDefinition` | type | `DocDefinition` | test_session_definitions.py, test_session_states.py | tested |
+| `DocFamilyDefinition` | type | `DocFamilyDefinition` | test_session_definitions.py | tested |
+| `DocFamilyToken` | type | `DocFamilyToken` | test_session_definitions.py, test_session_states.py | tested |
+| `DocToken` | type | `DocToken` | test_session_definitions.py, test_session_documents.py, test_session_states.py | tested |
 | `DocumentAddress` | type | `DocumentAddress` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentCommitChange` | type | `DocumentCommitChange` | test_types.py | tested |
 | `DocumentContent` | type | `DocumentContent` | test_types.py | tested |
@@ -308,15 +308,15 @@ is green.
 | `NextTaskState` | type | `NextTaskState` | test_types.py | tested |
 | `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
 | `PhaseHandler` | type | `PhaseHandler` | — | planned |
-| `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | — | planned |
-| `RewindableConversationDocToken` | type | `RewindableConversationDocToken` | — | planned |
+| `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | test_session_definitions.py | tested |
+| `RewindableConversationDocToken` | type | `RewindableConversationDocToken` | test_session_definitions.py | tested |
 | `RewindableConversationSemantics` | type | `RewindableConversationSemantics` | test_types.py | tested |
 | `RunningTask` | type | `RunningTask` | test_types.py | tested |
 | `ScanOrder` | type | `ScanOrder` | test_types.py | tested |
 | `Seq` | type | `Seq` | test_ids.py, test_types.py | tested |
 | `Session` | type | `Session` | test_session_tables.py | tested |
-| `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | — | planned |
-| `SessionDocToken` | type | `SessionDocToken` | — | planned |
+| `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | test_session_definitions.py | tested |
+| `SessionDocToken` | type | `SessionDocToken` | test_session_definitions.py | tested |
 | `SessionEnd` | type | `SessionEnd` | — | planned |
 | `Storage` | type | `Storage` | test_storage_protocol.py | tested |
 | `StorageWrite` | type | `StorageWrite` | test_types.py, test_storage_protocol.py | tested |
@@ -329,8 +329,8 @@ is green.
 | `TableCommitChange` | type | `TableCommitChange` | test_types.py | tested |
 | `Task` | type | `Task` | test_session_tables.py | tested |
 | `TaskDefinition` | type | `TaskDefinition` | test_session_tables.py | tested |
-| `TaskDocFamilyToken` | type | `TaskDocFamilyToken` | — | planned |
-| `TaskDocToken` | type | `TaskDocToken` | — | planned |
+| `TaskDocFamilyToken` | type | `TaskDocFamilyToken` | test_session_definitions.py | tested |
+| `TaskDocToken` | type | `TaskDocToken` | test_session_definitions.py | tested |
 | `TaskId` | type | `TaskId` | test_ids.py, test_types.py | tested |
 | `TaskOptions` | type | `TaskOptions` | test_types.py | tested |
 | `TaskOutcome` | type | `TaskOutcome` | test_types.py | tested |
@@ -529,11 +529,11 @@ SQLite backend and migrations.
 | 2 Core records | tested |
 | 2.1 Entries and context | planned |
 | 2.2 Public Harness surface | planned |
-| 3 Documents | planned |
-| 3.1 Definitions | planned |
-| 3.2 Records and lifetimes | planned |
-| 3.3 Access and creation | planned |
-| 3.4 Mutation ownership | planned |
+| 3 Documents | code |
+| 3.1 Definitions | tested |
+| 3.2 Records and lifetimes | tested |
+| 3.3 Access and creation | code |
+| 3.4 Mutation ownership | tested |
 | 3.5 Bases and checkpoints | planned |
 | 3.6 Versions and migrations | planned |
 | 3.7 Forks | planned |
@@ -595,6 +595,7 @@ SQLite backend and migrations.
 | `Context` | Chord `Context` | minimal abort signal + value bag |
 | Model access | `pi-ai` dependency | `Model` protocol + OpenAI/Anthropic extras |
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
+| Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
 | ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
 | Version | `1.3.0` | `1.3.0` lockstep |

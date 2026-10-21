@@ -19,8 +19,7 @@ is the one Chord Delta publishes:
     Reorder an array in place: ``new[i] = old[permutation[i]]``.
 
 The applier is intentionally independent of the document tracker. Memory storage uses it to
-materialize persisted deltas; the first Session implementation publishes whole-value replacement
-batches, which are a valid (if not minimal) member of the same vocabulary.
+materialize persisted deltas; Session drafts emit the same tuples from their own overlay.
 """
 
 from __future__ import annotations

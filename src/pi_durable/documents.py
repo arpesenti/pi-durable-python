@@ -59,6 +59,17 @@ class DocFamilyToken:
 
 AnyDocToken: TypeAlias = DocToken | DocFamilyToken
 
+# Scope-specific token names from the v1.3.0 public surface. Python resolves the scope at runtime
+# from the definition, so these are the same erased token classes.
+SessionDocToken: TypeAlias = DocToken
+ConversationDocToken: TypeAlias = DocToken
+RewindableConversationDocToken: TypeAlias = DocToken
+TaskDocToken: TypeAlias = DocToken
+SessionDocFamilyToken: TypeAlias = DocFamilyToken
+ConversationDocFamilyToken: TypeAlias = DocFamilyToken
+RewindableConversationDocFamilyToken: TypeAlias = DocFamilyToken
+TaskDocFamilyToken: TypeAlias = DocFamilyToken
+
 #: Erased definition shapes used by callers that do not care about family/singleton tokens.
 CommonDocDefinition: TypeAlias = DocDefinition
 DocFamilyDefinition: TypeAlias = DocDefinition
@@ -269,12 +280,20 @@ def materialize_document(definition: DocDefinition, stored: StoredDocument) -> J
 __all__ = [
     "AnyDocToken",
     "CommonDocDefinition",
+    "ConversationDocFamilyToken",
+    "ConversationDocToken",
     "DocDefinition",
     "DocFamilyDefinition",
     "DocFamilyToken",
     "DocScope",
     "DocToken",
     "ResolvedAddress",
+    "RewindableConversationDocFamilyToken",
+    "RewindableConversationDocToken",
+    "SessionDocFamilyToken",
+    "SessionDocToken",
+    "TaskDocFamilyToken",
+    "TaskDocToken",
     "address_id",
     "check_record_scope",
     "check_record_version",
