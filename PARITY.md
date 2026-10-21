@@ -509,15 +509,15 @@ SQLite backend and migrations.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `applySqliteMigrations` | value | `apply_sqlite_migrations` | — | planned |
-| `CURRENT_SQLITE_SCHEMA_VERSION` | value | `CURRENT_SQLITE_SCHEMA_VERSION` | — | planned |
-| `SQLITE_MIGRATIONS` | value | `SQLITE_MIGRATIONS` | — | planned |
-| `SqliteStorage` | value | `SqliteStorage` | — | planned |
-| `SqliteDatabase` | type | `SqliteDatabase` | — | planned |
-| `SqliteExecutor` | type | `SqliteExecutor` | — | planned |
-| `SqliteValue` | type | `SqliteValue` | — | planned |
-| `SqliteMigration` | type | `SqliteMigration` | — | planned |
-| `SqliteStorageOptions` | type | `SqliteStorageOptions` | — | planned |
+| `applySqliteMigrations` | value | `apply_sqlite_migrations` | test_sqlite_migrations.py | tested |
+| `CURRENT_SQLITE_SCHEMA_VERSION` | value | `CURRENT_SQLITE_SCHEMA_VERSION` | test_sqlite_migrations.py | tested |
+| `SQLITE_MIGRATIONS` | value | `SQLITE_MIGRATIONS` | test_sqlite_migrations.py | tested |
+| `SqliteStorage` | value | `SqliteStorage` | test_sqlite_storage.py, test_sqlite_facade.py | tested |
+| `SqliteDatabase` | type | `SqliteDatabase` | test_sqlite_facade.py, test_sqlite_storage.py | tested |
+| `SqliteExecutor` | type | `SqliteExecutor` | test_sqlite_facade.py | tested |
+| `SqliteValue` | type | `SqliteValue` | test_sqlite_facade.py | tested |
+| `SqliteMigration` | type | `SqliteMigration` | test_sqlite_migrations.py | tested |
+| `SqliteStorageOptions` | type | `SqliteStorageOptions` | test_sqlite_storage.py | tested |
 
 ## Excluded subpaths
 
@@ -526,7 +526,7 @@ SQLite backend and migrations.
 | `./codemode` | Code Mode is a separate subsystem and needs a Python execution-sandbox design. |
 | `./images` | No Python image implementation; the `ImageProcessor` protocol remains in `tools`. |
 | `./storage/jsonl/node` | Node filesystem adapter; Python passes a `FileSystem` (such as `PosixExecutionEnv`) to `JsonlStorage.open()`. |
-| `./storage/sqlite/node` | Node SQLite driver; Python uses the stdlib-backed `SqliteStorage.open()`. |
+| `./storage/sqlite/node` | Node SQLite driver; Python opens the stdlib-backed `PosixSqliteDatabase` facade and passes it to `SqliteStorage.open()`. |
 | `./storage/sqlite/cloudflare` | Cloudflare-only adapter. |
 
 ## Spec sections
@@ -576,9 +576,9 @@ SQLite backend and migrations.
 | 9.5 Task graph view | planned |
 | 10 Storage contract | tested |
 | 10.1 Failures | code |
-| 11 Backends | code |
+| 11 Backends | tested |
 | 11.1 Memory | tested |
-| 11.2 SQLite | planned |
+| 11.2 SQLite | tested |
 | 11.3 JSONL | tested |
 | 12 API footguns | planned |
 | 13 Non-goals | n/a |
@@ -600,10 +600,11 @@ extended reads and the range cache's freeze guarantees (section 5) and `contextR
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
 | Host execution backend | `NodeExecutionEnv` | `PosixExecutionEnv` |
-| Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()`, with the caller supplying a `FileSystem` |
+| Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()`, with the caller supplying a `FileSystem` or a `SqliteDatabase`; file-backed SQLite opens through `open_posix_sqlite_storage()` |
 | `Result` values | `{ ok: true, value }` / `{ ok: false, error }` object literals | frozen `Ok(value)` / `Err(error)` dataclasses with the same `ok` role and `value`/`error` fields |
 | Storage conformance registration | Vitest's runtime `describe`/`it` globals | `create_storage_conformance` cases are parametrized by pytest; `register_storage_conformance` keeps the runner-injection protocol |
 | JSONL serialization | `JSON.stringify` (raw UTF-8, well-formed lone-surrogate escapes) | `json.dumps(ensure_ascii=True)` (escaped non-ASCII); the decoded JSON values are identical |
+| SQLite serialization | `JSON.stringify` (raw UTF-8), indexed strings kept as `JSON.stringify` output | `json.dumps(ensure_ascii=True, separators=(",", ":"))`; decoded values are identical, and indexed strings stay JSON-encoded because stdlib `sqlite3` cannot bind lone surrogates |
 | PowerShell tool | exported | excluded |
 | Document eviction timers | `setTimeout(...).unref()`, commits-only where timers cannot be unreferenced | `asyncio` timers never keep the process alive, so every loop keeps one; a loop that cannot schedule one evicts on commits only |
 | Windows support | supported | unsupported |
@@ -613,6 +614,7 @@ extended reads and the range cache's freeze guarantees (section 5) and `contextR
 | Benchmarks | `./testing` helpers | excluded |
 | Chord | public dependency | internal implementation |
 | Storage interoperability | shared format | incidental, not a contract |
+| Storage close identity | `close()` returns one promise per call | `SqliteStorage.close()` returns the one shared `asyncio.Future`, so a repeated close is identity-stable and the database closes only once; the `Storage` protocol accepts any awaitable |
 | `Context` | Chord `Context` | minimal abort signal + value bag |
 | Model access | `pi-ai` dependency | `Model` protocol + OpenAI/Anthropic extras |
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
@@ -642,6 +644,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Document cache sizes, retention normalization, and the suite default | `pi_durable.session.session` | tested (`test_session_document_retention.py`) |
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
 | Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
+| Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 
@@ -649,7 +652,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 
 - [x] 1. Scaffold: vendored spec, decision record, parity matrix, CI, package layout.
 - [x] 2. Kernel: types, IDs, JSON, errors, entries, documents, Session/Tx/forks.
-- [ ] 3. Storage: memory, JSONL, SQLite, conformance suites.
+- [x] 3. Storage: memory, JSONL, SQLite, conformance suites.
 - [ ] 4. Tasks, scheduler, submissions, document observation.
 - [ ] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
 - [ ] 6. `env`, coding tools, `tool-search`.

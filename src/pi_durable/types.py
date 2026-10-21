@@ -12,7 +12,7 @@ JSON values that cannot be mutated after construction.
 """
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -1039,7 +1039,7 @@ class Storage(Protocol):
     ) -> Page[DocumentRecord, Cursor]:
         """Scan incarnations alive in one exact scope at the selected point."""
 
-    async def close(self, context: Context) -> None:
+    def close(self, context: Context) -> Awaitable[None]:
         """Release backend resources; all later operations must reject."""
 
 
