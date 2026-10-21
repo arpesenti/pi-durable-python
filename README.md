@@ -1,8 +1,14 @@
-# pi-durable for Python
+# pi-durable-python
 
 A Python port of the API and architecture of
 [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable),
 the durable agent harness behind pi.
+
+```bash
+pip install pi-durable-python
+```
+
+The distribution is `pi-durable-python`; the import is `pi_durable`.
 
 A **Session** owns one mutation line. Immutable transcript entries, full task records,
 submissions, and tracked JSON documents commit atomically through it. Only committed state

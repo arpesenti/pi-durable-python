@@ -3,14 +3,21 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pi-durable"
+name = "pi-durable-python"
 version = "0.1.0"
-description = "Durable conversation, task, and document runtime for Python (port of @earendil-works/pi-durable)"
+description = "Python port of @earendil-works/pi-durable: durable conversations, tasks, and documents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Earendil Works" }]
-keywords = ["durable-execution", "agents", "conversations", "tasks"]
+keywords = ["durable-execution", "agents", "conversations", "tasks", "pi", "port"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
 dependencies = []
 
 [project.optional-dependencies]
