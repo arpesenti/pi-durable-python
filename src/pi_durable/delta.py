@@ -25,7 +25,7 @@ materialize persisted deltas; Session drafts emit the same tuples from their own
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 from .json import JsonValue, copy_json
 
@@ -155,13 +155,17 @@ def _assert_index_in_range(parent: list[Any], index: int) -> None:
 
 
 def apply(target: JsonValue, ops: Iterable[Op]) -> JsonValue:
-    """Apply decoded operations to a mutable value and return the possibly replaced root."""
+    """Apply decoded operations to a mutable value and return the possibly replaced root.
+
+    Payloads carried by an operation are copied into the result, so the result never aliases the
+    caller's operations and later operations can safely address what an earlier one inserted.
+    """
 
     root: Any = target
     for op in ops:
         assert_valid_op(op)
         if op[0] == "r":
-            root = op[1]
+            root = copy_json(op[1])
             continue
         path = op[1]
         assert_safe_path(path)
@@ -170,7 +174,7 @@ def apply(target: JsonValue, ops: Iterable[Op]) -> JsonValue:
             if not isinstance(parent, list):
                 raise PathError(path)
             index, remove, items = op[2], op[3], op[4]
-            parent[index:index + remove] = items
+            parent[index:index + remove] = cast(list[Any], copy_json(items))
             continue
         if op[0] == "m":
             parent = root if not path else _resolve(root, path)
@@ -190,7 +194,7 @@ def apply(target: JsonValue, ops: Iterable[Op]) -> JsonValue:
         if not isinstance(parent, (dict, list)):
             raise PathError(path)
         if op[0] == "s":
-            parent[key] = op[2]
+            parent[key] = copy_json(op[2])
         elif op[0] == "d":
             if isinstance(parent, list):
                 if key >= len(parent):

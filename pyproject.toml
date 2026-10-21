@@ -76,8 +76,24 @@ disable_error_code = ["typeddict-item", "arg-type", "assignment", "index", "call
 
 [[tool.mypy.overrides]]
 module = ["test_memory_storage"]
-disable_error_code = ["misc", "list-item", "arg-type", "dict-item", "typeddict-item", "index", "union-attr", "assignment", "call-overload", "attr-defined", "return-value"]
+disable_error_code = ["misc", "arg-type", "typeddict-item", "index", "union-attr", "call-overload"]
 
 [[tool.mypy.overrides]]
 module = ["test_session_tables"]
 disable_error_code = ["misc", "typeddict-item", "arg-type", "return-value"]
+
+[[tool.mypy.overrides]]
+module = ["pi_durable.testing.storage_conformance"]
+disable_error_code = ["arg-type", "call-overload", "index", "list-item", "misc", "typeddict-item", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = ["test_testing_conformance", "storage_support"]
+disable_error_code = ["arg-type"]
+
+[[tool.mypy.overrides]]
+module = ["pi_durable.storage.jsonl.storage"]
+disable_error_code = ["arg-type", "misc", "typeddict-item"]
+
+[[tool.mypy.overrides]]
+module = ["test_jsonl_storage", "test_env_filesystem"]
+disable_error_code = ["arg-type", "call-overload", "list-item", "misc", "typeddict-item"]

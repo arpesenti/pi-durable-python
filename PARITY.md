@@ -358,18 +358,18 @@ Execution environment protocol and helpers.
 | `StreamDecoder` | value | `StreamDecoder` | — | planned |
 | `startsWithBom` | value | `starts_with_bom` | — | planned |
 | `LineScanner` | value | `LineScanner` | — | planned |
-| `ok` | value | `ok` | — | planned |
-| `err` | value | `err` | — | planned |
-| `getOrThrow` | value | `get_or_throw` | — | planned |
-| `getOrUndefined` | value | `get_or_undefined` | — | planned |
-| `toError` | value | `to_error` | — | planned |
-| `FileError` | value | `FileError` | — | planned |
+| `ok` | value | `ok` | — | code |
+| `err` | value | `err` | — | code |
+| `getOrThrow` | value | `get_or_throw` | — | code |
+| `getOrUndefined` | value | `get_or_undefined` | — | code |
+| `toError` | value | `to_error` | — | code |
+| `FileError` | value | `FileError` | — | code |
 | `ExecutionError` | value | `ExecutionError` | — | planned |
-| `Result` | type | `Result` | — | planned |
-| `FileKind` | type | `FileKind` | — | planned |
-| `FileErrorCode` | type | `FileErrorCode` | — | planned |
+| `Result` | type | `Result` | — | code |
+| `FileKind` | type | `FileKind` | — | code |
+| `FileErrorCode` | type | `FileErrorCode` | — | code |
 | `ExecutionErrorCode` | type | `ExecutionErrorCode` | — | planned |
-| `FileInfo` | type | `FileInfo` | — | planned |
+| `FileInfo` | type | `FileInfo` | — | code |
 | `TextLine` | type | `TextLine` | — | planned |
 | `TextLineReader` | type | `TextLineReader` | — | planned |
 | `BinaryReader` | type | `BinaryReader` | — | planned |
@@ -381,7 +381,7 @@ Execution environment protocol and helpers.
 | `ListFilesOptions` | type | `ListFilesOptions` | — | planned |
 | `FileListEntry` | type | `FileListEntry` | — | planned |
 | `FileListing` | type | `FileListing` | — | planned |
-| `FileSystem` | type | `FileSystem` | — | planned |
+| `FileSystem` | type | `FileSystem` | — | code |
 | `ShellSpillOptions` | type | `ShellSpillOptions` | — | planned |
 | `ShellExecResult` | type | `ShellExecResult` | — | planned |
 | `ShellExecOptions` | type | `ShellExecOptions` | — | planned |
@@ -397,8 +397,12 @@ Python replaces the Node backend with a POSIX backend.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `NodeExecutionEnv` | value | `PosixExecutionEnv` | — | planned |
+| `NodeExecutionEnv` | value | `PosixExecutionEnv` | — | code |
 | `NodeWatchOptions` | type | `PosixWatchOptions` | — | planned |
+
+`test_env_filesystem.py` exercises the filesystem operations the JSONL backend and its failure
+injection need. The translated `env` conformance suite, shell execution, watching, line and binary
+readers, and directory listings land with #16, so these rows remain `code`.
 
 ### `src/tools/index.ts` → `pi_durable.tools`
 
@@ -448,10 +452,10 @@ Conformance helpers; benchmarks are excluded.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createExpectAssertions` | value | `create_expect_assertions` | — | planned |
+| `createExpectAssertions` | value | `create_expect_assertions` | test_testing_conformance.py | tested |
 | `createEnvConformance` | value | `create_env_conformance` | — | planned |
 | `registerEnvConformance` | value | `register_env_conformance` | — | planned |
-| `registerStorageConformance` | value | `register_storage_conformance` | — | planned |
+| `registerStorageConformance` | value | `register_storage_conformance` | test_testing_conformance.py | tested |
 | `STORAGE_MEMORY_SCALES` | value | `STORAGE_MEMORY_SCALES` | — | excluded |
 | `STORAGE_READ_BENCHMARKS` | value | `STORAGE_READ_BENCHMARKS` | — | excluded |
 | `STORAGE_WRITE_BENCHMARKS` | value | `STORAGE_WRITE_BENCHMARKS` | — | excluded |
@@ -459,9 +463,9 @@ Conformance helpers; benchmarks are excluded.
 | `seedStorageWriteBenchmark` | value | `seed_storage_write_benchmark` | — | excluded |
 | `storageBenchmarkPrimaryRecordCount` | value | `storageBenchmarkPrimaryRecordCount` | — | excluded |
 | `TIMING_SCALE` | value | `TIMING_SCALE` | — | excluded |
-| `createStorageConformance` | value | `create_storage_conformance` | — | planned |
-| `ExpectLike` | type | `ExpectLike` | — | planned |
-| `StorageConformanceRunner` | type | `StorageConformanceRunner` | — | planned |
+| `createStorageConformance` | value | `create_storage_conformance` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
+| `ExpectLike` | type | `ExpectLike` | test_testing_conformance.py | tested |
+| `StorageConformanceRunner` | type | `StorageConformanceRunner` | test_testing_conformance.py | tested |
 | `StorageBenchmarkDataset` | type | `StorageBenchmarkDataset` | — | excluded |
 | `StorageBenchmarkScale` | type | `StorageBenchmarkScale` | — | excluded |
 | `StorageReadBenchmark` | type | `StorageReadBenchmark` | — | excluded |
@@ -470,10 +474,14 @@ Conformance helpers; benchmarks are excluded.
 | `EnvConformanceCase` | type | `EnvConformanceCase` | — | planned |
 | `EnvConformanceOptions` | type | `EnvConformanceOptions` | — | planned |
 | `EnvConformanceProvider` | type | `EnvConformanceProvider` | — | planned |
-| `StorageConformanceAssertions` | type | `StorageConformanceAssertions` | — | planned |
-| `StorageConformanceCase` | type | `StorageConformanceCase` | — | planned |
-| `StorageConformanceOptions` | type | `StorageConformanceOptions` | — | planned |
-| `StorageConformanceProvider` | type | `StorageConformanceProvider` | — | planned |
+| `StorageConformanceAssertions` | type | `StorageConformanceAssertions` | test_testing_conformance.py | tested |
+| `StorageConformanceCase` | type | `StorageConformanceCase` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
+| `StorageConformanceOptions` | type | `StorageConformanceOptions` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
+| `StorageConformanceProvider` | type | `StorageConformanceProvider` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
+
+The environment cases and their types (`createEnvConformance`, `registerEnvConformance`, and the
+`EnvConformance*` types) land with the `env` suite in #16. The filesystem capability they depend on is
+already in place for the JSONL backend.
 
 ### `src/storage/memory.ts` → `pi_durable.storage.memory`
 
@@ -490,10 +498,10 @@ JSONL backend.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `JsonlCorruptionError` | value | `JsonlCorruptionError` | — | planned |
-| `JsonlStorage` | value | `JsonlStorage` | — | planned |
-| `JsonlStoragePoisonedError` | value | `JsonlStoragePoisonedError` | — | planned |
-| `JsonlStorageOptions` | type | `JsonlStorageOptions` | — | planned |
+| `JsonlCorruptionError` | value | `JsonlCorruptionError` | test_jsonl_storage.py | tested |
+| `JsonlStorage` | value | `JsonlStorage` | test_jsonl_storage.py | tested |
+| `JsonlStoragePoisonedError` | value | `JsonlStoragePoisonedError` | test_jsonl_storage.py | tested |
+| `JsonlStorageOptions` | type | `JsonlStorageOptions` | test_jsonl_storage.py | tested |
 
 ### `src/storage/sqlite/index.ts` → `pi_durable.storage.sqlite`
 
@@ -517,7 +525,7 @@ SQLite backend and migrations.
 | --- | --- |
 | `./codemode` | Code Mode is a separate subsystem and needs a Python execution-sandbox design. |
 | `./images` | No Python image implementation; the `ImageProcessor` protocol remains in `tools`. |
-| `./storage/jsonl/node` | Node filesystem adapter; Python uses `JsonlStorage.open()`. |
+| `./storage/jsonl/node` | Node filesystem adapter; Python passes a `FileSystem` (such as `PosixExecutionEnv`) to `JsonlStorage.open()`. |
 | `./storage/sqlite/node` | Node SQLite driver; Python uses the stdlib-backed `SqliteStorage.open()`. |
 | `./storage/sqlite/cloudflare` | Cloudflare-only adapter. |
 
@@ -571,7 +579,7 @@ SQLite backend and migrations.
 | 11 Backends | code |
 | 11.1 Memory | tested |
 | 11.2 SQLite | planned |
-| 11.3 JSONL | planned |
+| 11.3 JSONL | tested |
 | 12 API footguns | planned |
 | 13 Non-goals | n/a |
 
@@ -592,7 +600,10 @@ extended reads and the range cache's freeze guarantees (section 5) and `contextR
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
 | Host execution backend | `NodeExecutionEnv` | `PosixExecutionEnv` |
-| Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()` |
+| Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()`, with the caller supplying a `FileSystem` |
+| `Result` values | `{ ok: true, value }` / `{ ok: false, error }` object literals | frozen `Ok(value)` / `Err(error)` dataclasses with the same `ok` role and `value`/`error` fields |
+| Storage conformance registration | Vitest's runtime `describe`/`it` globals | `create_storage_conformance` cases are parametrized by pytest; `register_storage_conformance` keeps the runner-injection protocol |
+| JSONL serialization | `JSON.stringify` (raw UTF-8, well-formed lone-surrogate escapes) | `json.dumps(ensure_ascii=True)` (escaped non-ASCII); the decoded JSON values are identical |
 | PowerShell tool | exported | excluded |
 | Document eviction timers | `setTimeout(...).unref()`, commits-only where timers cannot be unreferenced | `asyncio` timers never keep the process alive, so every loop keeps one; a loop that cannot schedule one evicts on commits only |
 | Windows support | supported | unsupported |
