@@ -150,14 +150,16 @@ activemq-data/
 *.sage.py
 
 # Environments
+# Directory patterns are anchored to the repo root: an unanchored `env/` would also match
+# `src/pi_durable/env/` on case-insensitive filesystems (macOS) and silently drop the package.
 .env
 .envrc
 .venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+/env/
+/venv/
+/ENV/
+/env.bak/
+/venv.bak/
 
 # Spyder project settings
 .spyderproject
