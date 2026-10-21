@@ -37,8 +37,8 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `defineDoc` | value | `define_doc` | — | planned |
-| `defineDocFamily` | value | `define_doc_family` | — | planned |
+| `defineDoc` | value | `define_doc` | test_session_states.py, test_session_tables.py | tested |
+| `defineDocFamily` | value | `define_doc_family` | test_session_states.py, test_session_tables.py | tested |
 
 ### `./entries.ts` → `pi_durable.entries`
 
@@ -246,19 +246,19 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createSession` | value | `create_session` | — | planned |
+| `createSession` | value | `create_session` | test_session_tables.py, test_session_states.py | tested |
 
 ### `./storage/memory.ts` → `pi_durable.storage.memory`
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `MemoryStorage` | value | `MemoryStorage` | — | planned |
+| `MemoryStorage` | value | `MemoryStorage` | test_memory_storage.py | tested |
 
 ### `./tasks.ts` → `pi_durable.tasks`
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `defineTask` | value | `define_task` | — | planned |
+| `defineTask` | value | `define_task` | test_session_tables.py | tested |
 
 ### `./types.ts` → `pi_durable.types`
 
@@ -268,7 +268,7 @@ is green.
 | `CheckpointInfo` | type | `CheckpointInfo` | test_types.py | tested |
 | `CommitChange` | type | `CommitChange` | test_types.py | tested |
 | `CommitPublication` | type | `CommitPublication` | test_types.py | tested |
-| `CommonDocDefinition` | type | `CommonDocDefinition` | — | planned |
+| `CommonDocDefinition` | type | `CommonDocDefinition` | test_session_states.py | code |
 | `ContextEdit` | type | `ContextEdit` | test_types.py | tested |
 | `ConversationDocFamilyToken` | type | `ConversationDocFamilyToken` | — | planned |
 | `ConversationDocToken` | type | `ConversationDocToken` | — | planned |
@@ -277,10 +277,10 @@ is green.
 | `ConversationQuery` | type | `ConversationQuery` | test_types.py, test_storage_protocol.py | tested |
 | `ConversationRecord` | type | `ConversationRecord` | test_types.py, test_storage_protocol.py | tested |
 | `Cursor` | type | `Cursor` | test_types.py, test_storage_protocol.py | tested |
-| `DocDefinition` | type | `DocDefinition` | — | planned |
-| `DocFamilyDefinition` | type | `DocFamilyDefinition` | — | planned |
-| `DocFamilyToken` | type | `DocFamilyToken` | — | planned |
-| `DocToken` | type | `DocToken` | — | planned |
+| `DocDefinition` | type | `DocDefinition` | test_session_states.py | tested |
+| `DocFamilyDefinition` | type | `DocFamilyDefinition` | test_session_states.py | code |
+| `DocFamilyToken` | type | `DocFamilyToken` | test_session_states.py | tested |
+| `DocToken` | type | `DocToken` | test_session_states.py | tested |
 | `DocumentAddress` | type | `DocumentAddress` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentCommitChange` | type | `DocumentCommitChange` | test_types.py | tested |
 | `DocumentContent` | type | `DocumentContent` | test_types.py | tested |
@@ -293,7 +293,7 @@ is green.
 | `DocumentReader` | type | `DocumentReader` | — | planned |
 | `DocumentRecord` | type | `DocumentRecord` | test_types.py | tested |
 | `DocumentSemantics` | type | `DocumentSemantics` | test_types.py | tested |
-| `DocumentState` | type | `DocumentState` | — | planned |
+| `DocumentState` | type | `DocumentState` | test_session_states.py | tested |
 | `DocumentWatch` | type | `DocumentWatch` | — | planned |
 | `Entry` | type | `Entry` | test_entries.py | tested |
 | `EntryDraft` | type | `EntryDraft` | test_entries.py, test_types.py | tested |
@@ -314,7 +314,7 @@ is green.
 | `RunningTask` | type | `RunningTask` | test_types.py | tested |
 | `ScanOrder` | type | `ScanOrder` | test_types.py | tested |
 | `Seq` | type | `Seq` | test_ids.py, test_types.py | tested |
-| `Session` | type | `Session` | — | planned |
+| `Session` | type | `Session` | test_session_tables.py | tested |
 | `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | — | planned |
 | `SessionDocToken` | type | `SessionDocToken` | — | planned |
 | `SessionEnd` | type | `SessionEnd` | — | planned |
@@ -327,8 +327,8 @@ is green.
 | `SubmissionRecord` | type | `SubmissionRecord` | test_types.py, test_storage_protocol.py | tested |
 | `SubmissionSettlement` | type | `SubmissionSettlement` | test_types.py | tested |
 | `TableCommitChange` | type | `TableCommitChange` | test_types.py | tested |
-| `Task` | type | `Task` | — | planned |
-| `TaskDefinition` | type | `TaskDefinition` | — | planned |
+| `Task` | type | `Task` | test_session_tables.py | tested |
+| `TaskDefinition` | type | `TaskDefinition` | test_session_tables.py | tested |
 | `TaskDocFamilyToken` | type | `TaskDocFamilyToken` | — | planned |
 | `TaskDocToken` | type | `TaskDocToken` | — | planned |
 | `TaskId` | type | `TaskId` | test_ids.py, test_types.py | tested |
@@ -340,7 +340,7 @@ is green.
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
 | `TaskRuntime` | type | `TaskRuntime` | — | planned |
 | `TaskState` | type | `TaskState` | test_types.py | tested |
-| `Tx` | type | `Tx` | — | planned |
+| `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
 | `WatchEnd` | type | `WatchEnd` | — | planned |
@@ -481,8 +481,8 @@ In-memory backend.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `MemoryStorage` | value | `MemoryStorage` | — | planned |
-| `PreparedMemoryCommit` | type | `PreparedMemoryCommit` | — | planned |
+| `MemoryStorage` | value | `MemoryStorage` | test_memory_storage.py | tested |
+| `PreparedMemoryCommit` | type | `PreparedMemoryCommit` | test_memory_storage.py | tested |
 
 ### `src/storage/jsonl/index.ts` → `pi_durable.storage.jsonl`
 
@@ -525,7 +525,7 @@ SQLite backend and migrations.
 
 | Section | Status |
 | --- | --- |
-| 1 Terms and invariants | planned |
+| 1 Terms and invariants | code |
 | 2 Core records | tested |
 | 2.1 Entries and context | planned |
 | 2.2 Public Harness surface | planned |
@@ -537,7 +537,7 @@ SQLite backend and migrations.
 | 3.5 Bases and checkpoints | planned |
 | 3.6 Versions and migrations | planned |
 | 3.7 Forks | planned |
-| 4 Transactions and storage ownership | planned |
+| 4 Transactions and storage ownership | code |
 | 5 Tasks | planned |
 | 5.1 Definition | planned |
 | 5.2 Effect sandwich | planned |
@@ -566,10 +566,10 @@ SQLite backend and migrations.
 | 9.3 Conversation view | planned |
 | 9.4 Agent events (experimental) | planned |
 | 9.5 Task graph view | planned |
-| 10 Storage contract | code |
-| 10.1 Failures | planned |
-| 11 Backends | planned |
-| 11.1 Memory | planned |
+| 10 Storage contract | tested |
+| 10.1 Failures | code |
+| 11 Backends | code |
+| 11.1 Memory | tested |
 | 11.2 SQLite | planned |
 | 11.3 JSONL | planned |
 | 12 API footguns | planned |
@@ -608,6 +608,9 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Context, abort signal, and context-scoped values | `pi_durable.context` | tested (`test_context.py`) |
 | Strict JSON validation, copying, and frozen values | `pi_durable.json` | tested (`test_json.py`) |
 | Entry draft validation and immutable record construction | `pi_durable.types` | tested (`test_entries.py`) |
+| Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`) |
+| Mutable document drafts backed by strict-JSON copies | `pi_durable.session.drafts` | tested (`test_session_states.py`, `test_session_tables.py`) |
+| Chord-compatible JSON operation applier | `pi_durable.delta` | tested (`test_memory_storage.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 

@@ -75,6 +75,7 @@ __all__ = [
     "RunningTask",
     "ScanOrder",
     "Seq",
+    "Session",
     "Storage",
     "StorageWrite",
     "StoredDocument",
@@ -92,6 +93,7 @@ __all__ = [
     "TaskQuery",
     "TaskRecord",
     "TaskState",
+    "Tx",
     "TypedEntry",
     "TypedEntryDraft",
     "entry_draft",
@@ -978,6 +980,94 @@ class Storage(Protocol):
 
     async def close(self, context: Context) -> None:
         """Release backend resources; all later operations must reject."""
+
+
+# ── Public Session and Tx surfaces ─────────────────────────────────────────
+
+
+class Tx(Protocol):
+    """Transaction surface available inside one Session commit callback."""
+
+    async def conversation(self, id: ConversationId) -> ConversationRecord | None: ...
+
+    async def entry(self, first: Any, second: Any = None) -> EntryRecord | None: ...
+
+    async def task(self, id: TaskId) -> TaskRecord | None: ...
+
+    async def scan_conversations(
+        self,
+        query: ConversationQuery,
+        limit: int,
+        cursor: Cursor | None = None,
+    ) -> Page[ConversationRecord, Cursor]: ...
+
+    async def scan_entries(
+        self,
+        query: EntryQuery,
+        limit: int,
+        cursor: Cursor | None = None,
+    ) -> Page[EntryRecord, Cursor]: ...
+
+    async def latest_head_marker(self, conversation_id: ConversationId) -> EntryWithHead | None: ...
+
+    async def scan_tasks(
+        self,
+        query: TaskQuery,
+        limit: int,
+        cursor: Cursor | None = None,
+    ) -> Page[TaskRecord, Cursor]: ...
+
+    async def submission_by_request(
+        self, conversation_id: ConversationId, request_id: str
+    ) -> SubmissionRecord | None: ...
+
+    async def create_conversation(self, options: dict[str, Any]) -> ConversationRecord: ...
+
+    async def fork_conversation(
+        self,
+        parent_conversation_id: ConversationId,
+        at: EntryId,
+        options: dict[str, Any],
+    ) -> ConversationRecord: ...
+
+    async def append_entry(self, first: Any, second: Any, third: Any = None) -> EntryRecord: ...
+
+    async def create_task(self, task: Any, input: JsonValue, options: TaskOptions) -> TaskId: ...
+
+    async def create_submission(self, create: SubmissionCreate) -> SubmissionRecord: ...
+
+    def settle_submission(self, id: SubmissionId, settlement: SubmissionSettlement) -> None: ...
+
+    def place_submission(self, id: SubmissionId, entry: EntryId) -> None: ...
+
+    def set_task(self, value: TaskRecord) -> None: ...
+
+    async def doc(self, token: Any, *args: Any) -> Any: ...
+
+    async def retire_doc(self, token: Any, *args: Any) -> None: ...
+
+
+class Session(Protocol):
+    """Owner of one mutation line, its records, and its tracked documents."""
+
+    async def commit(self, change: Any, context: Context) -> Any: ...
+
+    async def close(self, context: Context) -> None: ...
+
+    @property
+    def closed(self) -> Any: ...
+
+    def subscribe_commits(self, listener: Any) -> Any: ...
+
+    def subscribe_close(self, listener: Any) -> Any: ...
+
+    async def snapshot(self, token: Any, *args: Any) -> JsonObject | None: ...
+
+    async def document_state(self, token: Any, *args: Any) -> Any: ...
+
+    async def watch_doc(self, token: Any, *args: Any) -> Any: ...
+
+    async def snapshot_as_of(self, token: Any, *args: Any) -> JsonObject | None: ...
 
 
 # ── Entry construction ─────────────────────────────────────────────────────
