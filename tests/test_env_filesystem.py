@@ -1,8 +1,8 @@
 """The portable ``FileSystem`` capability and the POSIX backend JSONL depends on.
 
-The upstream ``env`` conformance suite, shell execution, watchers, line readers, and listings
-arrive with ticket #16. These cases pin the filesystem result shapes and the operations the
-JSONL backend and its failure-injection tests use.
+These cases pin the filesystem result shapes and the operations the JSONL backend and its
+failure-injection tests use. The translated upstream conformance, shell, watcher, and reader
+suites live in ``test_env_conformance.py`` and ``test_env_posix.py``.
 """
 
 from __future__ import annotations

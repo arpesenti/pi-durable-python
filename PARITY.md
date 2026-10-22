@@ -358,42 +358,42 @@ Execution environment protocol and helpers.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `rangeDecoder` | value | `range_decoder` | — | planned |
-| `StreamDecoder` | value | `StreamDecoder` | — | planned |
-| `startsWithBom` | value | `starts_with_bom` | — | planned |
-| `LineScanner` | value | `LineScanner` | — | planned |
-| `ok` | value | `ok` | — | code |
-| `err` | value | `err` | — | code |
-| `getOrThrow` | value | `get_or_throw` | — | code |
-| `getOrUndefined` | value | `get_or_undefined` | — | code |
-| `toError` | value | `to_error` | — | code |
-| `FileError` | value | `FileError` | — | code |
-| `ExecutionError` | value | `ExecutionError` | — | planned |
-| `Result` | type | `Result` | — | code |
-| `FileKind` | type | `FileKind` | — | code |
-| `FileErrorCode` | type | `FileErrorCode` | — | code |
-| `ExecutionErrorCode` | type | `ExecutionErrorCode` | — | planned |
-| `FileInfo` | type | `FileInfo` | — | code |
-| `TextLine` | type | `TextLine` | — | planned |
-| `TextLineReader` | type | `TextLineReader` | — | planned |
-| `BinaryReader` | type | `BinaryReader` | — | planned |
-| `WatchTarget` | type | `WatchTarget` | — | planned |
-| `WatchChange` | type | `WatchChange` | — | planned |
-| `FileWatcher` | type | `FileWatcher` | — | planned |
-| `LineScan` | type | `LineScan` | — | planned |
-| `DirReader` | type | `DirReader` | — | planned |
-| `ListFilesOptions` | type | `ListFilesOptions` | — | planned |
-| `FileListEntry` | type | `FileListEntry` | — | planned |
-| `FileListing` | type | `FileListing` | — | planned |
-| `FileSystem` | type | `FileSystem` | — | code |
-| `ShellSpillOptions` | type | `ShellSpillOptions` | — | planned |
-| `ShellExecResult` | type | `ShellExecResult` | — | planned |
-| `ShellExecOptions` | type | `ShellExecOptions` | — | planned |
-| `ShellOutputWindow` | type | `ShellOutputWindow` | — | planned |
-| `ShellOutputSkip` | type | `ShellOutputSkip` | — | planned |
-| `ShellOutputInfo` | type | `ShellOutputInfo` | — | planned |
-| `Shell` | type | `Shell` | — | planned |
-| `ExecutionEnv` | type | `ExecutionEnv` | — | planned |
+| `rangeDecoder` | value | `range_decoder` | test_env_line_scan.py | tested |
+| `StreamDecoder` | value | `StreamDecoder` | test_env_line_scan.py | tested |
+| `startsWithBom` | value | `starts_with_bom` | test_env_line_scan.py | tested |
+| `LineScanner` | value | `LineScanner` | test_env_line_scan.py, test_env_conformance.py | tested |
+| `ok` | value | `ok` | test_env_filesystem.py, test_env_posix.py | tested |
+| `err` | value | `err` | test_env_filesystem.py, test_env_posix.py | tested |
+| `getOrThrow` | value | `get_or_throw` | test_env_filesystem.py, test_env_posix.py | tested |
+| `getOrUndefined` | value | `get_or_undefined` | test_env_filesystem.py, test_env_posix.py | tested |
+| `toError` | value | `to_error` | test_env_filesystem.py, test_env_posix.py | tested |
+| `FileError` | value | `FileError` | test_env_filesystem.py, test_env_posix.py | tested |
+| `ExecutionError` | value | `ExecutionError` | test_env_posix.py, test_env_conformance.py | tested |
+| `Result` | type | `Result` | test_env_filesystem.py, test_env_posix.py | tested |
+| `FileKind` | type | `FileKind` | test_env_filesystem.py, test_env_posix.py | tested |
+| `FileErrorCode` | type | `FileErrorCode` | test_env_filesystem.py, test_env_posix.py | tested |
+| `ExecutionErrorCode` | type | `ExecutionErrorCode` | test_env_posix.py | tested |
+| `FileInfo` | type | `FileInfo` | test_env_filesystem.py, test_env_posix.py | tested |
+| `TextLine` | type | `TextLine` | test_env_posix.py, test_env_conformance.py | tested |
+| `TextLineReader` | type | `TextLineReader` | test_env_posix.py, test_env_conformance.py | tested |
+| `BinaryReader` | type | `BinaryReader` | test_env_posix.py, test_env_conformance.py | tested |
+| `WatchTarget` | type | `WatchTarget` | test_env_conformance.py, test_env_posix.py | tested |
+| `WatchChange` | type | `WatchChange` | test_env_conformance.py, test_env_posix.py | tested |
+| `FileWatcher` | type | `FileWatcher` | test_env_conformance.py, test_env_posix.py | tested |
+| `LineScan` | type | `LineScan` | test_env_line_scan.py, test_env_conformance.py | tested |
+| `DirReader` | type | `DirReader` | test_env_posix.py, test_env_conformance.py | tested |
+| `ListFilesOptions` | type | `ListFilesOptions` | test_env_conformance.py | tested |
+| `FileListEntry` | type | `FileListEntry` | test_env_conformance.py | tested |
+| `FileListing` | type | `FileListing` | test_env_conformance.py | tested |
+| `FileSystem` | type | `FileSystem` | test_env_filesystem.py, test_env_posix.py, test_env_conformance.py | tested |
+| `ShellSpillOptions` | type | `ShellSpillOptions` | test_env_posix.py, test_env_conformance.py | tested |
+| `ShellExecResult` | type | `ShellExecResult` | test_env_posix.py, test_env_conformance.py | tested |
+| `ShellExecOptions` | type | `ShellExecOptions` | test_env_posix.py, test_env_conformance.py | tested |
+| `ShellOutputWindow` | type | `ShellOutputWindow` | test_env_posix.py, test_env_conformance.py | tested |
+| `ShellOutputSkip` | type | `ShellOutputSkip` | test_env_posix.py, test_env_conformance.py | tested |
+| `ShellOutputInfo` | type | `ShellOutputInfo` | test_env_posix.py, test_env_conformance.py | tested |
+| `Shell` | type | `Shell` | test_env_posix.py, test_env_conformance.py | tested |
+| `ExecutionEnv` | type | `ExecutionEnv` | test_env_posix.py, test_env_conformance.py | tested |
 
 ### `src/env/node.ts` → `pi_durable.env.posix`
 
@@ -401,12 +401,14 @@ Python replaces the Node backend with a POSIX backend.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `NodeExecutionEnv` | value | `PosixExecutionEnv` | — | code |
-| `NodeWatchOptions` | type | `PosixWatchOptions` | — | planned |
+| `NodeExecutionEnv` | value | `PosixExecutionEnv` | test_env_posix.py, test_env_conformance.py | tested |
+| `NodeWatchOptions` | type | `PosixWatchOptions` | test_env_posix.py | tested |
 
-`test_env_filesystem.py` exercises the filesystem operations the JSONL backend and its failure
-injection need. The translated `env` conformance suite, shell execution, watching, line and binary
-readers, and directory listings land with #16, so these rows remain `code`.
+`test_env_filesystem.py` exercises the filesystem result shapes and the operations the JSONL
+backend and its failure-injection tests need. `test_env_conformance.py` drives the translated
+public `ExecutionEnv` conformance suite, and `test_env_posix.py` covers the POSIX backend's shell,
+reader, spill, watch-budget, and filesystem cases. `test_env_line_scan.py` and
+`test_env_truncate.py` cover the decoding, line-scan, and truncation helpers.
 
 ### `src/tools/index.ts` → `pi_durable.tools`
 
@@ -457,8 +459,8 @@ Conformance helpers; benchmarks are excluded.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `createExpectAssertions` | value | `create_expect_assertions` | test_testing_conformance.py | tested |
-| `createEnvConformance` | value | `create_env_conformance` | — | planned |
-| `registerEnvConformance` | value | `register_env_conformance` | — | planned |
+| `createEnvConformance` | value | `create_env_conformance` | test_env_conformance.py | tested |
+| `registerEnvConformance` | value | `register_env_conformance` | test_env_conformance.py | tested |
 | `registerStorageConformance` | value | `register_storage_conformance` | test_testing_conformance.py | tested |
 | `STORAGE_MEMORY_SCALES` | value | `STORAGE_MEMORY_SCALES` | — | excluded |
 | `STORAGE_READ_BENCHMARKS` | value | `STORAGE_READ_BENCHMARKS` | — | excluded |
@@ -474,18 +476,18 @@ Conformance helpers; benchmarks are excluded.
 | `StorageBenchmarkScale` | type | `StorageBenchmarkScale` | — | excluded |
 | `StorageReadBenchmark` | type | `StorageReadBenchmark` | — | excluded |
 | `StorageWriteBenchmark` | type | `StorageWriteBenchmark` | — | excluded |
-| `EnvConformanceAssertions` | type | `EnvConformanceAssertions` | — | planned |
-| `EnvConformanceCase` | type | `EnvConformanceCase` | — | planned |
-| `EnvConformanceOptions` | type | `EnvConformanceOptions` | — | planned |
-| `EnvConformanceProvider` | type | `EnvConformanceProvider` | — | planned |
+| `EnvConformanceAssertions` | type | `EnvConformanceAssertions` | test_env_conformance.py | tested |
+| `EnvConformanceCase` | type | `EnvConformanceCase` | test_env_conformance.py | tested |
+| `EnvConformanceOptions` | type | `EnvConformanceOptions` | test_env_conformance.py | tested |
+| `EnvConformanceProvider` | type | `EnvConformanceProvider` | test_env_conformance.py | tested |
 | `StorageConformanceAssertions` | type | `StorageConformanceAssertions` | test_testing_conformance.py | tested |
 | `StorageConformanceCase` | type | `StorageConformanceCase` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
 | `StorageConformanceOptions` | type | `StorageConformanceOptions` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
 | `StorageConformanceProvider` | type | `StorageConformanceProvider` | test_testing_conformance.py, test_memory_storage.py, test_jsonl_storage.py | tested |
 
 The environment cases and their types (`createEnvConformance`, `registerEnvConformance`, and the
-`EnvConformance*` types) land with the `env` suite in #16. The filesystem capability they depend on is
-already in place for the JSONL backend.
+`EnvConformance*` types) are translated in `test_env_conformance.py`; the cases are parametrized
+through the public suite and the registration helper is driven with a recording runner.
 
 ### `src/storage/memory.ts` → `pi_durable.storage.memory`
 
@@ -676,7 +678,8 @@ an environment failure and a section that reads a document through `input.read`.
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
 | Hook names | camelCase (`beforeRequest`, `afterResponse`, `onYield`) | camelCase, because extensions register handlers by these names |
-| Host execution backend | `NodeExecutionEnv` | `PosixExecutionEnv` |
+| Host execution backend | `NodeExecutionEnv`, native or polling watches | `PosixExecutionEnv` with polling watches; `mode` is accepted but the portable backend always polls |
+| Execution environment options and result fields | camelCase result fields and option keys | `FileInfo`, `LineScan`, and `ShellExecResult` keep camelCase wire fields (`mtimeMs`, `firstLineEnd`, `exitCode`, `spillPath`); Python-facing option dicts use snake_case (`start_line`, `inherit_env`, `on_output`, `max_entries`, `after_bytes`) |
 | Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()`, with the caller supplying a `FileSystem` or a `SqliteDatabase`; file-backed SQLite opens through `open_posix_sqlite_storage()` |
 | `Result` values | `{ ok: true, value }` / `{ ok: false, error }` object literals | frozen `Ok(value)` / `Err(error)` dataclasses with the same `ok` role and `value`/`error` fields |
 | Storage conformance registration | Vitest's runtime `describe`/`it` globals | `create_storage_conformance` cases are parametrized by pytest; `register_storage_conformance` keeps the runner-injection protocol |
@@ -739,6 +742,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Bounded output windows and adaptive progress commits | `pi_durable.harness.output` | tested (`test_harness_output.py`, `test_harness_tools.py`, `test_harness_live_deltas.py`) |
 | Tool argument repair, coercion, and validation | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`) |
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
+| Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 
@@ -750,7 +754,8 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 4. Tasks, scheduler, submissions, document observation.
 - [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
       Compaction status in `pi.live` lands with #21.
-- [ ] 6. `env`, coding tools, `tool-search`.
+- [ ] 6. `env`, coding tools, `tool-search`. The `env` suite landed in #16; coding tools (#17) and
+      `tool-search` (#20) remain.
 - [ ] 7. Compaction, events/view, task graph, extension reload.
 - [ ] 8. Full translated suite green, docs, version `1.3.0`, release.
 

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, TypedDict
+from typing import Any, NotRequired, Protocol, TypedDict
 
+from ..env import ExecutionEnv
 from ..types import Storage
 
 ExpectLike = Callable[[Any, str | None], Any]
@@ -60,7 +61,35 @@ class StorageConformanceRunner(Protocol):
     ) -> object: ...
 
 
+EnvConformanceAssertions = StorageConformanceAssertions
+"""The assertion vocabulary the environment conformance cases use."""
+
+EnvConformanceProvider = Callable[[Callable[[ExecutionEnv], Awaitable[None]]], Awaitable[None]]
+"""Calls ``use`` once with an environment whose ``cwd`` is a fresh, empty, writable directory."""
+
+
+class EnvConformanceOptions(TypedDict):
+    assertions: EnvConformanceAssertions
+    with_env: EnvConformanceProvider
+    shell: NotRequired[Sequence[str]]
+    symlinks: NotRequired[bool]
+    list_files: NotRequired[bool]
+
+
+@dataclass(frozen=True, slots=True)
+class EnvConformanceCase:
+    """One runner-independent environment conformance case."""
+
+    name: str
+    run: Callable[[], Awaitable[None]]
+    timeout_ms: int | None = None
+
+
 __all__ = [
+    "EnvConformanceAssertions",
+    "EnvConformanceCase",
+    "EnvConformanceOptions",
+    "EnvConformanceProvider",
     "ExpectLike",
     "StorageConformanceAssertions",
     "StorageConformanceCase",

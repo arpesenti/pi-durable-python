@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from .assertions import create_expect_assertions
+from .env_conformance import create_env_conformance
 from .storage_conformance import create_storage_conformance
-from .types import StorageConformanceProvider, StorageConformanceRunner
+from .types import (
+    EnvConformanceOptions,
+    EnvConformanceProvider,
+    StorageConformanceProvider,
+    StorageConformanceRunner,
+)
 
 
 def register_storage_conformance(
@@ -28,4 +36,29 @@ def register_storage_conformance(
     runner.describe(name, suite)
 
 
-__all__ = ["register_storage_conformance"]
+def register_env_conformance(
+    runner: StorageConformanceRunner,
+    name: str,
+    with_env: EnvConformanceProvider,
+    options: dict[str, Any] | None = None,
+) -> None:
+    """Register the runner-independent environment cases with a compatible test runner."""
+
+    input_options = cast(
+        EnvConformanceOptions,
+        {
+            "assertions": create_expect_assertions(runner.expect),
+            "with_env": with_env,
+            **(options or {}),
+        },
+    )
+    cases = create_env_conformance(input_options)
+
+    def suite() -> None:
+        for test_case in cases:
+            runner.it(test_case.name, test_case.run, test_case.timeout_ms)
+
+    runner.describe(name, suite)
+
+
+__all__ = ["register_env_conformance", "register_storage_conformance"]

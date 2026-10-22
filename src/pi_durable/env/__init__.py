@@ -1,8 +1,8 @@
 """Portable execution-environment capability.
 
-This module publishes the ``FileSystem`` capability and its result, error, and metadata shapes.
-Shell execution and the full POSIX backend arrive with the ``env`` ticket; the JSONL backend
-depends only on this filesystem capability.
+This module publishes the ``FileSystem`` and ``Shell`` capabilities, their result and error
+shapes, and the decoding, line-scanning, watching, and listing helpers. The POSIX backend lives in
+:mod:`pi_durable.env.posix`; the JSONL backend depends only on the filesystem capability.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from typing import (
 )
 
 from ..context import Context
+from .decode import StreamDecoder, range_decoder, starts_with_bom
+from .line_scan import LineScan, LineScanner
 
 TValue = TypeVar("TValue")
 TError = TypeVar("TError")
@@ -113,6 +115,34 @@ class FileError(Exception):
             self.__cause__ = cause
 
 
+ExecutionErrorCode: TypeAlias = Literal[
+    "aborted",
+    "timeout",
+    "shell_unavailable",
+    "spawn_error",
+    "callback_error",
+    "unknown",
+]
+
+
+class ExecutionError(Exception):
+    """A shell execution failed. ``code`` classifies the expected failure."""
+
+    def __init__(
+        self,
+        code: ExecutionErrorCode,
+        message: str,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.name = "ExecutionError"
+        self.code = code
+        #: Spill file of a command that timed out or was aborted after its output crossed the thresholds.
+        self.spill_path: str | None = None
+        if cause is not None:
+            self.__cause__ = cause
+
+
 class FileInfo(dict[str, Any]):
     """Metadata of one file, directory, or symbolic link.
 
@@ -131,10 +161,6 @@ class TextLineReader(Protocol):
     async def close(self, context: Context) -> None: ...
 
 
-class LineScan(dict[str, Any]):
-    """Where lines of a file are, as :meth:`BinaryReader.scan_lines` found them."""
-
-
 class BinaryReader(Protocol):
     """Positional reads from one opened regular file; all calls see the same file if renamed."""
 
@@ -142,9 +168,7 @@ class BinaryReader(Protocol):
 
     async def read(self, offset: int, length: int, context: Context) -> Result[bytes, FileError]: ...
 
-    async def scan_lines(
-        self, options: dict[str, Any], context: Context
-    ) -> Result[LineScan, FileError]: ...
+    async def scan_lines(self, options: dict[str, Any], context: Context) -> Result[LineScan, FileError]: ...
 
     async def close(self, context: Context) -> None: ...
 
@@ -186,7 +210,11 @@ class DirReader(Protocol):
 
 
 class ListFilesOptions(dict[str, Any]):
-    """Options for the optional ``FileSystem.list_files``."""
+    """Options for the optional ``FileSystem.list_files``.
+
+    The POSIX backend reads the ``.gitignore`` chain and ``.git/info/exclude``; global Git
+    excludes are not read.
+    """
 
 
 class FileListEntry(dict[str, Any]):
@@ -195,6 +223,52 @@ class FileListEntry(dict[str, Any]):
 
 class FileListing(dict[str, Any]):
     """Files, directories, and symbolic links below a directory."""
+
+
+class ShellSpillOptions(dict[str, Any]):
+    """Spill the complete output to a temporary file once it exceeds either threshold."""
+
+
+class ShellExecResult(dict[str, Any]):
+    """The exit code and, when it spilled, the file holding the complete raw output."""
+
+
+class ShellExecOptions(dict[str, Any]):
+    """Options for one shell command."""
+
+
+class ShellOutputWindow(dict[str, Any]):
+    """The tail of the combined output a caller keeps, and how often it samples it."""
+
+
+@dataclass(frozen=True, slots=True)
+class ShellOutputSkip:
+    """Output omitted immediately before a chunk."""
+
+    bytes: int
+    newlines: int
+    ends_with_newline: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ShellOutputInfo:
+    """Which stream a chunk came from, and what was omitted immediately before it."""
+
+    stream: Literal["stdout", "stderr"]
+    skipped: ShellOutputSkip | None = None
+
+
+class Shell(Protocol):
+    """Run commands through the environment's shell or as an argv array."""
+
+    async def exec(
+        self,
+        command: str | Sequence[str],
+        options: ShellExecOptions | None,
+        context: Context,
+    ) -> Result[ShellExecResult, ExecutionError]: ...
+
+    async def cleanup(self, context: Context) -> None: ...
 
 
 @runtime_checkable
@@ -235,9 +309,7 @@ class FileSystem(Protocol):
         self, path: str, content: str | bytes, context: Context
     ) -> Result[None, FileError]: ...
 
-    async def truncate_file(
-        self, path: str, size: int, context: Context
-    ) -> Result[None, FileError]: ...
+    async def truncate_file(self, path: str, size: int, context: Context) -> Result[None, FileError]: ...
 
     async def flush_file(self, path: str, context: Context) -> Result[None, FileError]: ...
 
@@ -277,9 +349,7 @@ class FileSystem(Protocol):
         self, path: str, options: dict[str, Any] | None, context: Context
     ) -> Result[None, FileError]: ...
 
-    async def create_temp_dir(
-        self, prefix: str | None, context: Context
-    ) -> Result[str, FileError]: ...
+    async def create_temp_dir(self, prefix: str | None, context: Context) -> Result[str, FileError]: ...
 
     async def create_temp_file(
         self, options: dict[str, Any] | None, context: Context
@@ -288,11 +358,18 @@ class FileSystem(Protocol):
     async def cleanup(self, context: Context) -> None: ...
 
 
+class ExecutionEnv(FileSystem, Shell, Protocol):
+    """A portable filesystem plus shell execution."""
+
+
 __all__ = [
     "BinaryReader",
     "DirPage",
     "DirReader",
     "Err",
+    "ExecutionEnv",
+    "ExecutionError",
+    "ExecutionErrorCode",
     "FileError",
     "FileErrorCode",
     "FileInfo",
@@ -302,9 +379,18 @@ __all__ = [
     "FileSystem",
     "FileWatcher",
     "LineScan",
+    "LineScanner",
     "ListFilesOptions",
     "Ok",
     "Result",
+    "Shell",
+    "ShellExecOptions",
+    "ShellExecResult",
+    "ShellOutputInfo",
+    "ShellOutputSkip",
+    "ShellOutputWindow",
+    "ShellSpillOptions",
+    "StreamDecoder",
     "TextLine",
     "TextLineReader",
     "WatchChange",
@@ -316,5 +402,7 @@ __all__ = [
     "get_or_throw",
     "get_or_undefined",
     "ok",
+    "range_decoder",
+    "starts_with_bom",
     "to_error",
 ]
