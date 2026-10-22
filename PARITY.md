@@ -646,6 +646,7 @@ generation request and tool execution and land with #14/#18, and
 | Area | Upstream | Python |
 | --- | --- | --- |
 | Function and parameter names | camelCase | snake_case |
+| Settings and policy objects | camelCase fields | snake_case fields on the Python-facing `Settings` and `DEFAULT_*_POLICY` values (`max_retries`, `keep_recent_tokens`, `partial_interval_ms`); persisted records stay camelCase |
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
 | Host execution backend | `NodeExecutionEnv` | `PosixExecutionEnv` |
