@@ -4,8 +4,8 @@ The public surface is rebuilt against the vendored 1.3.0 specification. This lay
 JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Context/abort signal,
 the Storage protocol, the Session kernel, document definitions, task definitions, context
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,
-agent resolution, extension hooks, and Harness surface. Built-in generation, tool, and compaction
-tasks, submissions, and the observation surfaces arrive in later tickets.
+agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. Built-in
+generation, tool, and compaction tasks and the observation surfaces arrive in later tickets.
 """
 
 from .documents import (
@@ -45,6 +45,8 @@ from .harness.define import (
     wrap_tool,
 )
 from .harness.harness import Harness
+from .harness.inbox import InboxDoc, InboxItem, InboxState
+from .harness.live import LiveDoc, LiveState
 from .harness.registry import create_registry
 from .harness.types import (
     Agent,
@@ -59,16 +61,23 @@ from .harness.types import (
     HarnessOptions,
     HookRegistration,
     HookRunner,
+    InputEntry,
+    InputSubmissionDraft,
     ModelRef,
     PromptSection,
+    QueueMode,
     Registry,
     RegistryReader,
     RegistrySnapshot,
     Settings,
+    SettledSubmissionRecord,
     SettledTask,
+    Submission,
+    SubmissionDraft,
     TaskInspection,
     TaskRuntime,
     ToolRegistration,
+    UserInput,
     Wrap,
 )
 from .session.session import DocumentState, SessionImpl, create_session
@@ -104,10 +113,18 @@ __all__ = [
     "HarnessOptions",
     "HookRegistration",
     "HookRunner",
+    "InboxDoc",
+    "InboxItem",
+    "InboxState",
+    "InputEntry",
+    "InputSubmissionDraft",
+    "LiveDoc",
+    "LiveState",
     "MemoryStorage",
     "ModelRef",
     "PreparedMemoryCommit",
     "PromptSection",
+    "QueueMode",
     "ReadAfterWrite",
     "Registry",
     "RegistryReader",
@@ -121,8 +138,11 @@ __all__ = [
     "SessionFailed",
     "SessionImpl",
     "Settings",
+    "SettledSubmissionRecord",
     "SettledTask",
     "StorageRequestError",
+    "Submission",
+    "SubmissionDraft",
     "SystemEntry",
     "Task",
     "TaskDefinition",
@@ -133,8 +153,9 @@ __all__ = [
     "ToolRegistration",
     "ToolResultEntry",
     "Tx",
-    "Wrap",
     "UserEntry",
+    "UserInput",
+    "Wrap",
     "__version__",
     "create_session",
     "create_registry",

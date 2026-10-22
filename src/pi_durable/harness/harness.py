@@ -6,9 +6,9 @@ from collections.abc import Callable, Coroutine, Mapping
 from functools import partial
 from typing import Any, Literal, cast
 
-from ..context import BACKGROUND_CONTEXT, Context, with_abort_signal, without_abort_signal
+from ..context import Context, with_abort_signal, without_abort_signal
 from ..entries import ResetEntry
-from ..ids import ConversationId, EntryId, TaskId
+from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..session.session import SessionImpl, _now_ms, contained
 from ..session.transaction import Transaction, TransactionScope
 from ..types import (
@@ -23,7 +23,10 @@ from ..types import (
     TaskRecord,
 )
 from .agent import AgentDoc, configure, create_agent, resolve_agent, resolve_settings
+from .inbox import InboxDoc, QueueModes, withdraw_queued_inputs
+from .live import GENERATION_TASK_NAME, LiveDoc, settle_scheduler_outcome, start_run
 from .scheduler import TaskScheduler
+from .submissions import AbortResult, Submissions
 from .types import (
     Agent,
     ContextView,
@@ -31,7 +34,9 @@ from .types import (
     HarnessInspection,
     RegistryReader,
     RegistrySnapshot,
+    SettledSubmissionRecord,
     SettledTask,
+    Submission,
 )
 from .util import closed_error, scan_all
 
@@ -77,12 +82,12 @@ class BoundConversation:
         self._binding = binding
 
     def _bind(self, context: Context) -> Context:
-        signal = self._binding["signal"]
-        return context if signal is None else with_abort_signal(signal, context)
+        return _bind_context(self._binding, context)
 
     async def submit(self, submission: Any, context: Context) -> Any:
         cast(Callable[[], None], self._binding["check"])()
-        return await self._harness.submit(self.id, submission, self._bind(context))
+        admitted = await self._harness.submit(self.id, submission, self._bind(context))
+        return BoundSubmission(admitted, self._binding)
 
     async def abort(self, context: Context, options: Mapping[str, Any] | None = None) -> None:
         cast(Callable[[], None], self._binding["check"])()
@@ -93,6 +98,32 @@ class BoundConversation:
     async def wait_for_idle(self, context: Context) -> None:
         cast(Callable[[], None], self._binding["check"])()
         await self._harness._tasks.wait_for_idle(self.id, self._bind(context))
+
+
+class BoundSubmission:
+    """Invocation-bound submission handle for tasks and tools."""
+
+    __slots__ = ("id", "_submission", "_binding")
+
+    def __init__(self, submission: Submission, binding: Mapping[str, Any]) -> None:
+        self.id = submission.id
+        self._submission = submission
+        self._binding = binding
+
+    def _bind(self, context: Context) -> Context:
+        return _bind_context(self._binding, context)
+
+    async def status(self, context: Context) -> SubmissionRecord:
+        cast(Callable[[], None], self._binding["check"])()
+        return await self._submission.status(self._bind(context))
+
+    async def wait(self, context: Context) -> SettledSubmissionRecord:
+        cast(Callable[[], None], self._binding["check"])()
+        return await self._submission.wait(self._bind(context))
+
+    async def abort(self, context: Context) -> AbortResult:
+        cast(Callable[[], None], self._binding["check"])()
+        return await self._submission.abort(self._bind(context))
 
 
 class ConversationHandleImpl:
@@ -159,11 +190,7 @@ class ConversationHandleImpl:
         entry: dict[str, Any] = {"kind": ResetEntry.kind, "head": "self"}
         if handoff is not None:
             entry["model"] = [{"role": "user", "content": handoff, "timestamp": self._harness.now}]
-
-        async def write(tx: Transaction) -> None:
-            await tx.append_entry(self.id, cast(Any, entry))
-
-        await self.commit(write, context)
+        await self.submit({"type": "write", "entry": entry}, context)
 
     async def view_state(self, context: Context) -> Any:
         raise NotImplementedError("Conversation view arrives with the observation surfaces")
@@ -204,6 +231,13 @@ class Harness(SessionImpl):
             context=without_abort_signal(context),
         )
         self._settings_option = settings_option
+        self._submissions = Submissions(
+            session=self,
+            now=now,
+            queue_modes=lambda: _queue_modes(settings_option),
+            resume=self._tasks.resume,
+            start_run=self._start_run,
+        )
 
     # ── Construction ───────────────────────────────────────────────────────
 
@@ -252,6 +286,8 @@ class Harness(SessionImpl):
         return cast(Exception, closed_error(self))
 
     async def conversation_created(self, tx: Transaction, record: ConversationRecord) -> None:
+        await tx.doc(LiveDoc, record["id"])
+        await tx.doc(InboxDoc, record["id"])
         await tx.doc(AgentDoc, record["id"])
         await create_agent(tx, record)
         custom = self._options.get("conversation_created") or self._options.get("conversationCreated")
@@ -379,32 +415,38 @@ class Harness(SessionImpl):
         id = await self.commit(create, context)
         return ConversationHandleImpl(id, self)
 
-    # ── Submissions (minimal until the submissions ticket) ─────────────────
+    # ── Submissions ────────────────────────────────────────────────────────
 
-    async def submit(self, conversation_id: ConversationId, submission: Any, context: Context) -> Any:
-        raise NotImplementedError("Submissions arrive with the submissions ticket")
+    async def submit(
+        self, conversation_id: ConversationId, submission: Any, context: Context
+    ) -> Submission:
+        return await self._submissions.submit(conversation_id, submission, context)
+
+    async def submission(self, id: SubmissionId, context: Context) -> Submission | None:
+        return await self._submissions.get(id, context)
+
+    async def abort_submission(
+        self, id: SubmissionId, context: Context, conversation_id: ConversationId | None = None
+    ) -> AbortResult | Literal["not_found"]:
+        return await self._submissions.abort(id, context, conversation_id)
+
+    async def _start_run(
+        self, tx: Transaction, conversation_id: ConversationId, live: Any, inputs: list[Any]
+    ) -> None:
+        task = cast(RegistryReader, self._options["registry"]).snapshot().task(
+            GENERATION_TASK_NAME
+        )
+        if task is None:
+            raise NotImplementedError("Generation arrives with the run-loop ticket")
+        await start_run(tx, conversation_id, live, inputs, task)
 
     # ── Internal scheduler callbacks ───────────────────────────────────────
 
     async def _settle_outcome(self, tx: Transaction, record: TaskRecord, outcome: TaskOutcome) -> None:
-        # The Harness learns about built-in task kinds with the built-in tasks ticket.
-        return None
+        await settle_scheduler_outcome(tx, record, cast(Any, outcome))
 
     async def _withdraw_inputs(self, tx: Transaction, conversation_id: ConversationId) -> None:
-        submissions = await scan_all(
-            lambda cursor: self.storage.scan_submissions(
-                {"conversationId": conversation_id, "status": "queued"},
-                _SCAN_PAGE_SIZE,
-                cursor,
-                BACKGROUND_CONTEXT,
-            )
-        )
-        for submission in submissions:
-            if submission["type"] == "input":
-                tx.settle_submission(
-                    submission["id"],
-                    {"status": "unanswered", "reason": "aborted"},
-                )
+        await withdraw_queued_inputs(tx, conversation_id)
 
     async def _bound_conversation(
         self,
@@ -425,6 +467,19 @@ class Harness(SessionImpl):
 
     async def watch_task_graph(self, context: Context) -> Any:
         raise NotImplementedError("Task graph arrives with the observation surfaces")
+
+
+def _bind_context(binding: Mapping[str, Any], context: Context) -> Context:
+    signal = binding["signal"]
+    return context if signal is None else with_abort_signal(signal, context)
+
+
+def _queue_modes(settings: Any) -> QueueModes:
+    resolved = resolve_settings(settings)
+    return QueueModes(
+        steering_mode=resolved.steering_mode,
+        follow_up_mode=resolved.follow_up_mode,
+    )
 
 
 def _settings_value(settings: Any, name: str) -> Any:

@@ -44,7 +44,7 @@ from .types import (
     SettledTask,
     TaskInspection,
 )
-from .util import Waiters, closed_error, rejected, scan_all
+from .util import Waiters, closed_error, rejected, resolved, scan_all
 
 _SCAN_PAGE_SIZE = 256
 MAX_TIMER_DELAY_MS = 2_147_483_647
@@ -428,7 +428,7 @@ class TaskScheduler:
             record = await self._storage.task(id, context)
             if record is None:
                 raise ValueError(f"Task {id} does not exist")
-            return {"promise": _resolved(cast(SettledTask, record))}
+            return {"promise": resolved(cast(SettledTask, record))}
 
         found = await self._session.read_on_line(find)
         return cast(SettledTask, await found["promise"])
@@ -439,7 +439,7 @@ class TaskScheduler:
         if self._closing:
             return rejected(closed_error(self._session))
         if self._idle(conversation_id):
-            return _resolved(None)
+            return resolved(None)
         self._schedule_reconcile()
         return self._idle_waiters.add(conversation_id, context)
 
@@ -1662,7 +1662,7 @@ class _Runtime:
                 winner = memo_of(self._scheduler._live.get(self._invocation.task_id), name)
                 return None if winner is _MISSING_MEMO else cast(JsonValue, winner)
 
-            return await self._read(lambda: _resolved(read()), context)
+            return await self._read(lambda: resolved(read()), context)
         candidate, context = args
 
         def write(tx: Transaction, current: ErasedRunningTask) -> JsonValue | None:
@@ -1871,7 +1871,7 @@ class _Runtime:
     async def _read(self, read: Callable[[], Awaitable[Any]], context: Context) -> Any:
         self._check()
         result = await read()
-        return await await_with_context(_resolved(result), context)
+        return await await_with_context(resolved(result), context)
 
     async def _gated(
         self,
@@ -1949,12 +1949,6 @@ async def _invoke_handler(handler: Any, task: Any, runtime: Any, context: Contex
     if hasattr(result, "__await__"):
         return await cast(Awaitable[Any], result)
     return result
-
-
-def _resolved(value: Any) -> asyncio.Future[Any]:
-    future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-    future.set_result(value)
-    return future
 
 
 async def _race(first: Awaitable[Any], second: Awaitable[Any]) -> Any:

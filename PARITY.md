@@ -115,7 +115,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py | tested |
+| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py, test_harness_submissions.py, test_harness_inbox.py, test_harness_input_entries.py | tested |
 | `safeNow` | value | `safe_now` | test_harness_storage_failure.py | tested |
 | `SCHEDULER_INDEX_SIZES` | value | `Harness.scheduler_index_sizes` | test_harness_scheduler_retention.py | tested |
 
@@ -123,18 +123,18 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `InboxDoc` | value | `InboxDoc` | — | planned |
-| `InboxItem` | type | `InboxItem` | — | planned |
-| `InboxState` | type | `InboxState` | — | planned |
+| `InboxDoc` | value | `InboxDoc` | test_harness_inbox.py, test_harness_input_entries.py | tested |
+| `InboxItem` | type | `InboxItem` | test_harness_inbox.py, test_harness_input_entries.py | tested |
+| `InboxState` | type | `InboxState` | test_harness_inbox.py | tested |
 
 ### `./harness/live.ts` → `pi_durable.harness.live`
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `LiveDoc` | value | `LiveDoc` | — | planned |
+| `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py | tested |
 | `CompactionFailure` | type | `CompactionFailure` | — | planned |
 | `CompactionStatus` | type | `CompactionStatus` | — | planned |
-| `LiveState` | type | `LiveState` | — | planned |
+| `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | — | planned |
 | `NestedToolSummary` | type | `NestedToolSummary` | — | planned |
 | `ToolSlot` | type | `ToolSlot` | — | planned |
@@ -203,22 +203,22 @@ is green.
 | `HookRegistration` | type | `HookRegistration` | test_harness_tasks.py | tested |
 | `HookResult` | type | `HookResult` | — | planned |
 | `HooksOf` | type | `HooksOf` | — | planned |
-| `InputEntry` | type | `InputEntry` | — | planned |
-| `InputSubmissionDraft` | type | `InputSubmissionDraft` | — | planned |
+| `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
+| `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `ModelRef` | type | `ModelRef` | — | code |
 | `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned |
 | `ProgressPolicy` | type | `ProgressPolicy` | — | planned |
 | `PromptInput` | type | `PromptInput` | — | planned |
 | `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py | tested |
-| `QueueMode` | type | `QueueMode` | — | planned |
+| `QueueMode` | type | `QueueMode` | test_harness_inbox.py | tested |
 | `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
 | `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py | tested |
 | `RegistrySnapshot` | type | `RegistrySnapshot` | test_harness_tasks.py | tested |
 | `Settings` | type | `Settings` | test_harness_tasks.py | tested |
-| `SettledSubmissionRecord` | type | `SettledSubmissionRecord` | — | planned |
+| `SettledSubmissionRecord` | type | `SettledSubmissionRecord` | test_harness_submissions.py | tested |
 | `SettledTask` | type | `SettledTask` | test_harness_tasks.py | tested |
-| `Submission` | type | `Submission` | — | planned |
-| `SubmissionDraft` | type | `SubmissionDraft` | — | planned |
+| `Submission` | type | `Submission` | test_harness_submissions.py, test_harness_inbox.py | tested |
+| `SubmissionDraft` | type | `SubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py | tested |
 | `ToolControl` | type | `ToolControl` | — | planned |
 | `ToolDiagnostic` | type | `ToolDiagnostic` | — | planned |
@@ -228,7 +228,7 @@ is green.
 | `ToolHookCall` | type | `ToolHookCall` | — | planned |
 | `ToolHooks` | type | `ToolHooks` | — | planned |
 | `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py | tested |
-| `UserInput` | type | `UserInput` | — | planned |
+| `UserInput` | type | `UserInput` | test_harness_input_entries.py | tested |
 | `Wrap` | type | `Wrap` | test_harness_registry_agent.py | tested |
 
 ### `./harness/usage.ts` → `pi_durable.harness.usage`
@@ -555,7 +555,7 @@ SQLite backend and migrations.
 | 5.3 Terminal tasks | tested |
 | 5.4 Scheduler, abort, and ownership | tested |
 | 5.5 Structured concurrency | tested |
-| 6 Submissions and inbox | planned |
+| 6 Submissions and inbox | tested |
 | 7 Extensions, hooks, tools, and system prompt | planned |
 | 7.1 Extensions, registry, and agent resolution | planned |
 | 7.2 Hooks | planned |
@@ -603,6 +603,16 @@ cleanup, the `harness-ownership` cases that need submissions, tools, or a live `
 the `harness-lifecycle` cases that need tool hooks, usage, conversation views, or the task-graph
 watch. The `harness-lifecycle` open-error, close, reopen, registry-change, cancellation, and
 durable-commit cases are translated now.
+
+The submission suites are translated in three files. `harness-submissions` covers idle input and
+write admission, request-ID deduplication, busy rejection, abort results, lookup, waits, close
+behavior, and settlement validation. `harness-inbox` covers busy queueing, write-before-user
+ordering, queue modes, resets, stale heads, display-only writes, withdrawals, failed-run inbox
+retention, positional inbox operations, the empty-inbox base, and reopen. `harness-input-entries`
+covers application entry kinds, reserved-kind rejection, kind/data projection, queued entries, and
+withdrawal. The suites install a generation probe under the built-in `pi.generation` name; the real
+run loop, provider streaming, successful answer boundaries beyond that probe, and generation
+presentation in `pi.live` land with #14.
 
 The upstream `harness-context` suite is translated in three parts. Its thirteen derivation cases run
 against the Session-level `context()` read. Three of its nine kept-range cases run against
@@ -679,7 +689,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 1. Scaffold: vendored spec, decision record, parity matrix, CI, package layout.
 - [x] 2. Kernel: types, IDs, JSON, errors, entries, documents, Session/Tx/forks.
 - [x] 3. Storage: memory, JSONL, SQLite, conformance suites.
-- [ ] 4. Tasks, scheduler, submissions, document observation.
+- [x] 4. Tasks, scheduler, submissions, document observation.
 - [ ] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
 - [ ] 6. `env`, coding tools, `tool-search`.
 - [ ] 7. Compaction, events/view, task graph, extension reload.

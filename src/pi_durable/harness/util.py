@@ -71,10 +71,15 @@ class Waiters(Generic[K, T]):
 
 
 def rejected(error: BaseException) -> asyncio.Future[Any]:
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[Any] = loop.create_future()
+    future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     future.set_exception(error)
     future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+    return future
+
+
+def resolved(value: T) -> asyncio.Future[T]:
+    future: asyncio.Future[T] = asyncio.get_running_loop().create_future()
+    future.set_result(value)
     return future
 
 
@@ -98,4 +103,4 @@ def closed_error(session: Any) -> BaseException:
     return RuntimeError("Harness is closed") if failure is None else SessionFailed(failure)
 
 
-__all__ = ["Waiters", "cancellation_error", "closed_error", "rejected", "scan_all"]
+__all__ = ["Waiters", "cancellation_error", "closed_error", "rejected", "resolved", "scan_all"]

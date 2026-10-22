@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Never, NotRequired, Protocol, TypedDict, TypeVar
+from typing import Any, Literal, Never, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
 
 from ..context import AbortSignal, Context
 from ..documents import (
@@ -27,14 +27,19 @@ from ..documents import (
 from ..ids import ConversationId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
+    EntryDraft,
     EntryRecord,
     EntryWithHead,
+    InputDoneRecord,
+    InputUnansweredRecord,
     MessageRecord,
     NextTaskState,
     SubmissionRecord,
     TaskOutcome,
     TaskRecord,
     TaskState,
+    WriteDoneRecord,
+    WriteUnansweredRecord,
 )
 
 
@@ -305,6 +310,52 @@ class HarnessInspection(TypedDict):
     submissions: list[SubmissionRecord]
 
 
+# ── Submissions ─────────────────────────────────────────────────────────────
+
+QueueMode = Literal["all", "one-at-a-time"]
+"""How many queued items of one mode a boundary selects."""
+
+UserInput = JsonValue
+"""Content of a user message: a string or an ordered content list."""
+
+
+class InputEntry(TypedDict):
+    """The kind and data an input is placed as, instead of a ``pi.user`` entry."""
+
+    kind: str
+    data: NotRequired[JsonValue]
+
+
+class InputSubmissionDraft(TypedDict, total=False):
+    """An input submission: admitted as one user-message entry and answered by a run."""
+
+    type: Literal["input"]
+    content: UserInput
+    entry: InputEntry
+    request_id: str
+    requestId: str
+    when_busy: Literal["steer", "followUp", "reject"]
+    whenBusy: Literal["steer", "followUp", "reject"]
+
+
+class WriteSubmissionDraft(TypedDict, total=False):
+    """A passive entry write: appended when a boundary selects it, or at once when display-only."""
+
+    type: Literal["write"]
+    entry: EntryDraft
+    request_id: str
+    requestId: str
+
+
+SubmissionDraft: TypeAlias = InputSubmissionDraft | WriteSubmissionDraft
+"""Either an input or a passive entry write."""
+
+SettledSubmissionRecord: TypeAlias = (
+    InputDoneRecord | InputUnansweredRecord | WriteDoneRecord | WriteUnansweredRecord
+)
+"""A submission that reached ``done`` or ``unanswered``."""
+
+
 # ── Conversations ───────────────────────────────────────────────────────────
 
 
@@ -327,11 +378,13 @@ class Conversation(Protocol):
 
 
 class Submission(Protocol):
+    """An admitted submission, awaitable until it settles and abortable while queued."""
+
     id: SubmissionId
 
     async def status(self, context: Context) -> SubmissionRecord: ...
 
-    async def wait(self, context: Context) -> SubmissionRecord: ...
+    async def wait(self, context: Context) -> SettledSubmissionRecord: ...
 
     async def abort(self, context: Context) -> Literal["aborted", "already_placed", "settled"]: ...
 
@@ -368,8 +421,11 @@ __all__ = [
     "HarnessOptions",
     "HookRegistration",
     "HookRunner",
+    "InputEntry",
+    "InputSubmissionDraft",
     "ModelRef",
     "PromptSection",
+    "QueueMode",
     "Registry",
     "RegistryReader",
     "RegistrySnapshot",
@@ -378,13 +434,16 @@ __all__ = [
     "SessionDocFamilyToken",
     "SessionDocToken",
     "Settings",
+    "SettledSubmissionRecord",
     "SettledTask",
     "Submission",
+    "SubmissionDraft",
     "TaskDocFamilyToken",
     "TaskDocToken",
     "TaskInspection",
     "TaskRuntime",
     "ThinkingLevel",
     "ToolRegistration",
+    "UserInput",
     "Wrap",
 ]

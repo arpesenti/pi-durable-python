@@ -26,3 +26,21 @@ _Avoid_: free-threading support, thread-safe
 **Thread-safe**:
 Safe for concurrent threads sharing one `Session` or `Storage`. Reserved: nothing claims it today.
 _Avoid_: free-threaded-clean
+
+**Submission**:
+A durable admission of user input or a passive entry write.
+It is `queued` in the inbox, `placed` as an entry, then `done` or `unanswered`.
+_Avoid_: message, job
+
+**Inbox**:
+The built-in `pi.inbox` conversation document holding queued submissions in submission-ID order.
+_Avoid_: queue, buffer
+
+**Boundary**:
+A point in a run (`postTools` or `final`) where queued submissions are selected and placed.
+_Avoid_: flush, drain, checkpoint
+
+**Run**:
+The `pi.generation` task named by `pi.live.run` that owns the placed input submissions it must answer.
+A run is present exactly while the conversation is busy.
+_Avoid_: turn, request, generation
