@@ -1592,7 +1592,7 @@ class _HookRunner:
 
     async def _agent(self) -> Agent:
         runtime = _Runtime(self._scheduler, self._invocation, self._phase)
-        return await runtime.agent(self._scheduler._context)
+        return await runtime.agent(self._invocation.context)
 
 
 class _Runtime:

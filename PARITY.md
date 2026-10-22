@@ -65,11 +65,12 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `AgentDoc` | value | `AgentDoc` | — | planned |
-| `configure` | value | `configure` | — | planned |
-| `DEFAULT_COMPACTION_POLICY` | value | `DEFAULT_COMPACTION_POLICY` | — | planned |
-| `DEFAULT_PROGRESS_POLICY` | value | `DEFAULT_PROGRESS_POLICY` | — | planned |
-| `DEFAULT_RETRY_POLICY` | value | `DEFAULT_RETRY_POLICY` | — | planned |
+| `addTools` | value | `add_tools` | — | planned |
+| `AgentDoc` | value | `AgentDoc` | test_harness_registry_agent.py | tested |
+| `configure` | value | `configure` | test_harness_registry_agent.py | tested |
+| `DEFAULT_COMPACTION_POLICY` | value | `DEFAULT_COMPACTION_POLICY` | test_harness_registry_agent.py | tested |
+| `DEFAULT_PROGRESS_POLICY` | value | `DEFAULT_PROGRESS_POLICY` | test_harness_registry_agent.py | tested |
+| `DEFAULT_RETRY_POLICY` | value | `DEFAULT_RETRY_POLICY` | test_harness_registry_agent.py | tested |
 
 ### `./harness/compaction.ts` → `pi_durable.harness.compaction`
 
@@ -150,7 +151,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createRegistry` | value | `create_registry` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py | tested |
+| `createRegistry` | value | `create_registry` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_registry_agent.py | tested |
 
 ### `./harness/task-graph.ts` → `pi_durable.harness.task_graph`
 
@@ -176,9 +177,9 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Agent` | type | `Agent` | test_harness_tasks.py | tested |
-| `AgentChange` | type | `AgentChange` | test_harness_tasks.py | tested |
-| `AgentState` | type | `AgentState` | test_harness_tasks.py | tested |
+| `Agent` | type | `Agent` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
+| `AgentChange` | type | `AgentChange` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
+| `AgentState` | type | `AgentState` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `AnyTask` | type | `AnyTask` | test_harness_tasks.py, test_harness_ownership.py | tested |
 | `CompactionHooks` | type | `CompactionHooks` | — | planned |
 | `CompactionPolicy` | type | `CompactionPolicy` | — | planned |
@@ -194,7 +195,7 @@ is green.
 | `ConversationStreamOptions` | type | `ConversationStreamOptions` | — | planned |
 | `ConversationWatch` | type | `ConversationWatch` | — | planned |
 | `EnvTarget` | type | `EnvTarget` | — | planned |
-| `Extension` | type | `Extension` | test_harness_tasks.py, test_harness_ownership.py | tested |
+| `Extension` | type | `Extension` | test_harness_tasks.py, test_harness_ownership.py, test_harness_registry_agent.py | tested |
 | `GenerationHooks` | type | `GenerationHooks` | — | planned |
 | `HarnessInspection` | type | `HarnessInspection` | test_harness_tasks.py, test_harness_cancellation_barrier.py | tested |
 | `HarnessOptions` | type | `HarnessOptions` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
@@ -205,16 +206,16 @@ is green.
 | `HooksOf` | type | `HooksOf` | — | planned |
 | `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
-| `ModelRef` | type | `ModelRef` | — | code |
+| `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
 | `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned |
 | `ProgressPolicy` | type | `ProgressPolicy` | — | planned |
 | `PromptInput` | type | `PromptInput` | — | planned |
 | `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py | tested |
 | `QueueMode` | type | `QueueMode` | test_harness_inbox.py | tested |
-| `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
-| `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py | tested |
-| `RegistrySnapshot` | type | `RegistrySnapshot` | test_harness_tasks.py | tested |
-| `Settings` | type | `Settings` | test_harness_tasks.py | tested |
+| `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
+| `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
+| `RegistrySnapshot` | type | `RegistrySnapshot` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
+| `Settings` | type | `Settings` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `SettledSubmissionRecord` | type | `SettledSubmissionRecord` | test_harness_submissions.py | tested |
 | `SettledTask` | type | `SettledTask` | test_harness_tasks.py | tested |
 | `Submission` | type | `Submission` | test_harness_submissions.py, test_harness_inbox.py | tested |
@@ -227,7 +228,7 @@ is green.
 | `ToolExecutionResult` | type | `ToolExecutionResult` | — | planned |
 | `ToolHookCall` | type | `ToolHookCall` | — | planned |
 | `ToolHooks` | type | `ToolHooks` | — | planned |
-| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py | tested |
+| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `UserInput` | type | `UserInput` | test_harness_input_entries.py | tested |
 | `Wrap` | type | `Wrap` | test_harness_registry_agent.py | tested |
 
@@ -556,12 +557,12 @@ SQLite backend and migrations.
 | 5.4 Scheduler, abort, and ownership | tested |
 | 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | tested |
-| 7 Extensions, hooks, tools, and system prompt | planned |
-| 7.1 Extensions, registry, and agent resolution | planned |
-| 7.2 Hooks | planned |
+| 7 Extensions, hooks, tools, and system prompt | code |
+| 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #14/#18/#21) |
+| 7.2 Hooks | code |
 | 7.3 Tools | planned |
 | 7.4 System prompt and dynamic tools | planned |
-| 7.5 Extension reload | planned |
+| 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
 | 8 Built-in tasks | planned |
 | 8.1 Built-in entries | planned |
@@ -621,6 +622,25 @@ returned views staying apart from the kept range, and dropping the range under z
 remaining six (clock-driven expiry, busy and late reads, extended-read equivalence, baseline found
 in added entries, and shallow-storage freeze) land with #10 and #22.
 
+The upstream `harness-registry` suite is translated in `test_harness_registry_agent.py`: install,
+replace in place, uninstall by name with subscriber publications and immutable old snapshots;
+validation that publishes nothing; installed task definitions; the progress-interval default;
+default/array/`{add, remove}` extension selection with stale objects and uninstalled names;
+same-name tool replacement, wrapper order, and tool filters; wrapper throw/rename drops with
+reports; section ordering, same-key replacement, and the unwrapped `instructions` section; hook
+collection in extension order; and the stored-agent defaults. Hook dispatch order and ordinary-throw
+containment, plus reload of an extension in a live Session at its next phase, are covered there too.
+The registry's built-in generation, tool, and compaction tasks land with #14/#18/#21, so the
+built-in-task case is partial, and the per-hook composition rules (replacement chains, first-block
+and first-continuation wins) arrive with those tasks; the `pi.generation` task-collision row is
+translated once that built-in exists. The resolution half of `harness-callers` is
+translated alongside: model-only, tools-only, and both callers; `modelTools` narrowing without
+widening what tools may call; enabled filters; and deferred-tool resolution through an array or
+`{remove, add}` (a superset of the upstream resolution cases). Its end-to-end cases need a
+generation request and tool execution and land with #14/#18, and
+`addTools` (the tool-round edit of `tools`/`modelTools`) lands with tool rounds and tool search
+(#14/#18/#20).
+
 ## Allowed deviations
 
 | Area | Upstream | Python |
@@ -649,6 +669,7 @@ in added entries, and shallow-storage freeze) land with #10 and #22.
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
+| Definition constructors | identity functions; they check nothing | `define_*` constructors validate a required non-empty name (and a task's version) eagerly; `section` and the registry check section rules |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
 | Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | `context(conversation_id, context, at=...)`; `Conversation.context()` and `TaskRuntime.context()` accept the cutoff as a keyword mapping |
 | Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
@@ -678,7 +699,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
 | Task scheduler, ownership indexes, and task runtime | `pi_durable.harness.scheduler` | tested (`test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_cancellation_barrier.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_indexes.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
 | Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
-| Extension registry, agent resolution, and hook dispatch | `pi_durable.harness.registry`, `pi_durable.harness.agent` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`) |
+| Extension registry, agent resolution, and hook dispatch | `pi_durable.harness.registry`, `pi_durable.harness.agent` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_registry_agent.py`) |
 | Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`, `test_harness_storage_failure.py`) |
 | Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |

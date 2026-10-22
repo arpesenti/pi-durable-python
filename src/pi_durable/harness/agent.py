@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from ..documents import define_doc
@@ -15,7 +15,6 @@ from .types import (
     RegistrySnapshot,
     Settings,
     ToolRegistration,
-    Wrap,
 )
 
 INSTRUCTIONS_KEY = "instructions"
@@ -69,31 +68,24 @@ def resolve_settings(settings: Any) -> Settings:
     merged_compaction = dict(DEFAULT_COMPACTION_POLICY)
     merged_compaction.update(_field(settings, "compaction", {}) or {})
     partial = _field(settings, "progress", {}) or {}
+    progress = dict(DEFAULT_PROGRESS_POLICY)
+    for key in progress:
+        value = _field(partial, key)
+        if value is not None:
+            progress[key] = value
     return Settings(
         extensions=extensions,
         stream=dict(_field(settings, "stream", {}) or {}),
         retry=merged_retry,
         compaction=merged_compaction,
-        progress={
-            "partial_interval_ms": partial.get(
-                "partial_interval_ms", DEFAULT_PROGRESS_POLICY["partial_interval_ms"]
-            )
-            if isinstance(partial, Mapping)
-            else DEFAULT_PROGRESS_POLICY["partial_interval_ms"],
-            "output_interval_ms": partial.get(
-                "output_interval_ms", DEFAULT_PROGRESS_POLICY["output_interval_ms"]
-            )
-            if isinstance(partial, Mapping)
-            else DEFAULT_PROGRESS_POLICY["output_interval_ms"],
-        },
+        progress=progress,
         tool_execution=_field(settings, "tool_execution", "parallel"),
         steering_mode=_field(settings, "steering_mode", "one-at-a-time"),
         follow_up_mode=_field(settings, "follow_up_mode", "one-at-a-time"),
         context_retention_ms=_field(
             settings, "context_retention_ms", DEFAULT_CONTEXT_RETENTION_MS
         ),
-        document_retention_ms=_field(settings, "document_retention_ms", 600_000),
-    )
+        document_retention_ms=_field(settings, "document_retention_ms", 600_000),    )
 
 
 async def configure(tx: Transaction, conversation_id: ConversationId, change: Mapping[str, Any]) -> None:
@@ -102,6 +94,8 @@ async def configure(tx: Transaction, conversation_id: ConversationId, change: Ma
     state = await tx.doc(AgentDoc, conversation_id)
     for key, value in change.items():
         field = _CHANGE_FIELDS.get(key, key)
+        if field not in _AGENT_FIELDS:
+            continue
         if value is None:
             state.pop(field, None)
         elif field in ("extensions", "tools", "modelTools"):
@@ -114,6 +108,10 @@ _CHANGE_FIELDS = {
     "thinking_level": "thinkingLevel",
     "model_tools": "modelTools",
 }
+
+_AGENT_FIELDS = frozenset(
+    {"model", "thinkingLevel", "extensions", "tools", "modelTools", "instructions", "cwd"}
+)
 
 
 def _names(value: Any) -> Any:
@@ -155,7 +153,7 @@ def resolve_agent(
     state: Mapping[str, Any] | None,
     snapshot: RegistrySnapshot,
     settings: Settings,
-    report: Any,
+    report: Callable[[BaseException], None],
 ) -> Agent:
     """Resolve an agent from its stored state, a registry snapshot, and resolved settings."""
 
@@ -172,7 +170,10 @@ def resolve_agent(
             sections[section.key] = section
     for extension in extensions:
         for wrap in extension.wraps:
-            _apply_wrap(composed, sections, wrap, report)
+            if wrap.tool is not None and wrap.wrap is not None:
+                _apply_wrap(composed, wrap.tool, wrap.wrap, lambda tool: tool.name, report)
+            elif wrap.section is not None and wrap.wrap is not None:
+                _apply_wrap(sections, wrap.section, wrap.wrap, lambda section: section.key, report)
 
     enabled = _filter_tools(list(composed.values()), stored.get("tools"))
     model_callable = [tool for tool in enabled if tool.callers is None or "model" in tool.callers]
@@ -184,7 +185,9 @@ def resolve_agent(
     instructions = stored.get("instructions")
     agent_sections = list(sections.values())
     if instructions is not None:
-        agent_sections.append(PromptSection(key=INSTRUCTIONS_KEY, render=lambda: instructions))
+        agent_sections.append(
+            PromptSection(key=INSTRUCTIONS_KEY, render=lambda *_args: instructions)
+        )
 
     return Agent(
         model=stored.get("model"),
@@ -200,55 +203,37 @@ def resolve_agent(
 
 
 def _apply_wrap(
-    tools: dict[str, ToolRegistration],
-    sections: dict[str, PromptSection],
-    wrap: Wrap,
-    report: Any,
+    items: dict[str, Any],
+    target: str,
+    wrap: Callable[..., Any],
+    name_of: Callable[[Any], str],
+    report: Callable[[BaseException], None],
 ) -> None:
-    target = wrap.tool if wrap.tool is not None else wrap.section
-    if target is None or wrap.wrap is None:
+    item = items.get(target)
+    if item is None:
         return
-    if wrap.tool is not None:
-        tool_item = tools.get(target)
-        if tool_item is None:
-            return
-        try:
-            wrapped_tool = cast(ToolRegistration, wrap.wrap(tool_item))
-            if wrapped_tool.name != target:
-                raise ValueError(f"Wrapper renamed {target} to {wrapped_tool.name}")
-            tools[target] = wrapped_tool
-        except Exception as error:
-            tools.pop(target, None)
-            report(error)
-    else:
-        section_item = sections.get(target)
-        if section_item is None:
-            return
-        try:
-            wrapped_section = cast(PromptSection, wrap.wrap(section_item))
-            if wrapped_section.key != target:
-                raise ValueError(f"Wrapper renamed {target} to {wrapped_section.key}")
-            sections[target] = wrapped_section
-        except Exception as error:
-            sections.pop(target, None)
-            report(error)
+    try:
+        wrapped = wrap(item)
+        renamed = name_of(wrapped)
+        if renamed != target:
+            raise ValueError(f"Wrapper renamed {target} to {renamed}")
+        items[target] = wrapped
+    except Exception as error:
+        items.pop(target, None)
+        report(error)
 
 
 def _offered_tools(
     tools: list[ToolRegistration],
     filter_value: Any,
 ) -> list[ToolRegistration]:
-    if isinstance(filter_value, list):
+    if isinstance(filter_value, (list, tuple)):
         return _filter_tools(tools, filter_value)
-    removed = set((filter_value or {}).get("remove", []) if isinstance(filter_value, Mapping) else [])
+    removed = _name_set(_field(filter_value, "remove", []))
     kept = [tool for tool in tools if not tool.deferred and tool.name not in removed]
     by_name = {tool.name: tool for tool in tools}
     loaded: list[ToolRegistration] = []
-    seen: set[str] = set()
-    for name in (filter_value or {}).get("add", []) if isinstance(filter_value, Mapping) else []:
-        if name in seen:
-            continue
-        seen.add(name)
+    for name in _unique_names(_field(filter_value, "add", [])):
         tool = by_name.get(name)
         if tool is not None and tool.deferred and name not in removed:
             loaded.append(tool)
@@ -258,20 +243,28 @@ def _offered_tools(
 def _filter_tools(tools: list[ToolRegistration], filter_value: Any) -> list[ToolRegistration]:
     if filter_value is None:
         return tools
-    if isinstance(filter_value, list):
+    if isinstance(filter_value, (list, tuple)):
         by_name = {tool.name: tool for tool in tools}
-        result: list[ToolRegistration] = []
-        seen: set[str] = set()
-        for name in filter_value:
-            if name in seen:
-                continue
-            seen.add(name)
-            tool = by_name.get(name)
-            if tool is not None:
-                result.append(tool)
-        return result
-    removed = set(filter_value.get("remove", []) if isinstance(filter_value, Mapping) else [])
+        return [by_name[name] for name in _unique_names(filter_value) if name in by_name]
+    removed = _name_set(_field(filter_value, "remove", []))
     return [tool for tool in tools if tool.name not in removed]
+
+
+def _unique_names(items: Any) -> list[str]:
+    """Names in order, a repeated name only at its first position."""
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        name = _name(item)
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _name_set(items: Any) -> set[str]:
+    return {_name(item) for item in items}
 
 
 def _select_extensions(
@@ -279,22 +272,22 @@ def _select_extensions(
     snapshot: RegistrySnapshot,
     settings: Settings,
 ) -> list[Extension]:
-    if isinstance(stored, list):
-        selected = list(stored)
+    if isinstance(stored, (list, tuple)):
+        selected = _unique_names(stored)
     else:
         if settings.extensions is not None:
-            base = [extension.name for extension in settings.extensions]
+            base = _unique_names(settings.extensions)
         else:
-            base = [extension.name for extension in snapshot.installed()]
+            base = _unique_names(snapshot.installed())
         edit = stored if isinstance(stored, Mapping) else {}
-        removed = set(edit.get("remove", []))
-        selected = [name for name in [*base, *edit.get("add", [])] if name not in removed]
+        removed = _name_set(edit.get("remove", []))
+        selected = [
+            name
+            for name in _unique_names([*base, *edit.get("add", [])])
+            if name not in removed
+        ]
     extensions: list[Extension] = []
-    seen: set[str] = set()
     for name in selected:
-        if name in seen:
-            continue
-        seen.add(name)
         extension = snapshot.extension(name)
         if extension is not None:
             extensions.append(extension)
