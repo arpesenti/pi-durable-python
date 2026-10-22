@@ -8,6 +8,7 @@ from typing import Any
 
 from .agent import INSTRUCTIONS_KEY
 from .generation import GenerationTask
+from .tool import ToolTask
 from .types import (
     AnyTask,
     Extension,
@@ -17,8 +18,8 @@ from .types import (
 
 _SECTION_KEY = re.compile(r"^[a-z][a-z0-9_-]*$")
 
-#: Built-in task definitions every registry holds. Tool and compaction tasks join with their tickets.
-BUILTIN_TASKS: tuple[AnyTask, ...] = (GenerationTask,)
+#: Built-in task definitions every registry holds. The compaction task joins with its ticket.
+BUILTIN_TASKS: tuple[AnyTask, ...] = (GenerationTask, ToolTask)
 
 
 class _RegistryState:

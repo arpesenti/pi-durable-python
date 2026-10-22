@@ -88,6 +88,40 @@ def resolve_settings(settings: Any) -> Settings:
         document_retention_ms=_field(settings, "document_retention_ms", 600_000),    )
 
 
+async def add_tools(tx: Transaction, conversation_id: ConversationId, added: list[str]) -> None:
+    """The ``addTools`` of a tool round, applied to ``tools`` and ``modelTools`` for the next request.
+
+    An array gets each name it lacks appended, and ``{ remove }`` loses the names. An unset ``tools``
+    already enables every tool, so nothing is written for it. An unset or object ``modelTools`` also
+    gets each name appended to its ``add``, which loads deferred tools and has no effect for others.
+    By name, without the registry: a tool that is not registered now is offered once it is again.
+    """
+
+    state = await tx.doc(AgentDoc, conversation_id)
+    tools = state.get("tools")
+    if isinstance(tools, list) or hasattr(tools, "append"):
+        for name in added:
+            if name not in tools:
+                tools.append(name)
+    elif tools is not None:
+        removals = [item for item in tools.get("remove") or () if item not in added]
+        if len(removals) != len(tools.get("remove") or ()):
+            tools["remove"] = removals
+    model_tools = state.get("modelTools")
+    if isinstance(model_tools, list) or hasattr(model_tools, "append"):
+        for name in added:
+            if name not in model_tools:
+                model_tools.append(name)
+        return
+    current_removals = (model_tools.get("remove") if model_tools else None) or ()
+    removals = [item for item in current_removals if item not in added]
+    additions = list((model_tools.get("add") if model_tools else None) or ())
+    for name in added:
+        if name not in additions:
+            additions.append(name)
+    state["modelTools"] = {**({"remove": removals} if removals else {}), "add": additions}
+
+
 async def configure(tx: Transaction, conversation_id: ConversationId, change: Mapping[str, Any]) -> None:
     """Apply one change to ``pi.agent``: a given field replaces the stored one, ``None`` clears it."""
 
@@ -301,6 +335,7 @@ __all__ = [
     "DEFAULT_PROGRESS_POLICY",
     "DEFAULT_RETRY_POLICY",
     "INSTRUCTIONS_KEY",
+    "add_tools",
     "agent_hooks",
     "configure",
     "create_agent",

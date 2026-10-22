@@ -59,13 +59,23 @@ def define_tool(
         parameters=values.get("parameters"),
         execute=values.get("execute"),
         replay=values.get("replay"),
-        execution_mode=values.get("execution_mode"),
-        structured_output_schema=values.get("structured_output_schema"),
+        execution_mode=_field(values, "execution_mode", "executionMode"),
+        structured_output_schema=_field(
+            values, "structured_output_schema", "structuredOutputSchema"
+        ),
         callers=values.get("callers"),
         deferred=values.get("deferred") is True,
-        output_limits=values.get("output_limits"),
-        constrained_sampling=values.get("constrained_sampling"),
+        output_limits=_field(values, "output_limits", "outputLimits"),
+        constrained_sampling=_field(values, "constrained_sampling", "constrainedSampling"),
+        prepare_arguments=_field(values, "prepare_arguments", "prepareArguments"),
     )
+
+
+def _field(values: Mapping[str, Any], name: str, camel: str) -> Any:
+    """A Python-facing snake_case field, accepting the upstream camelCase spelling too."""
+
+    value = values.get(name)
+    return values.get(camel) if value is None else value
 
 
 def section(

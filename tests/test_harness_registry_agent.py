@@ -13,7 +13,7 @@ import pytest
 from session_support import context
 from task_support import aborted_with, completed, deferred, open_tasks
 
-from pi_durable import GenerationTask, MemoryStorage
+from pi_durable import GenerationTask, MemoryStorage, ToolTask
 from pi_durable.harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_RETRY_POLICY,
@@ -174,14 +174,18 @@ def test_validates_the_registry_as_it_would_be_after_an_install() -> None:
 
 def test_holds_installed_task_definitions_and_removes_them_on_uninstall() -> None:
     registry = create_registry()
-    assert [each.definition.name for each in registry.snapshot().tasks()] == ["pi.generation"]
+    assert [each.definition.name for each in registry.snapshot().tasks()] == [
+        "pi.generation",
+        "pi.tool",
+    ]
     custom = task("app.custom")
     registry.install(define_extension({"name": "custom", "tasks": [custom]}))
-    assert registry.snapshot().tasks() == [GenerationTask, custom]
+    assert registry.snapshot().tasks() == [GenerationTask, ToolTask, custom]
     assert registry.snapshot().task("app.custom") is custom
     registry.uninstall(define_extension({"name": "custom"}))
     assert registry.snapshot().task("app.custom") is None
     assert registry.snapshot().task("pi.generation") is GenerationTask
+    assert registry.snapshot().task("pi.tool") is ToolTask
 
 
 def test_keeps_the_default_of_a_progress_interval_given_as_undefined() -> None:

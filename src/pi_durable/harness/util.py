@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Hashable
 from typing import Any, Generic, TypeVar
 
@@ -103,4 +104,66 @@ def closed_error(session: Any) -> BaseException:
     return RuntimeError("Harness is closed") if failure is None else SessionFailed(failure)
 
 
-__all__ = ["Waiters", "cancellation_error", "closed_error", "rejected", "resolved", "scan_all"]
+def call_with_args(handler: Callable[..., Any], *args: Any) -> Any:
+    """Call ``handler`` with only the arguments it declares, as JavaScript ignores extras."""
+
+    try:
+        parameters = list(inspect.signature(handler).parameters.values())
+    except (TypeError, ValueError):
+        return handler(*args)
+    if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        return handler(*args)
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return handler(*args[: len(positional)])
+
+
+def assign_json(target: Any, key: Any, value: Any) -> None:
+    """Assign ``value`` at ``target[key]`` leaf by leaf, so a string leaf becomes an append."""
+
+    slots = target
+    current = slots.get(key) if hasattr(slots, "get") else slots[key]
+    if _is_record(current) and _is_record(value):
+        for name in list(current.keys()):
+            if name not in value:
+                del current[name]
+        for name, child in value.items():
+            assign_json(current, name, child)
+        return
+    if _is_array(current) and _is_array(value) and len(current) <= len(value):
+        for index in range(len(value)):
+            if index < len(current):
+                assign_json(current, index, value[index])
+            else:
+                current.append(value[index])
+        return
+    if current != value:
+        slots[key] = value
+
+
+def _is_record(value: Any) -> bool:
+    from ..session.drafts import DraftObject
+
+    return isinstance(value, (dict, DraftObject))
+
+
+def _is_array(value: Any) -> bool:
+    from ..session.drafts import DraftList
+
+    return isinstance(value, (list, DraftList))
+
+
+__all__ = [
+    "Waiters",
+    "assign_json",
+    "call_with_args",
+    "cancellation_error",
+    "closed_error",
+    "rejected",
+    "resolved",
+    "scan_all",
+]

@@ -576,3 +576,79 @@ async def test_fails_the_harness_on_a_failed_cascade_commit_and_reopening_applie
         "status"
     ] == "aborted"
     await reopened["harness"].close(context)
+
+
+async def test_gives_a_tool_an_invocation_bound_handle_whose_submissions_stay_durable() -> None:
+    from chat_support import chat_setup, open_chat
+    from tool_support import DONE, add_tool, all_entries, calls, tool
+
+    from pi_durable import configure
+
+    setup = chat_setup()
+    held: dict[str, Any] = {}
+
+    async def delegate(_args: Any, api: Any, call_context: Any) -> Any:
+        async def create(tx: Any) -> Any:
+            created = await tx.create_conversation(
+                {"ownership": {"kind": "task", "taskId": api.task_id}}
+            )
+            await configure(tx, created["id"], {"model": {"provider": "faux", "modelId": "faux-1"}})
+            return created["id"]
+
+        child = await api.commit(create, call_context)
+        held["missing"] = await api.conversation(99_999, call_context)
+        handle = await api.conversation(child, call_context)
+        held["handle"] = handle
+        try:
+            await handle.submit(
+                {"type": "write", "entry": {"kind": "test.note", "data": "passive"}}, call_context
+            )
+        except TypeError as error:
+            held["write_error"] = str(error)
+        submission = await handle.submit(
+            {"type": "input", "content": "child task", "requestId": "child"}, call_context
+        )
+        held["submission"] = submission
+        settled_record = await submission.wait(call_context)
+        return {"output": [{"type": "text", "text": settled_record["status"]}]}
+
+    add_tool(setup.registry, tool("delegate", delegate))
+    setup.faux.set_responses(
+        [
+            calls(["delegate", {}, "c1"]),
+            assistant_text("child answer"),
+            DONE,
+        ]
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    assert held["missing"] is None
+    assert held["write_error"] == "A conversation handle accepts only input submissions"
+    # The call ended: the handle and its submission reject, while the submission record remains.
+    with pytest.raises(RuntimeError, match="invocation has ended"):
+        await held["handle"].submit({"type": "input", "content": "again"}, context)
+    with pytest.raises(RuntimeError, match="invocation has ended"):
+        await held["handle"].wait_for_idle(context)
+    with pytest.raises(RuntimeError, match="invocation has ended"):
+        await held["handle"].abort(context)
+    with pytest.raises(RuntimeError, match="invocation has ended"):
+        await held["submission"].wait(context)
+    child = await harness.conversation(held["handle"].id, context)
+    child_entries = await all_entries(child)
+    assert [entry["kind"] for entry in child_entries].count("pi.user") == 1
+    assert all(entry["kind"] != "test.note" for entry in child_entries)
+    inspection = await harness.inspect(context)
+    assert [
+        task for task in inspection["tasks"] if task["record"]["conversationId"] == held["handle"].id
+    ] == []
+    record = await harness.submission(held["submission"].id, context)
+    assert (await record.status(context))["status"] == "done"
+    await harness.close(context)
+
+
+def assistant_text(text: str) -> dict[str, Any]:
+    from chat_support import assistant_message, faux_text
+
+    return assistant_message([faux_text(text)])

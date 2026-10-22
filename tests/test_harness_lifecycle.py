@@ -17,7 +17,7 @@ from task_support import (
     with_signal,
 )
 
-from pi_durable import MemoryStorage
+from pi_durable import GenerationTask, MemoryStorage
 from pi_durable.context import AbortController
 from pi_durable.harness.define import define_extension
 from pi_durable.harness.harness import Harness
@@ -264,3 +264,51 @@ async def test_runs_what_the_registry_holds_at_resume() -> None:
     await first["harness"].wait_for_task(missing, context)
     assert log == ["v2"]
     await first["harness"].close(context)
+
+
+async def test_joins_a_tool_execute_and_a_hook_that_ignore_their_signal_before_closing_storage() -> None:
+    for where in ("tool", "hook"):
+        await _stubborn_case(where)
+
+
+async def _stubborn_case(where: str) -> None:
+    from chat_support import open_chat
+    from tool_support import DONE, add_hooks, add_tool, calls, chat_setup, tool
+
+    setup = chat_setup()
+    storage = MemoryStorage()
+    reached = deferred()
+    gate = deferred()
+    state: dict[str, Any] = {}
+
+    async def stubborn() -> None:
+        reached.resolve()
+        await gate.promise
+        state["read_after_release"] = await storage_open(storage)
+
+    async def execute(*_args: Any) -> Any:
+        if where == "tool":
+            await stubborn()
+        return {"output": []}
+
+    add_tool(setup.registry, tool("wait", execute))
+
+    async def before_request(*_args: Any) -> Any:
+        if where == "hook":
+            await stubborn()
+        return None
+
+    add_hooks(setup.registry, GenerationTask, {"beforeRequest": before_request})
+    setup.faux.set_responses([calls(["wait", {}, "c1"]), DONE])
+    opened = await open_chat(storage, setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await root.submit({"type": "input", "content": "go"}, context)
+    await reached.promise
+    closing = asyncio.ensure_future(harness.close(context))
+    assert await settled(closing) is False
+    assert await storage_open(storage) is True
+    gate.resolve()
+    await closing
+    assert state["read_after_release"] is True
+    assert await storage_open(storage) is False

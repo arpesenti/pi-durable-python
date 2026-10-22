@@ -37,6 +37,9 @@ RESERVED_SEGMENTS = frozenset({"__proto__", "constructor", "prototype"})
 MAX_DELTA_OPERATIONS = 4_096
 """Beyond this many operations a batch folds into one root replacement, as Chord does."""
 
+OVERLAP_SCAN_LIMIT = 65_536
+"""Characters Chord's bounded overlap search examines; beyond it a string is written whole."""
+
 
 class UnsafePathError(Exception):
     """An operation addresses an unsafe or malformed path segment."""
@@ -58,6 +61,28 @@ class PathError(Exception):
 
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def overlap_strings(before: str, after: str, limit: int = OVERLAP_SCAN_LIMIT) -> int:
+    """Longest suffix of ``before`` that is a prefix of ``after``, within ``limit`` characters.
+
+    Knuth–Morris–Pratt, so a large tail window costs one pass; Chord's delta writer uses the same
+    bounded search and falls back to writing the whole string when it finds no shared part.
+    """
+
+    if not before or not after or limit <= 0:
+        return 0
+    prefix = after[:limit]
+    combined = prefix + "\x00" + before
+    table = [0] * len(combined)
+    length = 0
+    for index in range(1, len(combined)):
+        while length > 0 and combined[index] != combined[length]:
+            length = table[length - 1]
+        if combined[index] == combined[length]:
+            length += 1
+        table[index] = length
+    return min(table[-1], len(prefix), len(before))
 
 
 def assert_safe_path(path: object) -> None:

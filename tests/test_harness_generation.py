@@ -37,6 +37,7 @@ from pi_durable import (
     UsageDoc,
     UserEntry,
     define_extension,
+    define_tool,
     hook,
 )
 from pi_durable.context import AbortSignal
@@ -1034,27 +1035,39 @@ async def test_a_continuation_clears_the_partial_before_its_successor() -> None:
     )
     await harness.close(context)
 
-async def test_keeps_a_tool_calling_answer_durable_until_the_tool_task_lands() -> None:
+async def test_a_tool_calling_answer_stays_durable_and_starts_its_tool_round() -> None:
     setup = chat_setup()
+
+    def read(*_args: Any) -> Any:
+        return {"output": [{"type": "text", "text": "contents"}]}
+
+    setup.registry.install(
+        define_extension({"name": "tools", "tools": [define_tool({"name": "read", "execute": read})]})
+    )
     setup.faux.set_responses(
         [
             assistant_message(
                 [faux_tool_call("read", {}, id="c1")],
                 stop_reason="toolUse",
                 usage=usage(input=2, output=1),
-            )
+            ),
+            assistant_message("done"),
         ]
     )
     opened = await open_chat(MemoryStorage(), setup)
     harness, root = opened["harness"], opened["root"]
     harness.resume()
     settled = await (await root.submit({"type": "input", "content": "hi"}, context)).wait(context)
-    assert settled["status"] == "unanswered"
-    assert settled["reason"] == "faulted"
-    assert "Tool execution arrives" in settled["detail"]
+    assert settled["status"] == "done"
     entries = await all_entries(root)
-    assert [entry["kind"] for entry in entries] == ["pi.user", "pi.assistant"]
-    message = cast(dict[str, Any], entries[1]["model"][0])
+    assert [entry["kind"] for entry in entries] == [
+        "pi.user",
+        "pi.system",
+        "pi.assistant",
+        "pi.tool-result",
+        "pi.assistant",
+    ]
+    message = cast(dict[str, Any], entries[2]["model"][0])
     assert message["content"][0]["type"] == "toolCall"
     assert (await harness.snapshot(UsageDoc, root.id, context))["models"]["faux/faux-1"] == usage(
         input=2, output=1

@@ -15,7 +15,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
 
-from ..delta import MAX_DELTA_OPERATIONS, Op
+from ..delta import MAX_DELTA_OPERATIONS, Op, overlap_strings
 from ..json import JsonObject, JsonValue, copy_json
 
 T = TypeVar("T")
@@ -51,13 +51,9 @@ def _same_value(left: object, right: object) -> bool:
 
 
 def _overlap(before: str, after: str) -> int:
-    """Longest suffix of ``before`` that is a prefix of ``after``."""
+    """Longest suffix of ``before`` that is a prefix of ``after``, within Chord's scan bound."""
 
-    limit = min(len(before), len(after))
-    for length in range(limit, 0, -1):
-        if before.endswith(after[:length]):
-            return length
-    return 0
+    return overlap_strings(before, after)
 
 
 def _emit_changed(ops: list[Op], path: list[Any], before: object, after: JsonValue) -> None:

@@ -5,8 +5,8 @@ JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Conte
 the Storage protocol, the Session kernel, document definitions, task definitions, context
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
-built-in generation task, provider identity, and usage ledger are included; tool and compaction
-tasks and the observation surfaces arrive in later tickets.
+built-in generation and tool tasks, provider identity, and usage ledger are included; compaction,
+nested tools, and the observation surfaces arrive in later tickets.
 """
 
 from .documents import (
@@ -37,6 +37,14 @@ from .entries import (
     define_entry,
 )
 from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError
+from .harness.agent import (
+    DEFAULT_COMPACTION_POLICY,
+    DEFAULT_PROGRESS_POLICY,
+    DEFAULT_RETRY_POLICY,
+    AgentDoc,
+    add_tools,
+    configure,
+)
 from .harness.define import (
     define_extension,
     define_tool,
@@ -53,9 +61,10 @@ from .harness.generation import (
 )
 from .harness.harness import Harness
 from .harness.inbox import InboxDoc, InboxItem, InboxState
-from .harness.live import LiveDoc, LiveState
+from .harness.live import LiveDoc, LiveState, NestedToolSlot, NestedToolSummary, ToolSlot
 from .harness.provider import ProviderDoc, ProviderState
 from .harness.registry import create_registry
+from .harness.tool import ToolTask, ToolTaskCheckpoint, ToolTaskInput, ToolTaskResult
 from .harness.types import (
     Agent,
     AgentChange,
@@ -82,6 +91,7 @@ from .harness.types import (
     InputEntry,
     InputSubmissionDraft,
     ModelRef,
+    NestedToolExecutionResult,
     ProgressPolicy,
     PromptInput,
     PromptSection,
@@ -96,6 +106,13 @@ from .harness.types import (
     SubmissionDraft,
     TaskInspection,
     TaskRuntime,
+    ToolControl,
+    ToolDiagnostic,
+    ToolExecutionApi,
+    ToolExecutionMode,
+    ToolExecutionResult,
+    ToolHookCall,
+    ToolHooks,
     ToolRegistration,
     UserInput,
     Wrap,
@@ -110,25 +127,40 @@ from .types import DocumentReader, Session, Tx
 __version__ = "1.3.0"
 
 __all__ = [
+    "__version__",
+    "add_tools",
     "Agent",
     "AgentChange",
+    "AgentDoc",
     "AgentState",
     "AnyTask",
     "AssistantEntry",
+    "CommonDocDefinition",
     "CompactionEntry",
     "CompactionHooks",
     "CompactionPolicy",
-    "CommonDocDefinition",
+    "configure",
     "ContextView",
     "Conversation",
     "ConversationBusy",
     "ConversationCreateOptions",
+    "ConversationDocFamilyToken",
+    "ConversationDocToken",
     "ConversationHandle",
     "ConversationInit",
     "ConversationRetryPolicy",
     "ConversationStreamOptions",
-    "ConversationDocFamilyToken",
-    "ConversationDocToken",
+    "create_registry",
+    "create_session",
+    "DEFAULT_COMPACTION_POLICY",
+    "DEFAULT_PROGRESS_POLICY",
+    "DEFAULT_RETRY_POLICY",
+    "define_doc",
+    "define_doc_family",
+    "define_entry",
+    "define_extension",
+    "define_task",
+    "define_tool",
     "DocDefinition",
     "DocFamilyDefinition",
     "DocFamilyToken",
@@ -147,6 +179,7 @@ __all__ = [
     "HarnessInspection",
     "HarnessOptions",
     "HarnessSettings",
+    "hook",
     "HookApi",
     "HookRegistration",
     "HookResult",
@@ -162,6 +195,9 @@ __all__ = [
     "Model",
     "ModelRef",
     "Models",
+    "NestedToolExecutionResult",
+    "NestedToolSlot",
+    "NestedToolSummary",
     "PreparedMemoryCommit",
     "ProgressPolicy",
     "PromptInput",
@@ -176,6 +212,7 @@ __all__ = [
     "ResetEntry",
     "RewindableConversationDocFamilyToken",
     "RewindableConversationDocToken",
+    "section",
     "Session",
     "SessionDocFamilyToken",
     "SessionDocToken",
@@ -190,29 +227,30 @@ __all__ = [
     "SystemEntry",
     "Task",
     "TaskDefinition",
-    "TaskInspection",
-    "TaskRuntime",
     "TaskDocFamilyToken",
     "TaskDocToken",
+    "TaskInspection",
+    "TaskRuntime",
+    "ToolControl",
+    "ToolDiagnostic",
+    "ToolExecutionApi",
+    "ToolExecutionMode",
+    "ToolExecutionResult",
+    "ToolHookCall",
+    "ToolHooks",
     "ToolRegistration",
     "ToolResultEntry",
+    "ToolSlot",
+    "ToolTask",
+    "ToolTaskCheckpoint",
+    "ToolTaskInput",
+    "ToolTaskResult",
     "Tx",
     "UsageDoc",
     "UsageState",
     "UserEntry",
     "UserInput",
     "Wrap",
-    "__version__",
-    "create_session",
-    "create_registry",
-    "define_doc",
-    "define_doc_family",
-    "define_entry",
-    "define_extension",
-    "define_task",
-    "define_tool",
-    "hook",
-    "section",
     "wrap_section",
     "wrap_tool",
 ]

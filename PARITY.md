@@ -65,7 +65,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `addTools` | value | `add_tools` | — | planned |
+| `addTools` | value | `add_tools` | test_harness_tools.py | tested |
 | `AgentDoc` | value | `AgentDoc` | test_harness_registry_agent.py | tested |
 | `configure` | value | `configure` | test_harness_registry_agent.py | tested |
 | `DEFAULT_COMPACTION_POLICY` | value | `DEFAULT_COMPACTION_POLICY` | test_harness_registry_agent.py | tested |
@@ -132,13 +132,13 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py | tested |
+| `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py | tested |
 | `CompactionFailure` | type | `CompactionFailure` | — | planned (#21) |
 | `CompactionStatus` | type | `CompactionStatus` | — | planned (#21) |
-| `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py | tested |
+| `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | — | planned (#19) |
 | `NestedToolSummary` | type | `NestedToolSummary` | — | planned (#19) |
-| `ToolSlot` | type | `ToolSlot` | — | planned (#18) |
+| `ToolSlot` | type | `ToolSlot` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_deltas.py | tested |
 
 ### `./harness/provider.ts` → `pi_durable.harness.provider`
 
@@ -166,12 +166,12 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `NestedCallDoc` | value | `NestedCallDoc` | — | planned |
-| `ToolTask` | value | `ToolTask` | — | planned |
-| `NestedCallState` | type | `NestedCallState` | — | planned |
-| `ToolTaskCheckpoint` | type | `ToolTaskCheckpoint` | — | planned |
-| `ToolTaskInput` | type | `ToolTaskInput` | — | planned |
-| `ToolTaskResult` | type | `ToolTaskResult` | — | planned |
+| `NestedCallDoc` | value | `NestedCallDoc` | — | planned (#19) |
+| `ToolTask` | value | `ToolTask` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
+| `NestedCallState` | type | `NestedCallState` | — | planned (#19) |
+| `ToolTaskCheckpoint` | type | `ToolTaskCheckpoint` | test_harness_tools_recovery.py | tested |
+| `ToolTaskInput` | type | `ToolTaskInput` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
+| `ToolTaskResult` | type | `ToolTaskResult` | test_harness_tools.py | tested |
 
 ### `./harness/types.ts` → `pi_durable.harness.types`
 
@@ -200,14 +200,14 @@ is green.
 | `HarnessInspection` | type | `HarnessInspection` | test_harness_tasks.py, test_harness_cancellation_barrier.py | tested |
 | `HarnessOptions` | type | `HarnessOptions` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
 | `HarnessSettings` | type | `HarnessSettings` | test_harness_generation.py | tested |
-| `HookApi` | type | `HookApi` | — | code (#18 hook execution) |
+| `HookApi` | type | `HookApi` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
 | `HookRegistration` | type | `HookRegistration` | test_harness_tasks.py | tested |
-| `HookResult` | type | `HookResult` | — | code |
+| `HookResult` | type | `HookResult` | test_harness_tools.py | tested |
 | `HooksOf` | type | `HooksOf` | — | planned |
 | `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
-| `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned |
+| `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned (#19) |
 | `ProgressPolicy` | type | `ProgressPolicy` | test_harness_generation.py | tested |
 | `PromptInput` | type | `PromptInput` | test_harness_prompt.py | tested |
 | `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py, test_harness_prompt.py | tested |
@@ -221,14 +221,14 @@ is green.
 | `Submission` | type | `Submission` | test_harness_submissions.py, test_harness_inbox.py | tested |
 | `SubmissionDraft` | type | `SubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py | tested |
-| `ToolControl` | type | `ToolControl` | — | planned |
-| `ToolDiagnostic` | type | `ToolDiagnostic` | — | planned |
-| `ToolExecutionApi` | type | `ToolExecutionApi` | — | planned |
-| `ToolExecutionMode` | type | `ToolExecutionMode` | — | planned |
-| `ToolExecutionResult` | type | `ToolExecutionResult` | — | planned |
-| `ToolHookCall` | type | `ToolHookCall` | — | planned |
-| `ToolHooks` | type | `ToolHooks` | — | planned |
-| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py, test_harness_registry_agent.py, test_harness_prompt.py | tested |
+| `ToolControl` | type | `ToolControl` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
+| `ToolDiagnostic` | type | `ToolDiagnostic` | test_harness_tools.py, test_harness_live_deltas.py | tested |
+| `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py | code (#19 `executeTool`) |
+| `ToolExecutionMode` | type | `ToolExecutionMode` | test_harness_tools.py | tested |
+| `ToolExecutionResult` | type | `ToolExecutionResult` | test_harness_tools.py | tested |
+| `ToolHookCall` | type | `ToolHookCall` | test_harness_tools.py | tested |
+| `ToolHooks` | type | `ToolHooks` | test_harness_tools.py | tested |
+| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py, test_harness_registry_agent.py, test_harness_prompt.py, test_harness_tools.py | tested |
 | `UserInput` | type | `UserInput` | test_harness_input_entries.py | tested |
 | `Wrap` | type | `Wrap` | test_harness_registry_agent.py | tested |
 
@@ -557,19 +557,19 @@ SQLite backend and migrations.
 | 5.4 Scheduler, abort, and ownership | tested |
 | 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | tested |
-| 7 Extensions, hooks, tools, and system prompt | code |
-| 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #14/#18/#21) |
-| 7.2 Hooks | code (`beforeRequest`, `afterResponse`, and `onYield`; `afterTools` with #18) |
-| 7.3 Tools | planned |
+| 7 Extensions, hooks, tools, and system prompt | code (coding tools with #17, nested calls with #19, tool search with #20) |
+| 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #21) |
+| 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
+| 7.3 Tools | code (model-issued calls, hooks, output bounds, and replay; nested calls and structured output with #19, coding tools with #17) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
-| 8 Built-in tasks | planned |
-| 8.1 Built-in entries | code (`pi.user`, `pi.assistant`, and `pi.system`; reset and compaction entries with #21) |
-| 8.2 Live document | code (run, generation, and the complete-base rule; tool slots with #18, compaction status with #21) |
-| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, and classification; tool rounds with #18, threshold/overflow compaction with #21) |
-| 8.4 Tool | planned |
-| 8.5 Tool rounds | planned |
+| 8 Built-in tasks | code (generation and tool; compaction with #21) |
+| 8.1 Built-in entries | code (`pi.user`, `pi.assistant`, `pi.system`, `pi.tool-result`, and `pi.reset`; `pi.compaction` with #21) |
+| 8.2 Live document | code (run, generation, tool slots, and the complete-base rule; compaction status with #21) |
+| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, and tool rounds; threshold/overflow compaction with #21) |
+| 8.4 Tool | tested (model-issued calls; nested calls with #19) |
+| 8.5 Tool rounds | tested |
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned |
 | 9 Document observation and Chord | code |
@@ -599,11 +599,12 @@ watch documents or conversation views, land with submissions (#11), the live doc
 observation surfaces (#22). `harness-storage-failure` also translates the failure latch, listener
 containment, and clock fallback cases the Session can exercise now.
 
-Deferred from earlier tickets: the `harness-tasks` cases that assert built-in tool cleanup, the
-`harness-ownership` cases that need tools, and the `harness-lifecycle` cases that need tool hooks,
-conversation views, or the task-graph watch. Built-in generation cleanup, generation recovery, and
-usage in `harness-lifecycle` are translated now. The `harness-lifecycle` open-error, close, reopen,
-registry-change, cancellation, and durable-commit cases were translated earlier.
+Deferred from earlier tickets: the `harness-ownership` cases that hold the Session line under a
+queued handle operation or drive an owned subagent from a tool, and the `harness-lifecycle` cases
+that need conversation views or the task-graph watch. The tool-owned conversation case for an
+invocation-bound handle and the tool-hook close case are translated now. Built-in generation
+cleanup, generation recovery, and usage in `harness-lifecycle` were translated earlier, as were the
+open-error, close, reopen, registry-change, cancellation, and durable-commit cases.
 
 The submission suites are translated in three files. `harness-submissions` covers idle input and
 write admission, request-ID deduplication, busy rejection, abort results, lookup, waits, close
@@ -617,10 +618,12 @@ task, provider streaming, answer boundaries, and `pi.live` presentation are cove
 `test_harness_generation.py`, `test_harness_live_deltas.py`, and `test_harness_usage.py`.
 
 The upstream `harness-live-deltas` suite is translated in `test_harness_live_deltas.py`: throttled
-text partials as appends, the complete-base rule in the commits where nothing runs, and the pure
-`checkpointWhen` case. Its tool-slot and tool-output operation cases need `pi.tool` and land with
-the tool-execution ticket (#18); `test_harness_generation.py` already covers the generation
-presentation they start from.
+text partials as appends, the complete-base rule in the commits where nothing runs, the pure
+`checkpointWhen` case, and the tool cases. A driven tool call shows the generation handing over to
+its round with one field write each; head output appends and then only its dropped counts change; a
+tail window slides as a front trim plus an append; a window beyond Chord's 64 KiB overlap scan is
+written whole; details diff leaf by leaf and diagnostics append; and a sequential two-tool round
+keeps every `pi.live` commit's base exactly in the moments nothing runs.
 
 The upstream `harness-context` suite is translated in three parts. Its thirteen derivation cases run
 against the Session-level `context()` read. Three of its nine kept-range cases run against
@@ -637,15 +640,16 @@ same-name tool replacement, wrapper order, and tool filters; wrapper throw/renam
 reports; section ordering, same-key replacement, and the unwrapped `instructions` section; hook
 collection in extension order; and the stored-agent defaults. Hook dispatch order and ordinary-throw
 containment, plus reload of an extension in a live Session at its next phase, are covered there too.
-The registry's built-in generation task landed with #14; the tool and compaction tasks land with
-#18/#21, so the built-in-task case is partial, and the per-hook composition rules (replacement
-chains, first-block wins) arrive with those tasks. The `pi.generation` task-collision row is
-translated. The resolution half of `harness-callers` is
-translated alongside: model-only, tools-only, and both callers; `modelTools` narrowing without
-widening what tools may call; enabled filters; and deferred-tool resolution through an array or
-`{remove, add}` (a superset of the upstream resolution cases). Its end-to-end cases need tool
-execution and land with #18, and `addTools` (the tool-round edit of `tools`/`modelTools`) lands with
-tool rounds and tool search (#18/#20).
+The registry holds the built-in `pi.generation` and `pi.tool` tasks; `pi.compaction` joins with
+#21, so the built-in-task case is complete for the tasks that exist. The per-hook composition rules
+for tool hooks (replacement chains, first-block wins) are covered by `test_harness_tools.py`, and
+compaction's arrive with #21. The `pi.generation` task-collision row is translated. The resolution
+half of `harness-callers` is translated alongside: model-only, tools-only, and both callers;
+`modelTools` narrowing without widening what tools may call; enabled filters; and deferred-tool
+resolution through an array or `{remove, add}` (a superset of the upstream resolution cases). Its
+end-to-end cases run in `test_harness_tools.py`; `add_tools` (the tool-round edit of
+`tools`/`modelTools`) is covered there, and the deferred-loading half through `{add}` is exercised
+by the resolution cases, with tool search landing in #20.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
@@ -664,7 +668,11 @@ an environment failure and a section that reads a document through `input.read`.
 | --- | --- | --- |
 | Function and parameter names | camelCase | snake_case |
 | Settings and policy objects | camelCase fields | snake_case fields on the Python-facing `Settings`, `HarnessSettings`, `ConversationStreamOptions`, and `DEFAULT_*_POLICY` values (`max_retries`, `keep_recent_tokens`, `partial_interval_ms`); persisted records stay camelCase |
-| Tool registration fields | `Tool` plus execution fields on `ToolRegistration`, with `constrainedSampling` | `ToolRegistration.constrained_sampling` on the Python-facing registration; declarations persist `constrainedSampling` |
+| Tool registration fields | `Tool` plus execution fields on `ToolRegistration`, with `constrainedSampling` | `ToolRegistration.constrained_sampling`, `execution_mode`, `structured_output_schema`, `output_limits`, and `prepare_arguments` on the Python-facing registration; declarations persist `constrainedSampling` |
+| Tool result and control fields | `structuredOutput`, `isError`, `addTools` | camelCase in a returned result, a stored task outcome, and an entry's message, because they are wire shapes; the registration's own fields are snake_case |
+| Tool execution api | `retainedOutput()`, `outputWindow`, camelCase window fields | `retained_output()`, `output_window` with snake_case fields (`max_bytes`, `max_lines`, `min_interval_ms`, `bytes_per_second`); `details()` registers its update synchronously and returns an awaitable |
+| Tool argument validation | pi-ai TypeBox `validateToolArguments` | a JSON Schema validator in `pi_durable.harness.validation` with pi-ai's primitive coercion and optional-null removal; the `schema` extra is not needed for argument validation |
+| Bounded output and progress | Chord `OutputBuffer` and `Progress` | `pi_durable.harness.output` with the same windows and pacing; the bounded overlap search lives in `pi_durable.delta` (`overlap_strings`, 64 KiB) |
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
 | Hook names | camelCase (`beforeRequest`, `afterResponse`, `onYield`) | camelCase, because extensions register handlers by these names |
@@ -728,6 +736,9 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Extension registry, agent resolution, and hook dispatch | `pi_durable.harness.registry`, `pi_durable.harness.agent` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_registry_agent.py`) |
 | Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`, `test_harness_storage_failure.py`) |
 | Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
+| Bounded output windows and adaptive progress commits | `pi_durable.harness.output` | tested (`test_harness_output.py`, `test_harness_tools.py`, `test_harness_live_deltas.py`) |
+| Tool argument repair, coercion, and validation | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`) |
+| Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
 
@@ -737,8 +748,8 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 2. Kernel: types, IDs, JSON, errors, entries, documents, Session/Tx/forks.
 - [x] 3. Storage: memory, JSONL, SQLite, conformance suites.
 - [x] 4. Tasks, scheduler, submissions, document observation.
-- [ ] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
-      Generation, streaming, provider identity, and usage are done; tool rounds land with #18.
+- [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
+      Compaction status in `pi.live` lands with #21.
 - [ ] 6. `env`, coding tools, `tool-search`.
 - [ ] 7. Compaction, events/view, task graph, extension reload.
 - [ ] 8. Full translated suite green, docs, version `1.3.0`, release.

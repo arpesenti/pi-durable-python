@@ -101,6 +101,14 @@ module = ["test_jsonl_storage", "test_env_filesystem"]
 disable_error_code = ["arg-type", "call-overload", "list-item", "misc", "typeddict-item"]
 
 [[tool.mypy.overrides]]
+module = ["test_harness_tools"]
+disable_error_code = ["arg-type", "func-returns-value", "index", "misc", "typeddict-item", "union-attr"]
+
+[[tool.mypy.overrides]]
+module = ["test_harness_tools_recovery"]
+disable_error_code = ["arg-type", "call-overload", "index", "list-item", "misc", "typeddict-item", "union-attr"]
+
+[[tool.mypy.overrides]]
 module = ["test_sqlite_storage"]
 disable_error_code = ["call-overload", "index", "list-item", "misc", "typeddict-item"]
 

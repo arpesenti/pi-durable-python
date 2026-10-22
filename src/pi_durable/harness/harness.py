@@ -89,6 +89,15 @@ class BoundConversation:
 
     async def submit(self, submission: Any, context: Context) -> Any:
         cast(Callable[[], None], self._binding["check"])()
+        # An invocation-bound handle accepts only input submissions; tools use ordinary transaction
+        # writes for passive entries (spec section 7.3).
+        if not isinstance(submission, Mapping):
+            raise TypeError("A conversation handle accepts only input submissions")
+        kind = submission.get("type")
+        if kind is not None and kind != "input":
+            raise TypeError("A conversation handle accepts only input submissions")
+        if kind is None and "content" not in submission:
+            raise TypeError("A conversation handle accepts only input submissions")
         admitted = await self._harness.submit(self.id, submission, self._bind(context))
         return BoundSubmission(admitted, self._binding)
 

@@ -66,6 +66,112 @@ class ContextView(TypedDict):
 ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
+ToolExecutionMode = Literal["parallel", "sequential"]
+
+
+class ToolControl(TypedDict, total=False):
+    """What a tool result asks the tool round to do."""
+
+    addTools: list[str]
+    terminate: Literal[True]
+    handoff: str
+
+
+class ToolDiagnostic(TypedDict, total=False):
+    """Remark about a call for the model and the UI; never part of the tool's data."""
+
+    severity: Literal["info", "warn", "error"]
+    message: str
+    code: str
+
+
+class ToolExecutionResult(TypedDict, total=False):
+    """Three channels: ``output`` for the model, ``structuredOutput`` for programs, ``details`` for UIs."""
+
+    output: list[JsonValue]
+    structuredOutput: JsonValue
+    isError: bool
+    details: JsonValue
+    diagnostics: list[ToolDiagnostic]
+    usage: dict[str, JsonValue]
+    control: ToolControl
+
+
+class NestedToolExecutionResult(TypedDict, total=False):
+    """A nested call's result, for programs: no output for the model, and ``control`` does not apply."""
+
+    taskId: TaskId
+    structuredOutput: JsonValue
+    isError: bool
+    details: JsonValue
+    diagnostics: list[ToolDiagnostic]
+    usage: dict[str, JsonValue]
+    durationMs: int
+
+
+class ToolHookCall(TypedDict, total=False):
+    """A tool call as hooks see it; a nested call adds ``parent``."""
+
+    type: Literal["toolCall"]
+    id: str
+    name: str
+    arguments: dict[str, JsonValue]
+    parent: dict[str, Any]
+
+
+class ToolHooks(TypedDict, total=False):
+    """Hooks of the built-in tool task."""
+
+    beforeTool: Callable[..., Any]
+    afterTool: Callable[..., Any]
+
+
+class ToolExecutionApi(Protocol):
+    """What a running tool may use: bounded output, durable commits, and Harness reads."""
+
+    task_id: TaskId
+    conversation_id: ConversationId
+    call_id: str
+    registry: RegistrySnapshot
+    models: Any
+    env: Any
+    output_window: Mapping[str, Any] | None
+
+    def agent(self, context: Context) -> Awaitable[Agent]: ...
+
+    def output(self, chunk: str | bytes, skipped: Mapping[str, Any] | None = None) -> None: ...
+
+    def retained_output(self) -> Mapping[str, Any]: ...
+
+    def diagnostic(self, diagnostic: Mapping[str, Any]) -> None: ...
+
+    def details(self, value: JsonValue, context: Context) -> Awaitable[None]: ...
+
+    def commit(self, change: Callable[..., Any], context: Context) -> Awaitable[Any]: ...
+
+    def memo(self, name: str, *args: Any) -> Awaitable[JsonValue | None]: ...
+
+    def create_task(
+        self, task: Any, input: JsonValue, options: Mapping[str, Any], context: Context
+    ) -> Awaitable[TaskId]: ...
+
+    def get_task(self, id: TaskId, context: Context) -> Awaitable[TaskRecord | None]: ...
+
+    def wait_for_task(self, id: TaskId, context: Context) -> Awaitable[SettledTask]: ...
+
+    def conversation(self, id: ConversationId, context: Context) -> Awaitable[Any]: ...
+
+    def snapshot(self, token: Any, *args: Any) -> Awaitable[JsonObject | None]: ...
+
+    def snapshot_as_of(self, token: Any, *args: Any) -> Awaitable[JsonObject | None]: ...
+
+    def watch_doc(self, token: Any, *args: Any) -> Awaitable[Any]: ...
+
+    def execute_tool(
+        self, name: str, args: Mapping[str, Any], context: Context, options: Mapping[str, Any] | None = None
+    ) -> Awaitable[NestedToolExecutionResult]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ToolRegistration:
     """Executable tool registered in a registry, with the fields resolution and planning read."""
@@ -75,12 +181,13 @@ class ToolRegistration:
     parameters: Any = None
     execute: Callable[..., Any] | None = None
     replay: Literal["safe", "unsafe"] | None = None
-    execution_mode: Literal["parallel", "sequential"] | None = None
+    execution_mode: ToolExecutionMode | None = None
     structured_output_schema: Any = None
     callers: Sequence[Literal["model", "tools"]] | None = None
     deferred: bool = False
     output_limits: Mapping[str, Any] | None = None
     constrained_sampling: Any = None
+    prepare_arguments: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +480,7 @@ class TaskRuntime(Protocol):
     registry: RegistrySnapshot
     settings: Settings
     models: Any
+    hooks: HookRunner
 
     async def agent(self, context: Context) -> Agent: ...
 
@@ -555,6 +663,7 @@ __all__ = [
     "InputEntry",
     "InputSubmissionDraft",
     "ModelRef",
+    "NestedToolExecutionResult",
     "ProgressPolicy",
     "PromptInput",
     "PromptSection",
@@ -576,6 +685,13 @@ __all__ = [
     "TaskInspection",
     "TaskRuntime",
     "ThinkingLevel",
+    "ToolControl",
+    "ToolDiagnostic",
+    "ToolExecutionApi",
+    "ToolExecutionMode",
+    "ToolExecutionResult",
+    "ToolHookCall",
+    "ToolHooks",
     "ToolRegistration",
     "UserInput",
     "Wrap",
