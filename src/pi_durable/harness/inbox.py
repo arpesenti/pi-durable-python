@@ -79,9 +79,9 @@ def _plain(value: Any) -> Any:
     """Return a plain JSON value from a document draft member or a record."""
 
     if isinstance(value, DraftObject):
-        return {key: _plain(value[key]) for key in value.keys()}
+        return value.snapshot()
     if isinstance(value, DraftList):
-        return [_plain(item) for item in value]
+        return value.snapshot()
     if isinstance(value, dict):
         return {key: _plain(item) for key, item in value.items()}
     if isinstance(value, list):

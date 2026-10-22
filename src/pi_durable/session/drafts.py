@@ -535,6 +535,12 @@ class DraftObject:
         for key, value in values.items():
             self._node.set(key, value)
 
+    def snapshot(self) -> dict[str, Any]:
+        """A detached plain JSON object of this draft member."""
+
+        self._check()
+        return self._node.snapshot()
+
     def __repr__(self) -> str:
         return f"DraftObject({self._node.snapshot()!r})"
 
@@ -665,6 +671,12 @@ class DraftList:
         self._check()
         target = self._draft._plain(value)
         return sum(1 for current in self._node.values() if _same_value(current, target))
+
+    def snapshot(self) -> list[Any]:
+        """A detached plain JSON array of this draft member."""
+
+        self._check()
+        return self._node.values()
 
     def __contains__(self, value: object) -> bool:
         self._check()

@@ -12,6 +12,7 @@ from typing import Any, Literal, Never, NotRequired, Protocol, TypeAlias, TypedD
 
 from ..context import AbortSignal, Context
 from ..documents import (
+    AnyDocToken,
     CommonDocDefinition,
     ConversationDocFamilyToken,
     ConversationDocToken,
@@ -27,6 +28,7 @@ from ..documents import (
 from ..ids import ConversationId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
+    ConversationOwnership,
     DocumentReader,
     EntryDraft,
     EntryRecord,
@@ -207,6 +209,111 @@ class PromptInput:
     env: Any
     shown: Mapping[str, str]
     read: DocumentReader
+
+
+class ConversationStreamOptions(TypedDict, total=False):
+    """Curated pi-ai request options; absent fields use the provider defaults."""
+
+    transport: str
+    timeout_ms: int
+    max_retries: int
+    max_retry_delay_ms: int
+    headers: dict[str, str]
+    metadata: JsonObject
+    cache_retention: str
+    deferred: bool | dict[str, str]
+
+
+class ConversationRetryPolicy(TypedDict, total=False):
+    """Durable generation attempt retries."""
+
+    enabled: bool
+    max_retries: int
+    base_delay_ms: int
+    max_agent_delay_ms: int
+
+
+class CompactionPolicy(TypedDict, total=False):
+    """Automatic compaction thresholds; manual compaction ignores ``enabled``."""
+
+    enabled: bool
+    reserve_tokens: int
+    keep_recent_tokens: int
+    background_tokens: int
+
+
+class ProgressPolicy(TypedDict, total=False):
+    """How often running progress is committed."""
+
+    partial_interval_ms: int
+    output_interval_ms: int
+
+
+class GenerationHooks(TypedDict, total=False):
+    """Hooks of the built-in generation task."""
+
+    beforeRequest: Callable[..., Any]
+    afterResponse: Callable[..., Any]
+    onYield: Callable[..., Any]
+    afterTools: Callable[..., Any]
+
+
+class CompactionHooks(TypedDict, total=False):
+    """Hooks of the built-in compaction task."""
+
+    beforeCompact: Callable[..., Any]
+
+
+class EnvTarget(TypedDict):
+    """What ``HarnessOptions.env`` builds an environment for."""
+
+    conversation_id: ConversationId
+    cwd: NotRequired[str]
+    read: DocumentReader
+
+
+class HookApi(Protocol):
+    """What a hook may use: committed reads, the task ID, and the task's memos."""
+
+    task_id: TaskId
+    conversation_id: ConversationId
+    models: Any
+
+    async def snapshot(self, token: AnyDocToken, *args: Any) -> JsonObject | None: ...
+
+    async def snapshot_as_of(self, token: AnyDocToken, *args: Any) -> JsonObject | None: ...
+
+    async def memo(self, name: str, *args: Any) -> JsonValue | None: ...
+
+
+HookResult = Any
+"""A hook's value, absent when it declines, or an awaitable of it."""
+
+ConversationInit = Callable[..., Any]
+"""Runs inside the creating commit after the creation hook and the agent change."""
+
+
+class ConversationCreateOptions(TypedDict):
+    """Options of ``createConversation`` and ``fork``."""
+
+    ownership: ConversationOwnership
+    agent: NotRequired[AgentChange]
+    init: NotRequired[ConversationInit]
+
+
+class HarnessSettings(TypedDict, total=False):
+    """Harness-wide run policy, read at every resolution and never copied."""
+
+    extensions: Sequence[Extension]
+    stream: ConversationStreamOptions
+    retry: ConversationRetryPolicy
+    compaction: CompactionPolicy
+    progress: ProgressPolicy
+    tool_execution: Literal["parallel", "sequential"]
+    steering_mode: QueueMode
+    follow_up_mode: QueueMode
+    context_retention_ms: int
+    document_retention_ms: int | float
 
 
 @dataclass(slots=True)
@@ -422,21 +529,33 @@ __all__ = [
     "AgentState",
     "AnyTask",
     "CommonDocDefinition",
+    "CompactionHooks",
+    "CompactionPolicy",
     "ContextView",
     "Conversation",
+    "ConversationCreateOptions",
     "ConversationDocFamilyToken",
     "ConversationDocToken",
     "ConversationHandle",
+    "ConversationInit",
+    "ConversationRetryPolicy",
+    "ConversationStreamOptions",
     "DocFamilyToken",
     "DocToken",
+    "EnvTarget",
     "Extension",
+    "GenerationHooks",
     "HarnessInspection",
     "HarnessOptions",
+    "HarnessSettings",
+    "HookApi",
     "HookRegistration",
+    "HookResult",
     "HookRunner",
     "InputEntry",
     "InputSubmissionDraft",
     "ModelRef",
+    "ProgressPolicy",
     "PromptInput",
     "PromptSection",
     "QueueMode",

@@ -4,8 +4,9 @@ The public surface is rebuilt against the vendored 1.3.0 specification. This lay
 JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Context/abort signal,
 the Storage protocol, the Session kernel, document definitions, task definitions, context
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,
-agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. Built-in
-generation, tool, and compaction tasks and the observation surfaces arrive in later tickets.
+agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
+built-in generation task, provider identity, and usage ledger are included; tool and compaction
+tasks and the observation surfaces arrive in later tickets.
 """
 
 from .documents import (
@@ -44,26 +45,44 @@ from .harness.define import (
     wrap_section,
     wrap_tool,
 )
+from .harness.generation import (
+    GenerationCheckpoint,
+    GenerationInput,
+    GenerationResult,
+    GenerationTask,
+)
 from .harness.harness import Harness
 from .harness.inbox import InboxDoc, InboxItem, InboxState
 from .harness.live import LiveDoc, LiveState
+from .harness.provider import ProviderDoc, ProviderState
 from .harness.registry import create_registry
 from .harness.types import (
     Agent,
     AgentChange,
     AgentState,
     AnyTask,
+    CompactionHooks,
+    CompactionPolicy,
     ContextView,
     Conversation,
+    ConversationCreateOptions,
     ConversationHandle,
+    ConversationInit,
+    ConversationRetryPolicy,
+    ConversationStreamOptions,
+    EnvTarget,
     Extension,
+    GenerationHooks,
     HarnessInspection,
     HarnessOptions,
+    HookApi,
     HookRegistration,
+    HookResult,
     HookRunner,
     InputEntry,
     InputSubmissionDraft,
     ModelRef,
+    ProgressPolicy,
     PromptInput,
     PromptSection,
     QueueMode,
@@ -81,6 +100,8 @@ from .harness.types import (
     UserInput,
     Wrap,
 )
+from .harness.usage import UsageDoc, UsageState
+from .providers import Model, Models
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
@@ -95,11 +116,17 @@ __all__ = [
     "AnyTask",
     "AssistantEntry",
     "CompactionEntry",
+    "CompactionHooks",
+    "CompactionPolicy",
     "CommonDocDefinition",
     "ContextView",
     "Conversation",
     "ConversationBusy",
+    "ConversationCreateOptions",
     "ConversationHandle",
+    "ConversationInit",
+    "ConversationRetryPolicy",
+    "ConversationStreamOptions",
     "ConversationDocFamilyToken",
     "ConversationDocToken",
     "DocDefinition",
@@ -109,11 +136,20 @@ __all__ = [
     "DocumentReader",
     "DocumentState",
     "Entry",
+    "EnvTarget",
     "Extension",
+    "GenerationCheckpoint",
+    "GenerationHooks",
+    "GenerationInput",
+    "GenerationResult",
+    "GenerationTask",
     "Harness",
     "HarnessInspection",
     "HarnessOptions",
+    "HarnessSettings",
+    "HookApi",
     "HookRegistration",
+    "HookResult",
     "HookRunner",
     "InboxDoc",
     "InboxItem",
@@ -123,10 +159,15 @@ __all__ = [
     "LiveDoc",
     "LiveState",
     "MemoryStorage",
+    "Model",
     "ModelRef",
+    "Models",
     "PreparedMemoryCommit",
+    "ProgressPolicy",
     "PromptInput",
     "PromptSection",
+    "ProviderDoc",
+    "ProviderState",
     "QueueMode",
     "ReadAfterWrite",
     "Registry",
@@ -156,6 +197,8 @@ __all__ = [
     "ToolRegistration",
     "ToolResultEntry",
     "Tx",
+    "UsageDoc",
+    "UsageState",
     "UserEntry",
     "UserInput",
     "Wrap",

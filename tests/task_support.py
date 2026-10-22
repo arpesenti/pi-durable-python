@@ -99,23 +99,70 @@ async def settled(promise: Awaitable[Any]) -> bool:
     return task.done()
 
 
+class TaskOverrideSnapshot:
+    """A registry snapshot with some tasks replaced, for suites that drive their own run loop."""
+
+    def __init__(self, base: RegistrySnapshot, tasks: Sequence[Any]) -> None:
+        self._base = base
+        self._by_name = {task.definition.name: task for task in tasks}
+
+    def installed(self) -> Any:
+        return self._base.installed()
+
+    def extension(self, name: str) -> Any:
+        return self._base.extension(name)
+
+    def tools(self) -> Any:
+        return self._base.tools()
+
+    def sections(self) -> Any:
+        return self._base.sections()
+
+    def tasks(self) -> Any:
+        names = self._by_name
+        return [names.get(task.definition.name, task) for task in self._base.tasks()]
+
+    def task(self, name: str) -> Any:
+        return self._by_name.get(name) or self._base.task(name)
+
+
+class TaskOverrideReader:
+    """A registry reader whose snapshots replace selected task definitions."""
+
+    def __init__(self, registry: RegistryReader, tasks: Sequence[Any]) -> None:
+        self._registry = registry
+        self._tasks = list(tasks)
+
+    def snapshot(self) -> RegistrySnapshot:
+        return TaskOverrideSnapshot(self._registry.snapshot(), self._tasks)
+
+    def subscribe(self, listener: Callable[[], Any]) -> Callable[[], None]:
+        return self._registry.subscribe(listener)
+
+
 async def open_tasks(
     storage: Any,
     tasks: Sequence[Any],
     options: Mapping[str, Any] | None = None,
+    override_tasks: Sequence[Any] = (),
 ) -> dict[str, Any]:
-    """Open a Harness whose registry holds ``tasks``; failures passed to on_report are collected."""
+    """Open a Harness whose registry holds ``tasks``; failures passed to on_report are collected.
+
+    ``override_tasks`` replaces built-in definitions in the snapshot the Harness reads, so
+    submission suites can keep their own generation probe without installing a colliding task.
+    """
 
     values = dict(options or {})
     registry: Registry = values.get("registry") or create_registry()
     if tasks:
         registry.install(define_extension({"name": "tasks", "tasks": list(tasks)}))
+    reader = TaskOverrideReader(registry, override_tasks) if override_tasks else registry
     reports: list[BaseException] = []
     harness = await Harness.open(
         storage,
         {
             "models": values.get("models", {}),
-            "registry": registry,
+            "registry": reader,
             "on_report": reports.append,
             **({"now": values["now"]} if "now" in values else {}),
             **({"settings": values["settings"]} if "settings" in values else {}),

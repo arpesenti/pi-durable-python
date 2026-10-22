@@ -123,8 +123,9 @@ async def open_submissions(
 ) -> dict[str, Any]:
     opened = await open_tasks(
         storage or MemoryStorage(),
-        [GenerationProbe, *tasks],
+        list(tasks),
         {"settings": settings} if settings is not None else None,
+        override_tasks=[GenerationProbe],
     )
     opened["root"] = await opened["harness"].root(context)
     return opened

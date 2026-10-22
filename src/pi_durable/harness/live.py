@@ -1,7 +1,7 @@
 """Built-in ``pi.live``: run control and presentation of current work (spec section 8.2).
 
-Only run control is needed by the submission core: ``run`` is present exactly while a run owns
-the conversation. Generation and tool presentation arrive with the built-in tasks.
+``run`` is present exactly while a run owns the conversation. Generation publishes its attempt,
+partial, retry, and deferred state here; tool slots and compaction status arrive with their tasks.
 """
 
 from __future__ import annotations
@@ -107,6 +107,9 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
     run = live.get("run")
     if run is None or run["taskId"] != record["id"]:
         return
+    from .generation import convert_partial
+
+    await convert_partial(tx, live, record["conversationId"])
     if outcome.get("status") == "faulted":
         error = outcome.get("error") or {}
         end_run(

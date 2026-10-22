@@ -13,7 +13,7 @@ import pytest
 from session_support import context
 from task_support import aborted_with, completed, deferred, open_tasks
 
-from pi_durable import MemoryStorage
+from pi_durable import GenerationTask, MemoryStorage
 from pi_durable.harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_RETRY_POLICY,
@@ -157,6 +157,7 @@ def test_validates_the_registry_as_it_would_be_after_an_install() -> None:
             "reserved",
         ),
         (define_extension({"name": "x", "tasks": [task("app.index")]}), "already installed"),
+        (define_extension({"name": "x", "tasks": [task("pi.generation")]}), "already installed"),
         (define_extension({"name": "x", "tasks": [task("same"), task("same")]}), "already installed"),
     ]
     for extension, message in invalid:
@@ -173,13 +174,14 @@ def test_validates_the_registry_as_it_would_be_after_an_install() -> None:
 
 def test_holds_installed_task_definitions_and_removes_them_on_uninstall() -> None:
     registry = create_registry()
-    assert registry.snapshot().tasks() == []
+    assert [each.definition.name for each in registry.snapshot().tasks()] == ["pi.generation"]
     custom = task("app.custom")
     registry.install(define_extension({"name": "custom", "tasks": [custom]}))
-    assert registry.snapshot().tasks() == [custom]
+    assert registry.snapshot().tasks() == [GenerationTask, custom]
     assert registry.snapshot().task("app.custom") is custom
     registry.uninstall(define_extension({"name": "custom"}))
     assert registry.snapshot().task("app.custom") is None
+    assert registry.snapshot().task("pi.generation") is GenerationTask
 
 
 def test_keeps_the_default_of_a_progress_interval_given_as_undefined() -> None:
@@ -393,7 +395,7 @@ def test_collects_hooks_of_selected_extensions_in_shape_order_and_applies_field_
     second = {"beforeTool": lambda: None}
     on_yield = {"onYield": lambda: None}
     tool_task = task("pi.tool")
-    generation_task = task("pi.generation")
+    generation_task = GenerationTask
     registry.install(
         define_extension(
             {

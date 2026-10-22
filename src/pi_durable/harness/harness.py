@@ -25,6 +25,8 @@ from ..types import (
 from .agent import AgentDoc, configure, create_agent, resolve_agent, resolve_settings
 from .inbox import InboxDoc, QueueModes, withdraw_queued_inputs
 from .live import GENERATION_TASK_NAME, LiveDoc, settle_scheduler_outcome, start_run
+from .provider import ProviderDoc
+from .registry import BUILTIN_TASKS
 from .scheduler import TaskScheduler
 from .submissions import AbortResult, Submissions
 from .types import (
@@ -38,6 +40,7 @@ from .types import (
     SettledTask,
     Submission,
 )
+from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
 
 _SCAN_PAGE_SIZE = 256
@@ -253,6 +256,17 @@ class Harness(SessionImpl):
         signal = context.abort_signal
         if signal is not None:
             signal.raise_if_aborted()
+        snapshot = cast(RegistryReader, options["registry"]).snapshot()
+        missing = [
+            task.definition.name
+            for task in BUILTIN_TASKS
+            if snapshot.task(task.definition.name) is None
+        ]
+        if missing:
+            names = ", ".join(missing)
+            raise RuntimeError(
+                f"Registry lacks built-in tasks {names}; create it with create_registry()"
+            )
         harness = cls(storage, options, context)
         try:
             await harness._tasks.open(context)
@@ -288,6 +302,8 @@ class Harness(SessionImpl):
     async def conversation_created(self, tx: Transaction, record: ConversationRecord) -> None:
         await tx.doc(LiveDoc, record["id"])
         await tx.doc(InboxDoc, record["id"])
+        await tx.doc(UsageDoc, record["id"])
+        await tx.doc(ProviderDoc, record["id"])
         await tx.doc(AgentDoc, record["id"])
         await create_agent(tx, record)
         custom = self._options.get("conversation_created") or self._options.get("conversationCreated")
@@ -437,7 +453,7 @@ class Harness(SessionImpl):
             GENERATION_TASK_NAME
         )
         if task is None:
-            raise NotImplementedError("Generation arrives with the run-loop ticket")
+            raise RuntimeError("Registry lacks the pi.generation task")
         await start_run(tx, conversation_id, live, inputs, task)
 
     # ── Internal scheduler callbacks ───────────────────────────────────────
@@ -459,8 +475,20 @@ class Harness(SessionImpl):
 
     # ── Not yet ported ─────────────────────────────────────────────────────
 
-    async def usage(self, context: Context) -> Any:
-        raise NotImplementedError("Usage arrives with the run-loop ticket")
+    async def usage(self, context: Context) -> UsageState:
+        """Sum every conversation's committed ``pi.usage`` into the Session total."""
+
+        conversations = await self.read_on_line(
+            lambda: scan_all(
+                lambda cursor: self.storage.scan_conversations({}, _SCAN_PAGE_SIZE, cursor, context)
+            )
+        )
+        total = cast(UsageState, UsageDoc.definition.initial())
+        for record in conversations:
+            state = await self.snapshot(UsageDoc, record["id"], context)
+            if state is not None:
+                add_usage_state(total, state)
+        return total
 
     async def task_graph(self, context: Context) -> Any:
         raise NotImplementedError("Task graph arrives with the observation surfaces")
