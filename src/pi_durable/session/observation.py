@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from ..context import AbortSignal, Context, without_abort_signal
 from ..delta import Op
+from ..errors import is_failure
 from ..json import JsonObject
 from ..types import DocumentCommittedChange, WatchEnd
 
@@ -193,9 +194,9 @@ class CommittedWatch:
                     result = listener(value, ops, without_abort_signal(context))
                     if isinstance(result, Awaitable):
                         await result
-                except asyncio.CancelledError:
-                    raise
                 except BaseException as error:
+                    if not is_failure(error):
+                        raise
                     if self._end is None:
                         self._report(error)
                         self._terminate({"reason": "listener_error", "error": error})

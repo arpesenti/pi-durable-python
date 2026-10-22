@@ -18,6 +18,18 @@ def error_message(error: object) -> str:
         return object.__repr__(error)
 
 
+def is_failure(error: BaseException) -> bool:
+    """Whether a thrown value is a failure of the work, rather than its teardown.
+
+    Section 10.1 ends the Session on what the work throws. Cancellation and the interpreter's
+    teardown signals (``CancelledError``, ``GeneratorExit``, ``SystemExit``, ``KeyboardInterrupt``)
+    derive from ``BaseException`` alone: they unwind the work that is running and must keep
+    unwinding, so they never end the Session and never become a task's fault.
+    """
+
+    return isinstance(error, Exception)
+
+
 class _NamedError(Exception):
     """An error whose ``name`` matches its class, mirroring JavaScript ``Error.name``."""
 

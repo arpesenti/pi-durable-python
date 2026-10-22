@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from typing import Any, cast
 
 import pytest
@@ -31,7 +32,6 @@ async def _drain_crashed_harnesses() -> Any:
     """Crash simulation abandons a Harness on purpose; cancel what it left running at test end."""
 
     yield
-    import gc
 
     current = asyncio.current_task()
     for _ in range(10):
@@ -1091,3 +1091,27 @@ async def test_abandons_a_flagged_task_and_its_owned_work_before_any_phase_runs(
     assert child["abortReason"] == "restart"
     assert child["state"]["outcome"] == {"status": "aborted", "reason": "child"}
     await second["harness"].close(context)
+
+
+async def test_collecting_an_abandoned_invocation_does_not_fail_the_session() -> None:
+    """Crash simulation drops the Harness; the collector then closes its running invocation."""
+
+    log: list[str] = []
+    storage = ControlledStorage()
+    Crash = crash_task(log, {"block_abort": True})
+    opened = await open_tasks(storage, [Crash])
+    reports: list[BaseException] = opened["reports"]
+    id = await _create_in(opened["harness"], Crash)
+    opened["harness"].resume()
+    await eventually(lambda: len(log) == 1)
+
+    del opened
+    gc.collect()
+    await flush()
+
+    assert reports == []
+    reopened = await open_tasks(storage, [crash_task(log, {"block_abort": False})])
+    record = await reopened["harness"].get_task(id, context)
+    assert record is not None
+    assert record["state"]["status"] == "pending"
+    await reopened["harness"].close(context)

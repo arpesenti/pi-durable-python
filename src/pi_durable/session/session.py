@@ -19,7 +19,7 @@ from ..documents import (
     materialize_document,
     resolve_address,
 )
-from ..errors import SessionFailed, StorageRequestError
+from ..errors import SessionFailed, StorageRequestError, is_failure
 from ..harness.context import read_context
 from ..harness.types import ContextView
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
@@ -370,9 +370,13 @@ class SessionImpl:
         return self._failed
 
     def fail(self, error: BaseException) -> None:
-        """Fail the Session once; the first error wins and close listeners run immediately."""
+        """Fail the Session once; the first failure wins and close listeners run immediately.
 
-        if self._failure is not None:
+        A teardown signal is not a failure: cancellation and interpreter shutdown unwind the work
+        that is running instead of ending the Session.
+        """
+
+        if not is_failure(error) or self._failure is not None:
             return
         self._failure = error
         if not self._failed.done():
@@ -997,13 +1001,12 @@ class GuardedStorage:
         try:
             result = await call
         except BaseException as error:
+            if not is_failure(error):
+                raise
             self._assert_healthy()
-            exempt = isinstance(error, asyncio.CancelledError) or (
-                read is not None
-                and (
-                    isinstance(error, StorageRequestError)
-                    or (read.abort_signal is not None and read.abort_signal.aborted)
-                )
+            exempt = read is not None and (
+                isinstance(error, StorageRequestError)
+                or (read.abort_signal is not None and read.abort_signal.aborted)
             )
             if not exempt:
                 self._session.fail(error)

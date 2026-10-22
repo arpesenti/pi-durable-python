@@ -655,6 +655,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | --- | --- | --- |
 | Context, abort signal, and context-scoped values | `pi_durable.context` | tested (`test_context.py`) |
 | Strict JSON validation, copying, and frozen values | `pi_durable.json` | tested (`test_json.py`) |
+| Failure and teardown-signal classification | `pi_durable.errors` | tested (`test_harness_tasks_recovery.py`) |
 | Entry draft validation and immutable record construction | `pi_durable.types` | tested (`test_entries.py`) |
 | Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`, `test_harness_storage_failure.py`) |
 | Internal commit observers and contained host callbacks | `pi_durable.session.session` | tested (`test_harness_storage_failure.py`) |

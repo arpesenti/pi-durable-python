@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 from typing import Any, Literal, cast
 
 from ..context import (
@@ -19,7 +19,7 @@ from ..context import (
     await_with_context,
     with_abort_signal,
 )
-from ..errors import error_message
+from ..errors import error_message, is_failure
 from ..ids import ConversationId, TaskId
 from ..json import JsonValue, copy_json
 from ..session.session import SessionImpl
@@ -320,6 +320,7 @@ class TaskScheduler:
         self._dirty = False
         self._draining = False
         self._expiry_handle: asyncio.TimerHandle | None = None
+        self._detached: set[asyncio.Task[Any]] = set()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -607,7 +608,7 @@ class TaskScheduler:
         if self._reconcile_scheduled or self._closing:
             return
         self._reconcile_scheduled = True
-        asyncio.get_running_loop().call_soon(lambda: asyncio.ensure_future(self._reconcile()))
+        asyncio.get_running_loop().call_soon(lambda: self._spawn(self._reconcile()))
 
     async def _reconcile(self) -> None:
         self._reconcile_scheduled = False
@@ -784,7 +785,7 @@ class TaskScheduler:
             except Exception:
                 pass
 
-        loop.call_soon(lambda: asyncio.ensure_future(queued()))
+        loop.call_soon(lambda: self._spawn(queued()))
 
     def _sweep(self) -> None:
         for node in list(self._drop_queue):
@@ -1077,7 +1078,26 @@ class TaskScheduler:
         if self._draining or not self._enabled or self._closing:
             return
         self._draining = True
-        asyncio.get_running_loop().call_soon(lambda: asyncio.ensure_future(self._drain()))
+        asyncio.get_running_loop().call_soon(lambda: self._spawn(self._drain()))
+
+    def _spawn(self, work: Coroutine[Any, Any, Any]) -> None:
+        """Run detached scheduler work, keeping it referenced until it finishes.
+
+        A teardown signal means the Harness is being collected, not that its work failed:
+        nothing owns the coroutine anymore, so scheduling anything else would resurrect it.
+        """
+
+        async def guarded() -> None:
+            try:
+                await work
+            except BaseException as error:
+                if not is_failure(error):
+                    self._seal()
+                raise
+
+        task = asyncio.ensure_future(guarded())
+        self._detached.add(task)
+        task.add_done_callback(self._detached.discard)
 
     async def _drain(self) -> None:
         try:
@@ -1267,13 +1287,15 @@ class TaskScheduler:
                 else:
                     await self._run_abort(reservation)
             except BaseException as error:
+                if not is_failure(error):
+                    raise
                 self._report(error)
             finally:
                 self._end(invocation)
                 invocation.finish()
                 self._kick()
 
-        asyncio.ensure_future(run())
+        self._spawn(run())
 
     async def _run(self, reservation: dict[str, Any]) -> None:
         invocation: _Invocation = reservation["invocation"]
@@ -1303,13 +1325,16 @@ class TaskScheduler:
                 await _invoke_handler(handler, current, runtime, invocation.context)
                 previous = {"checkpoint": checkpoint}
             except BaseException as error:
+                if not is_failure(error):
+                    raise
                 previous = {"checkpoint": checkpoint, "failure": {"error": error}}
             # Detached commits the handler started land before the step, as upstream promises.
             for commit in list(invocation.commits):
                 try:
                     await commit
-                except BaseException:
-                    pass
+                except BaseException as error:
+                    if not is_failure(error):
+                        raise
 
     def _decide(
         self,
@@ -1363,6 +1388,8 @@ class TaskScheduler:
             runtime = _Runtime(self, invocation, phase)
             await _invoke_handler(reservation["task"].definition.abort, current, runtime, invocation.context)
         except BaseException as error:
+            if not is_failure(error):
+                raise
             failure = error
         message = f"Abort handler of task {invocation.task_id} returned without a terminal outcome"
         await self._step(
@@ -1399,6 +1426,8 @@ class TaskScheduler:
             return await self._session.commit_with(step, self._context)
         except BaseException as error:
             self._end(invocation)
+            if not is_failure(error):
+                raise
             self._fail_session(error)
             return None
 
@@ -1557,7 +1586,7 @@ class _HookRunner:
                 if hasattr(result, "__await__"):
                     await cast(Awaitable[Any], result)
             except BaseException as error:
-                if self._invocation.controller.signal.aborted:
+                if not is_failure(error) or self._invocation.controller.signal.aborted:
                     raise
                 self._scheduler._report(error)
 
