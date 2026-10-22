@@ -8,20 +8,29 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Python ${{ matrix.python }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13"]
+        # Every version the package claims, plus both free-threaded builds. Free-threaded runs the
+        # same suite with the GIL disabled: it proves the code does not depend on the GIL, not that
+        # concurrent threads can share a Session. 3.13t stays out; free-threading only reached
+        # stable support in 3.14 (PEP 779).
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
 

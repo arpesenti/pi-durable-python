@@ -11,7 +11,9 @@ targeting **v1.3.0**.
 
 - Baseline: `@earendil-works/pi-durable` v1.3.0 (`71023aec`).
 - Parity: semantics and persisted record shapes. Python names follow PEP 8.
-- Runtime: CPython 3.11+ on `asyncio`.
+- Runtime: CPython 3.11+ on `asyncio`; the suite runs on 3.11–3.15 and on the 3.14t/3.15t
+  free-threaded builds with the GIL disabled. Concurrent threads sharing a `Session` are not a
+  supported contract.
 - Core: no runtime dependencies. Optional extras provide providers and JSON Schema validation.
 
 ## Tracking
