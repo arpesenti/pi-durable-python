@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 from ..context import BACKGROUND_CONTEXT, Context, with_abort_signal, without_abort_signal
 from ..entries import ResetEntry
 from ..ids import ConversationId, EntryId, TaskId
-from ..session.session import SessionImpl, _now_ms
+from ..session.session import SessionImpl, _now_ms, contained
 from ..session.transaction import Transaction, TransactionScope
 from ..types import (
     ROOT_CONVERSATION_ID,
@@ -40,16 +40,15 @@ _SCAN_PAGE_SIZE = 256
 
 def _safe_report(on_report: Callable[[BaseException], Any] | None) -> Callable[[BaseException], None]:
     def report(error: BaseException) -> None:
-        try:
-            if on_report is not None:
-                on_report(error)
-        except Exception:
-            pass
+        def call() -> Any:
+            return None if on_report is None else on_report(error)
+
+        contained(call, lambda _error: None)
 
     return report
 
 
-def _safe_now(now: Callable[[], int] | None, report: Callable[[BaseException], None]) -> Callable[[], int]:
+def safe_now(now: Callable[[], int] | None, report: Callable[[BaseException], None]) -> Callable[[], int]:
     if now is None:
         return _now_ms
     reported = False
@@ -178,7 +177,7 @@ class Harness(SessionImpl):
 
     def __init__(self, raw_storage: Storage, options: Mapping[str, Any], context: Context) -> None:
         report = _safe_report(options.get("on_report"))
-        now = _safe_now(options.get("now"), report)
+        now = safe_now(options.get("now"), report)
         settings_option = options.get("settings")
         super().__init__(
             raw_storage,
@@ -436,4 +435,4 @@ def _settings_value(settings: Any, name: str) -> Any:
     return getattr(settings, name, None)
 
 
-__all__ = ["Harness"]
+__all__ = ["Harness", "safe_now"]

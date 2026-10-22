@@ -210,6 +210,14 @@ def _missing_migration(record: Mapping[str, Any], definition: Any) -> Exception:
     )
 
 
+class _OldDefinitionError(RuntimeError):
+    """A task that keeps running under its old definition; ``cause`` names why it could not hand over."""
+
+    def __init__(self, task_id: TaskId, kind: str, cause: str) -> None:
+        super().__init__(f"Task {task_id} keeps running under its old {kind} definition")
+        self.cause = cause
+
+
 def _overlay_of(tx: Transaction) -> dict[str, Any]:
     tasks = {record["id"]: record for record in tx.staged_tasks()}
     edges = {
@@ -318,7 +326,7 @@ class TaskScheduler:
     async def open(self, context: Context) -> None:
         """Load live tasks and change surviving ``running`` tasks back to ``pending``."""
 
-        self._session.subscribe_commits(self._observe)
+        self._session.observe_commits(self._observe)
         self._session.subscribe_close(self._seal)
         self._unsubscribe_registry = self._registry.subscribe(self._kick)
 
@@ -1337,12 +1345,7 @@ class TaskScheduler:
             if state["reported"] is None or state["reported"]["task"] is not following:
                 state["reported"] = {"task": following}
                 cause = "missing_task" if following is None else "incompatible_task"
-                self._report(
-                    RuntimeError(
-                        f"Task {current['id']} keeps running under its old "
-                        f"{current['kind']} definition ({cause})"
-                    )
-                )
+                self._report(_OldDefinitionError(current["id"], current["kind"], cause))
         return True
 
     async def _run_abort(self, reservation: dict[str, Any]) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, TypedDict, cast
 
 from ..context import BACKGROUND_CONTEXT, Context, without_abort_signal
@@ -312,6 +313,8 @@ class SessionImpl:
         self._states: list[DocumentState] = []
         self._watches: list[_WatchAttachment] = []
         self._commit_listeners: list[Callable[[CommitPublication, Context], Any]] = []
+        # The Session's own components follow every commit; a throw leaves their state behind storage.
+        self._internal_listeners: list[Callable[[CommitPublication, Context], Any]] = []
         self._close_listeners: list[Callable[[], Any]] = []
         self._line = asyncio.Lock()
         self._closing: asyncio.Future[None] | None = None
@@ -515,6 +518,7 @@ class SessionImpl:
                 self.report(close_error)
             async with self._line:
                 self._commit_listeners.clear()
+                self._internal_listeners.clear()
                 self._documents.clear()
                 self._idle_documents.clear()
                 self._attached_documents.clear()
@@ -552,10 +556,7 @@ class SessionImpl:
         listeners = self._close_listeners
         self._close_listeners = []
         for listener in listeners:
-            try:
-                listener()
-            except Exception as error:
-                self.report(error)
+            contained(listener, self.report)
         watches = self._watches
         self._watches = []
         for entry in watches:
@@ -569,6 +570,20 @@ class SessionImpl:
         self._commit_listeners.append(listener)
         return lambda: self._commit_listeners.remove(listener) if listener in self._commit_listeners else None
 
+    def observe_commits(
+        self,
+        listener: Callable[[CommitPublication, Context], Any],
+    ) -> Callable[[], None]:
+        """Internal: a commit listener whose state follows storage; a throw fails the Session."""
+
+        self.assert_usable()
+        self._internal_listeners.append(listener)
+        return (
+            lambda: self._internal_listeners.remove(listener)
+            if listener in self._internal_listeners
+            else None
+        )
+
     def subscribe_close(self, listener: Callable[[], Any]) -> Callable[[], None]:
         self.assert_usable()
         self._close_listeners.append(listener)
@@ -581,7 +596,12 @@ class SessionImpl:
         documents: list[DocumentCommitChange],
         context: Context,
     ) -> None:
-        if not self._commit_listeners and not self._states and not self._watches:
+        if (
+            not self._commit_listeners
+            and not self._internal_listeners
+            and not self._states
+            and not self._watches
+        ):
             return
         changes: list[CommitChange] = [
             cast(CommitChange, write)
@@ -610,13 +630,10 @@ class SessionImpl:
                 if change["value"] is None:
                     entry.release()
                 entry.watch.advance(change, context)
+        for listener in list(self._internal_listeners):
+            contained(partial(listener, publication, context), self.fail)
         for listener in list(self._commit_listeners):
-            try:
-                result = listener(publication, context)
-                if hasattr(result, "__await__"):
-                    asyncio.ensure_future(cast(Awaitable[Any], result))
-            except Exception as error:
-                self.report(error)
+            contained(partial(listener, publication, context), self.report)
 
     # ── Document cache ─────────────────────────────────────────────────────
 
@@ -1168,6 +1185,30 @@ async def _await_with_context(awaitable: Awaitable[Any], context: Context) -> An
     raise AssertionError("unreachable")
 
 
+def contained(callback: Callable[[], Any], on_error: Callable[[BaseException], None]) -> None:
+    """Run a host callback without failing its caller; a throw or rejection goes to ``on_error``."""
+
+    try:
+        result = callback()
+        if not hasattr(result, "__await__"):
+            return
+        future = asyncio.ensure_future(result)
+
+        def settle(done: asyncio.Future[Any]) -> None:
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except BaseException as caught:
+                error = caught
+            if error is not None:
+                on_error(error)
+
+        future.add_done_callback(settle)
+    except BaseException as error:
+        on_error(error)
+
+
 def _abort_error(signal: Any) -> BaseException:
     reason = signal.reason
     if isinstance(reason, BaseException):
@@ -1181,6 +1222,7 @@ __all__ = [
     "DocumentCacheSizes",
     "DocumentState",
     "SessionImpl",
+    "contained",
     "create_session",
     "document_retention",
     "set_default_document_retention",

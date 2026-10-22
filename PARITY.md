@@ -115,7 +115,9 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py | tested |
+| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py | tested |
+| `safeNow` | value | `safe_now` | test_harness_storage_failure.py | tested |
+| `SCHEDULER_INDEX_SIZES` | value | `Harness.scheduler_index_sizes` | test_harness_scheduler_retention.py | tested |
 
 ### `./harness/inbox.ts` → `pi_durable.harness.inbox`
 
@@ -247,6 +249,7 @@ is green.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `createSession` | value | `create_session` | test_session_tables.py, test_session_states.py | tested |
+| `contained` | value | `contained` | test_harness_storage_failure.py | tested |
 
 ### `./storage/memory.ts` → `pi_durable.storage.memory`
 
@@ -338,7 +341,7 @@ is green.
 | `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
 | `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py | tested |
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
-| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py | tested |
+| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py | tested |
 | `TaskState` | type | `TaskState` | test_types.py | tested |
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
@@ -587,11 +590,19 @@ The upstream document-retention suite has two Harness-level cases: one follows a
 change at its next use, and one compares agent event streams with documents evicted. They are
 translated with the Harness in #12-#22; the Session-level suite covers the retention semantics.
 
-The four scheduler suites are translated for the task core. Deferred to later tickets: the
-`harness-tasks` cases that assert built-in generation/tool cleanup, the `harness-ownership` cases
-that need submissions, tools, or a live `pi.live` run, and the `harness-lifecycle` cases that need
-tool hooks, usage, conversation views, or the task-graph watch. The `harness-lifecycle` open-error,
-close, reopen, registry-change, cancellation, and durable-commit cases are translated now.
+The four task-integrity suites (`harness-tasks-recovery`, `harness-scheduler-indexes`,
+`harness-scheduler-retention`, and `harness-storage-failure`) are translated for the task core. The
+recovery suite is complete. The scheduler suites translate every case whose work is tasks and
+conversations; the retention cases that queue or withdraw inputs, and the storage-failure cases that
+watch documents or conversation views, land with submissions (#11), the live document (#14), and the
+observation surfaces (#22). `harness-storage-failure` also translates the failure latch, listener
+containment, and clock fallback cases the Session can exercise now.
+
+Deferred from earlier tickets: the `harness-tasks` cases that assert built-in generation/tool
+cleanup, the `harness-ownership` cases that need submissions, tools, or a live `pi.live` run, and
+the `harness-lifecycle` cases that need tool hooks, usage, conversation views, or the task-graph
+watch. The `harness-lifecycle` open-error, close, reopen, registry-change, cancellation, and
+durable-commit cases are translated now.
 
 The upstream `harness-context` suite is translated in three parts. Its thirteen derivation cases run
 against the Session-level `context()` read. Three of its nine kept-range cases run against
@@ -645,7 +656,8 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Context, abort signal, and context-scoped values | `pi_durable.context` | tested (`test_context.py`) |
 | Strict JSON validation, copying, and frozen values | `pi_durable.json` | tested (`test_json.py`) |
 | Entry draft validation and immutable record construction | `pi_durable.types` | tested (`test_entries.py`) |
-| Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`) |
+| Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`, `test_harness_storage_failure.py`) |
+| Internal commit observers and contained host callbacks | `pi_durable.session.session` | tested (`test_harness_storage_failure.py`) |
 | Mutable document drafts backed by strict-JSON copies | `pi_durable.session.drafts` | tested (`test_session_states.py`, `test_session_tables.py`) |
 | Chord-compatible JSON operation applier | `pi_durable.delta` | tested (`test_memory_storage.py`) |
 | Serialized committed document watches | `pi_durable.session.observation` | tested (`test_session_watches.py`, `test_session_checkpoints_migrations.py`) |
@@ -653,10 +665,10 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
 | Kept context ranges for extended reads and retention | `pi_durable.harness.context` | tested (`test_harness_context_ranges.py`) |
 | Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
-| Task scheduler, ownership indexes, and task runtime | `pi_durable.harness.scheduler` | tested (`test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_cancellation_barrier.py`) |
-| Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`) |
+| Task scheduler, ownership indexes, and task runtime | `pi_durable.harness.scheduler` | tested (`test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_cancellation_barrier.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_indexes.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
+| Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
 | Extension registry, agent resolution, and hook dispatch | `pi_durable.harness.registry`, `pi_durable.harness.agent` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`) |
-| Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`) |
+| Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`, `test_harness_storage_failure.py`) |
 | Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
