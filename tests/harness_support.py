@@ -1,14 +1,72 @@
-"""Translated v1.3.0 ``harness-support`` message helpers.
-
-Only the message constructors and rendering used by the context suite are ported so far; the
-registry and Harness helpers arrive with the Harness tickets.
-"""
+"""Translated v1.3.0 ``harness-support`` message, registry, and Harness helpers."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, cast
 
-from pi_durable.types import MessageRecord
+from session_support import context
+
+from pi_durable import MemoryStorage
+from pi_durable.harness.define import define_extension, define_tool, section
+from pi_durable.harness.harness import Harness
+from pi_durable.harness.registry import create_registry
+from pi_durable.harness.types import Extension, Registry, ToolRegistration
+from pi_durable.types import MessageRecord, Storage
+
+
+def tool(name: str, description: str | None = None) -> ToolRegistration:
+    return define_tool(
+        {
+            "name": name,
+            "description": f"{name} tool" if description is None else description,
+            "parameters": {"type": "object", "properties": {}},
+            "execute": lambda *_args: None,
+        }
+    )
+
+
+async def open_harness(
+    storage: Storage | None = None,
+    tool_names: tuple[str, ...] = (),
+    *,
+    registry: Registry | None = None,
+    on_report: Callable[[BaseException], Any] | None = None,
+) -> dict[str, Any]:
+    """Open a Harness with a fresh registry holding the named tools."""
+
+    selected = registry or create_registry()
+    if tool_names:
+        selected.install(define_extension({"name": "tools", "tools": [tool(name) for name in tool_names]}))
+    harness = await Harness.open(
+        storage or MemoryStorage(),
+        {
+            "models": {},
+            "registry": selected,
+            **({} if on_report is None else {"on_report": on_report}),
+        },
+        context,
+    )
+    return {"harness": harness, "registry": selected}
+
+
+def add_section(
+    registry: Registry,
+    key: str,
+    render: Callable[..., Any],
+    options: dict[str, Any] | None = None,
+    name: str | None = None,
+) -> Extension:
+    """Install a one-section extension named after the section."""
+
+    extension = define_extension(
+        {
+            "name": f"section:{key}" if name is None else name,
+            "sections": [section(key, render, options)],
+        }
+    )
+    registry.install(extension)
+    return extension
 
 
 def user(text: str) -> MessageRecord:
@@ -82,4 +140,13 @@ def describe_message(message: MessageRecord) -> str:
     raise AssertionError(f"Unknown message role {role}")
 
 
-__all__ = ["assistant", "describe_message", "system", "tool_result", "user"]
+__all__ = [
+    "add_section",
+    "assistant",
+    "describe_message",
+    "open_harness",
+    "system",
+    "tool",
+    "tool_result",
+    "user",
+]

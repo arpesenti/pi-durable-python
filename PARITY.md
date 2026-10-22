@@ -209,8 +209,8 @@ is green.
 | `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
 | `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned |
 | `ProgressPolicy` | type | `ProgressPolicy` | — | planned |
-| `PromptInput` | type | `PromptInput` | — | planned |
-| `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py | tested |
+| `PromptInput` | type | `PromptInput` | test_harness_prompt.py | tested |
+| `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py, test_harness_prompt.py | tested |
 | `QueueMode` | type | `QueueMode` | test_harness_inbox.py | tested |
 | `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
 | `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
@@ -228,7 +228,7 @@ is green.
 | `ToolExecutionResult` | type | `ToolExecutionResult` | — | planned |
 | `ToolHookCall` | type | `ToolHookCall` | — | planned |
 | `ToolHooks` | type | `ToolHooks` | — | planned |
-| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
+| `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py, test_harness_registry_agent.py, test_harness_prompt.py | tested |
 | `UserInput` | type | `UserInput` | test_harness_input_entries.py | tested |
 | `Wrap` | type | `Wrap` | test_harness_registry_agent.py | tested |
 
@@ -294,7 +294,7 @@ is green.
 | `DocumentObserver` | type | `DocumentObserver` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 | `DocumentPoint` | type | `DocumentPoint` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentQuery` | type | `DocumentQuery` | test_types.py, test_storage_protocol.py | tested |
-| `DocumentReader` | type | `DocumentReader` | — | planned |
+| `DocumentReader` | type | `DocumentReader` | test_harness_prompt.py | tested |
 | `DocumentRecord` | type | `DocumentRecord` | test_types.py | tested |
 | `DocumentSemantics` | type | `DocumentSemantics` | test_types.py | tested |
 | `DocumentState` | type | `DocumentState` | test_session_states.py, test_session_document_retention.py | tested |
@@ -561,7 +561,7 @@ SQLite backend and migrations.
 | 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #14/#18/#21) |
 | 7.2 Hooks | code |
 | 7.3 Tools | planned |
-| 7.4 System prompt and dynamic tools | planned |
+| 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
 | 8 Built-in tasks | planned |
@@ -641,12 +641,24 @@ generation request and tool execution and land with #14/#18, and
 `addTools` (the tool-round edit of `tools`/`modelTools`) lands with tool rounds and tool search
 (#14/#18/#20).
 
+The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
+omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
+re-addition; minimal value/removal/addition patches; two-entry order rewrites; head-rebaseline
+omissions and complete post-head baselines; and tool add/remove/replace/order planning riding on
+the last section entry or an entry of its own. `system-order-cache-e2e` has two halves: the
+leading-baseline regression is translated against committed transcripts in
+`test_system_order_cache_e2e.py`; its live Anthropic prompt-cache measurement stays skipped until
+the generation run loop (#14) and the Anthropic adapter (#23) exist. The request-time integration —
+generation's `prepare` phase calling these planners and committing their entries — also lands with
+#14.
+
 ## Allowed deviations
 
 | Area | Upstream | Python |
 | --- | --- | --- |
 | Function and parameter names | camelCase | snake_case |
 | Settings and policy objects | camelCase fields | snake_case fields on the Python-facing `Settings` and `DEFAULT_*_POLICY` values (`max_retries`, `keep_recent_tokens`, `partial_interval_ms`); persisted records stay camelCase |
+| Tool registration fields | `Tool` plus execution fields on `ToolRegistration`, with `constrainedSampling` | `ToolRegistration.constrained_sampling` on the Python-facing registration; declarations persist `constrainedSampling` |
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
 | Host execution backend | `NodeExecutionEnv` | `PosixExecutionEnv` |
@@ -697,6 +709,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Document cache sizes, retention normalization, and the suite default | `pi_durable.session.session` | tested (`test_session_document_retention.py`) |
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
 | Kept context ranges for extended reads and retention | `pi_durable.harness.context` | tested (`test_harness_context_ranges.py`) |
+| System prompt replay, section rendering, and positional entry planning | `pi_durable.harness.prompt` | tested (`test_harness_prompt.py`, `test_system_order_cache_e2e.py`) |
 | Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
 | Task scheduler, ownership indexes, and task runtime | `pi_durable.harness.scheduler` | tested (`test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_cancellation_barrier.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_indexes.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
 | Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |

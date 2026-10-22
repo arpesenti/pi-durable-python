@@ -27,6 +27,7 @@ from ..documents import (
 from ..ids import ConversationId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
+    DocumentReader,
     EntryDraft,
     EntryRecord,
     EntryWithHead,
@@ -65,7 +66,7 @@ ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max
 
 @dataclass(frozen=True, slots=True)
 class ToolRegistration:
-    """Executable tool registered in a registry. Only the fields the task core needs."""
+    """Executable tool registered in a registry, with the fields resolution and planning read."""
 
     name: str
     description: str = ""
@@ -77,6 +78,7 @@ class ToolRegistration:
     callers: Sequence[Literal["model", "tools"]] | None = None
     deferred: bool = False
     output_limits: Mapping[str, Any] | None = None
+    constrained_sampling: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +196,17 @@ class Agent:
     sections: Sequence[PromptSection] = ()
     instructions: str | None = None
     cwd: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptInput:
+    """Input to system prompt section rendering for one request preparation."""
+
+    conversation_id: ConversationId
+    agent: Agent
+    env: Any
+    shown: Mapping[str, str]
+    read: DocumentReader
 
 
 @dataclass(slots=True)
@@ -424,6 +437,7 @@ __all__ = [
     "InputEntry",
     "InputSubmissionDraft",
     "ModelRef",
+    "PromptInput",
     "PromptSection",
     "QueueMode",
     "Registry",

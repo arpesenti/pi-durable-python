@@ -65,6 +65,7 @@ __all__ = [
     "DocumentId",
     "DocumentPoint",
     "DocumentQuery",
+    "DocumentReader",
     "DocumentRecord",
     "DocumentObserver",
     "DocumentSemantics",
@@ -1106,6 +1107,14 @@ class Tx(Protocol):
     async def doc(self, token: Any, *args: Any) -> Any: ...
 
     async def retire_doc(self, token: Any, *args: Any) -> None: ...
+
+
+class DocumentReader(Protocol):
+    """Read side of committed documents: ``Session.snapshot`` and ``snapshotAsOf``."""
+
+    async def snapshot(self, token: Any, *args: Any) -> JsonObject | None: ...
+
+    async def snapshot_as_of(self, token: Any, *args: Any) -> JsonObject | None: ...
 
 
 class Session(Protocol):

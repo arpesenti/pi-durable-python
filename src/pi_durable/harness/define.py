@@ -64,6 +64,7 @@ def define_tool(
         callers=values.get("callers"),
         deferred=values.get("deferred") is True,
         output_limits=values.get("output_limits"),
+        constrained_sampling=values.get("constrained_sampling"),
     )
 
 

@@ -64,6 +64,7 @@ from .harness.types import (
     InputEntry,
     InputSubmissionDraft,
     ModelRef,
+    PromptInput,
     PromptSection,
     QueueMode,
     Registry,
@@ -83,7 +84,7 @@ from .harness.types import (
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
-from .types import Session, Tx
+from .types import DocumentReader, Session, Tx
 
 __version__ = "1.3.0"
 
@@ -105,6 +106,7 @@ __all__ = [
     "DocFamilyDefinition",
     "DocFamilyToken",
     "DocToken",
+    "DocumentReader",
     "DocumentState",
     "Entry",
     "Extension",
@@ -123,6 +125,7 @@ __all__ = [
     "MemoryStorage",
     "ModelRef",
     "PreparedMemoryCommit",
+    "PromptInput",
     "PromptSection",
     "QueueMode",
     "ReadAfterWrite",
