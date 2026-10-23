@@ -6,8 +6,8 @@ the Storage protocol, the Session kernel, document definitions, task definitions
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
 built-in generation and tool tasks, nested tool calls with structured output, provider identity,
-and the usage ledger are included; compaction and the observation surfaces arrive in later
-tickets.
+and the usage ledger are included; the `tool_search` subpath adds BM25 deferred-tool discovery.
+Compaction and the observation surfaces arrive in later tickets.
 """
 
 from .documents import (

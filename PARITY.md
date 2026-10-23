@@ -455,11 +455,22 @@ BM25 tool search.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createToolSearchExtension` | value | `create_tool_search_extension` | — | planned |
-| `createToolSearchTool` | value | `create_tool_search_tool` | — | planned |
-| `DEFAULT_TOOL_SEARCH_LIMIT` | value | `DEFAULT_TOOL_SEARCH_LIMIT` | — | planned |
-| `TOOL_SEARCH_TOOL_NAME` | value | `TOOL_SEARCH_TOOL_NAME` | — | planned |
-| `ToolSearchToolDetails` | type | `ToolSearchToolDetails` | — | planned |
+| `createToolSearchExtension` | value | `create_tool_search_extension` | test_tool_search.py | tested |
+| `createToolSearchTool` | value | `create_tool_search_tool` | test_tool_search.py | tested |
+| `DEFAULT_TOOL_SEARCH_LIMIT` | value | `DEFAULT_TOOL_SEARCH_LIMIT` | test_tool_search.py | tested |
+| `TOOL_SEARCH_TOOL_NAME` | value | `TOOL_SEARCH_TOOL_NAME` | test_tool_search.py | tested |
+| `ToolSearchToolDetails` | type | `ToolSearchToolDetails` | test_tool_search.py | tested |
+
+`test_tool_search.py` translates the upstream `tool-search` suite and the BM25 behavior it rests
+on. The translated cases cover deferred tools staying off the offer until `tool_search` loads them
+and remaining callable by other tools; the exact result text and `modelTools` `{ add }` write; load
+order rather than registry order; names recorded without the registry, including unknown and
+non-deferred ones, with `remove` winning until a load lifts it; an extension disappearing and
+coming back; per-branch loads and the post-reset baseline; and an unrelated query loading nothing.
+The unit cases pin tokenization (camel-case and acronym boundaries, stop words, naive plural stems),
+BM25 length normalization, ties in document order, the limit, and the empty-query and positive-
+integer-limit diagnostics. `pi_durable.search` is the internal port of `src/search.ts`; it is not
+a public subpath export.
 
 ### `src/testing/index.ts` → `pi_durable.testing`
 
@@ -568,7 +579,7 @@ SQLite backend and migrations.
 | 5.4 Scheduler, abort, and ownership | tested |
 | 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | tested |
-| 7 Extensions, hooks, tools, and system prompt | code (tool search with #20) |
+| 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
 | 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #21) |
 | 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
 | 7.3 Tools | tested (model-issued and nested calls, hooks, output bounds, replay, structured output, and the coding tools) |
@@ -661,7 +672,7 @@ resolution through an array or `{remove, add}` (a superset of the upstream resol
 nested `executeTool` end-to-end cases now run in `test_harness_nested_tools.py`, and its model-issued
 cases in `test_harness_tools.py`; `add_tools` (the tool-round edit of
 `tools`/`modelTools`) is covered there, and the deferred-loading half through `{add}` is exercised
-by the resolution cases, with tool search landing in #20.
+by the resolution cases and end to end in `test_tool_search.py`.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
@@ -770,6 +781,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Bounded output windows and adaptive progress commits | `pi_durable.harness.output` | tested (`test_harness_output.py`, `test_harness_tools.py`, `test_harness_live_deltas.py`) |
 | Tool argument repair, coercion, and validation | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`) |
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
+| BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`) |
 | Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |
 | OpenAI model adapter | `pi_durable.providers.openai` | planned |
 | Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
@@ -782,8 +794,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 4. Tasks, scheduler, submissions, document observation.
 - [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
       Compaction status in `pi.live` lands with #21.
-- [ ] 6. `env`, coding tools, `tool-search`. `env` (#16) and the coding tools (#17) landed;
-      `tool-search` (#20) remains.
+- [x] 6. `env`, coding tools, `tool-search`.
 - [ ] 7. Compaction, events/view, task graph, extension reload.
 - [ ] 8. Full translated suite green, docs, version `1.3.0`, release.
 
