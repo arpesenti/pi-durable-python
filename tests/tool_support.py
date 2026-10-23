@@ -62,6 +62,12 @@ def results(entries: Sequence[EntryRecord]) -> list[Mapping[str, Any]]:
     ]
 
 
+def codes(result: Mapping[str, Any]) -> list[str | None]:
+    """The codes of a result's diagnostics, in order."""
+
+    return [item.get("code") for item in result.get("diagnostics") or ()]
+
+
 def result_text(message: Mapping[str, Any] | None) -> str:
     if message is None:
         return ""
@@ -131,6 +137,7 @@ __all__ = [
     "assistant_message",
     "calls",
     "chat_setup",
+    "codes",
     "context",
     "faux_text",
     "open_chat",

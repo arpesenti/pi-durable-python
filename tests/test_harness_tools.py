@@ -1,8 +1,9 @@
 """Translated upstream ``harness-tools`` cases for the tool execution core.
 
 The round, its durable result entries, argument repair and validation, tool hooks, output bounds,
-the execution api, and the lifetime rules. Coding tools (#17), nested calls and structured output
-(#19), and tool search (#20) land with their own tickets.
+the execution api, and the lifetime rules. Coding tools (#17) and the round over them are covered
+by test_tools.py; nested calls and structured output by test_harness_nested_tools.py and
+test_harness_structured_output.py; tool search (#20) lands with its own ticket.
 """
 
 from __future__ import annotations

@@ -5,8 +5,9 @@ JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Conte
 the Storage protocol, the Session kernel, document definitions, task definitions, context
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
-built-in generation and tool tasks, provider identity, and usage ledger are included; compaction,
-nested tools, and the observation surfaces arrive in later tickets.
+built-in generation and tool tasks, nested tool calls with structured output, provider identity,
+and the usage ledger are included; compaction and the observation surfaces arrive in later
+tickets.
 """
 
 from .documents import (
@@ -64,7 +65,14 @@ from .harness.inbox import InboxDoc, InboxItem, InboxState
 from .harness.live import LiveDoc, LiveState, NestedToolSlot, NestedToolSummary, ToolSlot
 from .harness.provider import ProviderDoc, ProviderState
 from .harness.registry import create_registry
-from .harness.tool import ToolTask, ToolTaskCheckpoint, ToolTaskInput, ToolTaskResult
+from .harness.tool import (
+    NestedCallDoc,
+    NestedCallState,
+    ToolTask,
+    ToolTaskCheckpoint,
+    ToolTaskInput,
+    ToolTaskResult,
+)
 from .harness.types import (
     Agent,
     AgentChange,
@@ -197,6 +205,8 @@ __all__ = [
     "Model",
     "ModelRef",
     "Models",
+    "NestedCallDoc",
+    "NestedCallState",
     "NestedToolExecutionResult",
     "NestedToolSlot",
     "NestedToolSummary",

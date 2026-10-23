@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -395,4 +396,65 @@ def _js_string(value: int | float) -> str:
     return repr(value)
 
 
-__all__ = ["ToolArgumentError", "validate_tool_arguments"]
+_VALIDATOR_CACHE_SIZE = 64
+
+_STRUCTURED_VALIDATORS: OrderedDict[int, tuple[Any, Any]] = OrderedDict()
+"""Compiled validators keyed by the identity of the schema object they validate, least recently used
+first, so a long-lived process with many short-lived tools does not accumulate them."""
+
+
+def structured_output_error(tool: Any, result: Mapping[str, Any]) -> str | None:
+    """Why a result's ``structuredOutput`` breaks the tool's contract, or ``None`` when it keeps it.
+
+    A tool that declares ``structured_output_schema`` must return a matching value, except on an
+    error result, where it may omit it; a tool without one must not return one. Validation needs
+    the optional ``schema`` extra, imported only here so the core package has no dependencies.
+    """
+
+    name = str(getattr(tool, "name", ""))
+    schema = getattr(tool, "structured_output_schema", None)
+    present = "structuredOutput" in result
+    value = result.get("structuredOutput")
+    if schema is None:
+        if not present:
+            return None
+        return f"Tool {name} returned structuredOutput but declares no structuredOutputSchema"
+    if not present:
+        if result.get("isError") is True:
+            return None
+        return f"Tool {name} returned no structuredOutput"
+    validator = _structured_validator(schema)
+    errors = list(validator.iter_errors(value))
+    if not errors:
+        return None
+    first = errors[0]
+    path = ".".join(str(item) for item in first.absolute_path) or "root"
+    return f"Tool {name} returned structuredOutput that does not match its schema: {path}: {first.message}"
+
+
+def _structured_validator(schema: Any) -> Any:
+    cached = _STRUCTURED_VALIDATORS.get(id(schema))
+    if cached is not None and cached[0] is schema:
+        _STRUCTURED_VALIDATORS.move_to_end(id(schema))
+        return cached[1]
+    try:
+        from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+    except ImportError as error:
+        # The core package keeps no runtime dependency; only a schema tool needs the extra.
+        raise ImportError(
+            "JSON Schema validation requires the 'schema' extra: "
+            "install pi-durable-python[schema]"
+        ) from error
+    validator = Draft202012Validator(schema)
+    _STRUCTURED_VALIDATORS[id(schema)] = (schema, validator)
+    _STRUCTURED_VALIDATORS.move_to_end(id(schema))
+    while len(_STRUCTURED_VALIDATORS) > _VALIDATOR_CACHE_SIZE:
+        _STRUCTURED_VALIDATORS.popitem(last=False)
+    return validator
+
+
+__all__ = [
+    "ToolArgumentError",
+    "structured_output_error",
+    "validate_tool_arguments",
+]

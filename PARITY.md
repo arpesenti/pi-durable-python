@@ -136,8 +136,8 @@ is green.
 | `CompactionFailure` | type | `CompactionFailure` | — | planned (#21) |
 | `CompactionStatus` | type | `CompactionStatus` | — | planned (#21) |
 | `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py | tested |
-| `NestedToolSlot` | type | `NestedToolSlot` | — | planned (#19) |
-| `NestedToolSummary` | type | `NestedToolSummary` | — | planned (#19) |
+| `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
+| `NestedToolSummary` | type | `NestedToolSummary` | test_harness_nested_tools.py | tested |
 | `ToolSlot` | type | `ToolSlot` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_deltas.py | tested |
 
 ### `./harness/provider.ts` → `pi_durable.harness.provider`
@@ -166,12 +166,14 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `NestedCallDoc` | value | `NestedCallDoc` | — | planned (#19) |
-| `ToolTask` | value | `ToolTask` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
-| `NestedCallState` | type | `NestedCallState` | — | planned (#19) |
+| `appendToolResult` | value | `append_tool_result` | test_harness_tools.py, test_harness_nested_tools.py | tested |
+| `harnessError` | value | `harness_error` | test_harness_tools.py, test_harness_nested_tools.py, test_harness_structured_output.py | tested |
+| `NestedCallDoc` | value | `NestedCallDoc` | test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested |
+| `ToolTask` | value | `ToolTask` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py | tested |
+| `NestedCallState` | type | `NestedCallState` | test_harness_nested_tools.py, test_harness_structured_output.py | tested |
 | `ToolTaskCheckpoint` | type | `ToolTaskCheckpoint` | test_harness_tools_recovery.py | tested |
-| `ToolTaskInput` | type | `ToolTaskInput` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
-| `ToolTaskResult` | type | `ToolTaskResult` | test_harness_tools.py | tested |
+| `ToolTaskInput` | type | `ToolTaskInput` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py | tested |
+| `ToolTaskResult` | type | `ToolTaskResult` | test_harness_tools.py, test_harness_nested_tools.py | tested |
 
 ### `./harness/types.ts` → `pi_durable.harness.types`
 
@@ -207,7 +209,7 @@ is green.
 | `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
-| `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | — | planned (#19) |
+| `NestedToolExecutionResult` | type | `NestedToolExecutionResult` | test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested |
 | `ProgressPolicy` | type | `ProgressPolicy` | test_harness_generation.py | tested |
 | `PromptInput` | type | `PromptInput` | test_harness_prompt.py | tested |
 | `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py, test_harness_prompt.py | tested |
@@ -223,7 +225,7 @@ is green.
 | `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py, test_harness_inspect.py | tested |
 | `ToolControl` | type | `ToolControl` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
 | `ToolDiagnostic` | type | `ToolDiagnostic` | test_harness_tools.py, test_harness_live_deltas.py | tested |
-| `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py | code (#19 `executeTool`) |
+| `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested |
 | `ToolExecutionMode` | type | `ToolExecutionMode` | test_harness_tools.py | tested |
 | `ToolExecutionResult` | type | `ToolExecutionResult` | test_harness_tools.py | tested |
 | `ToolHookCall` | type | `ToolHookCall` | test_harness_tools.py | tested |
@@ -566,18 +568,18 @@ SQLite backend and migrations.
 | 5.4 Scheduler, abort, and ownership | tested |
 | 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | tested |
-| 7 Extensions, hooks, tools, and system prompt | code (nested calls with #19, tool search with #20) |
+| 7 Extensions, hooks, tools, and system prompt | code (tool search with #20) |
 | 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #21) |
 | 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
-| 7.3 Tools | code (model-issued calls, hooks, output bounds, replay, and the coding tools; nested calls and structured output with #19) |
+| 7.3 Tools | tested (model-issued and nested calls, hooks, output bounds, replay, structured output, and the coding tools) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
 | 8 Built-in tasks | code (generation and tool; compaction with #21) |
 | 8.1 Built-in entries | code (`pi.user`, `pi.assistant`, `pi.system`, `pi.tool-result`, and `pi.reset`; `pi.compaction` with #21) |
-| 8.2 Live document | code (run, generation, tool slots, and the complete-base rule; compaction status with #21) |
+| 8.2 Live document | code (run, generation, tool and nested slots, and the complete-base rule; compaction status with #21) |
 | 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, tool rounds, and reopen recovery in test_harness_generation_recovery.py; threshold/overflow compaction with #21) |
-| 8.4 Tool | tested (model-issued calls; nested calls with #19) |
+| 8.4 Tool | tested (model-issued and nested calls) |
 | 8.5 Tool rounds | tested |
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned |
@@ -656,7 +658,8 @@ compaction's arrive with #21. The `pi.generation` task-collision row is translat
 half of `harness-callers` is translated alongside: model-only, tools-only, and both callers;
 `modelTools` narrowing without widening what tools may call; enabled filters; and deferred-tool
 resolution through an array or `{remove, add}` (a superset of the upstream resolution cases). Its
-end-to-end cases run in `test_harness_tools.py`; `add_tools` (the tool-round edit of
+nested `executeTool` end-to-end cases now run in `test_harness_nested_tools.py`, and its model-issued
+cases in `test_harness_tools.py`; `add_tools` (the tool-round edit of
 `tools`/`modelTools`) is covered there, and the deferred-loading half through `{add}` is exercised
 by the resolution cases, with tool search landing in #20.
 
@@ -671,6 +674,22 @@ the Anthropic adapter (#23) exists. Generation's `prepare` phase now calls these
 commits their entries; `test_harness_generation.py` covers the request-time integration, including
 an environment failure and a section that reads a document through `input.read`.
 
+The upstream `harness-nested-tools` and `harness-nested-tools-restart` suites are translated in
+`test_harness_nested_tools.py` and `test_harness_nested_tools_restart.py`: one task, slot, and
+`NestedCallDoc` member per call; keys, call IDs, reattachment, and rejected collisions; the
+`callers` resolution for tools; hooks seeing the parent; unavailable, invalid, blocked, thrown,
+interrupted, aborted, faulted, and orphaned results; output and details with `progress: false`;
+usage; left-running calls aborted before their caller settles, including during a restart cleanup;
+and `abandonOnRestart` for a replay-unsafe caller and the child tasks it creates. Assertions that
+read the nested call's result from an agent event or a late-subscriber view stay with #22; the same
+values are checked through the stored `NestedCallDoc` and `pi.live` snapshots instead, and the
+upstream `harness-structured-output` suite is translated in
+`test_harness_structured_output.py`: schema-less output shapes, bounds without rendered
+diagnostics, the stored null, validated schema output, every broken-output path for callers and for
+the model's calls, Harness-written errors, the schema tool's error-text diagnostic, `afterTool`
+replacement, and `bash`'s structured output. `harness-structured` is the structured-concurrency
+suite already translated with #9 and #10, and has no nested-call cases.
+
 ## Allowed deviations
 
 | Area | Upstream | Python |
@@ -681,6 +700,7 @@ an environment failure and a section that reads a document through `input.read`.
 | Tool result and control fields | `structuredOutput`, `isError`, `addTools` | camelCase in a returned result, a stored task outcome, and an entry's message, because they are wire shapes; the registration's own fields are snake_case |
 | Tool execution api | `retainedOutput()`, `outputWindow`, camelCase window fields | `retained_output()`, `output_window` with snake_case fields (`max_bytes`, `max_lines`, `min_interval_ms`, `bytes_per_second`); `details()` registers its update synchronously and returns an awaitable |
 | Tool argument validation | pi-ai TypeBox `validateToolArguments` | a JSON Schema validator in `pi_durable.harness.validation` with pi-ai's primitive coercion and optional-null removal; the `schema` extra is not needed for argument validation |
+| Structured output validation | TypeBox `Compile(schema).Check` | `jsonschema`'s `Draft202012Validator`, imported lazily, so the core package keeps no runtime dependencies; the `schema` extra is required only by a tool that declares `structured_output_schema` |
 | Bounded output and progress | Chord `OutputBuffer` and `Progress` | `pi_durable.harness.output` with the same windows and pacing; the bounded overlap search lives in `pi_durable.delta` (`overlap_strings`, 64 KiB) |
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
