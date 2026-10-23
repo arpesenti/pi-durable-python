@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Never, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Never, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
 
 from ..context import AbortSignal, Context
 from ..documents import (
@@ -25,18 +25,21 @@ from ..documents import (
     TaskDocFamilyToken,
     TaskDocToken,
 )
-from ..ids import ConversationId, SubmissionId, TaskId
+from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
     ConversationOwnership,
+    Cursor,
     DocumentReader,
     EntryDraft,
+    EntryQuery,
     EntryRecord,
     EntryWithHead,
     InputDoneRecord,
     InputUnansweredRecord,
     MessageRecord,
     NextTaskState,
+    Page,
     SubmissionRecord,
     TaskOutcome,
     TaskRecord,
@@ -44,6 +47,9 @@ from ..types import (
     WriteDoneRecord,
     WriteUnansweredRecord,
 )
+
+if TYPE_CHECKING:
+    from ..session.transaction import Transaction
 
 
 class ContextView(TypedDict):
@@ -587,6 +593,12 @@ SettledSubmissionRecord: TypeAlias = (
 # ── Conversations ───────────────────────────────────────────────────────────
 
 
+class ConversationAbortOptions(TypedDict, total=False):
+    """Options of ``Conversation.abort()``: ``background`` also aborts background work."""
+
+    background: bool
+
+
 class ConversationHandle(Protocol):
     """Invocation-bound conversation operations for tasks and tools."""
 
@@ -600,9 +612,45 @@ class ConversationHandle(Protocol):
 
 
 class Conversation(Protocol):
-    """Stateless handle for one conversation, bound to the Harness that returned it."""
+    """Stateless handle for one conversation, bound to the Harness that returned it.
+
+    Compaction and the observation surfaces (``compact``, ``view_state``, ``watch``) arrive with
+    their own tickets.
+    """
 
     id: ConversationId
+
+    async def submit(self, submission: SubmissionDraft, context: Context) -> Submission: ...
+
+    async def agent(self, context: Context) -> Agent: ...
+
+    async def configure(self, change: AgentChange, context: Context) -> None: ...
+
+    async def commit(self, change: Callable[[Transaction], Any], context: Context) -> Any: ...
+
+    async def context(
+        self, context: Context, options: Mapping[str, Any] | None = None
+    ) -> ContextView: ...
+
+    async def entries(
+        self,
+        query: EntryQuery,
+        limit: int,
+        cursor: Cursor | None,
+        context: Context,
+    ) -> Page[EntryRecord, Cursor]: ...
+
+    async def fork(
+        self, at: EntryId, options: ConversationCreateOptions, context: Context
+    ) -> Conversation: ...
+
+    async def reset(self, handoff: str | None, context: Context) -> None: ...
+
+    async def abort(
+        self, context: Context, options: ConversationAbortOptions | None = None
+    ) -> None: ...
+
+    async def wait_for_idle(self, context: Context) -> None: ...
 
 
 class Submission(Protocol):
@@ -641,6 +689,7 @@ __all__ = [
     "CompactionPolicy",
     "ContextView",
     "Conversation",
+    "ConversationAbortOptions",
     "ConversationCreateOptions",
     "ConversationDocFamilyToken",
     "ConversationDocToken",

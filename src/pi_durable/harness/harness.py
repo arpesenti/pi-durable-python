@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import partial
 from typing import Any, Literal, cast
 
@@ -44,6 +44,15 @@ from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
 
 _SCAN_PAGE_SIZE = 256
+
+
+def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
+    """Host callers choose ownership explicitly; a conversation handle never infers it."""
+
+    ownership = options.get("ownership")
+    if not isinstance(ownership, Mapping):
+        raise TypeError("Conversation creation requires explicit ownership")
+    return cast(ConversationOwnership, ownership)
 
 
 def _safe_report(on_report: Callable[[BaseException], Any] | None) -> Callable[[BaseException], None]:
@@ -178,12 +187,7 @@ class ConversationHandleImpl:
         )
 
     async def fork(self, at: EntryId, options: Mapping[str, Any], context: Context) -> ConversationHandleImpl:
-        async def create(tx: Transaction) -> ConversationId:
-            record = await tx.fork_conversation(self.id, at, {"ownership": options["ownership"]})
-            return record["id"]
-
-        id = await self._harness.commit(create, context)
-        return ConversationHandleImpl(id, self._harness)
+        return await self._harness._fork(self.id, at, options, context)
 
     async def abort(self, context: Context, options: Mapping[str, Any] | None = None) -> None:
         self._harness.resume()
@@ -375,7 +379,7 @@ class Harness(SessionImpl):
             submissions.sort(key=lambda record: record["id"])
             return {"scheduling": cast(Any, scheduling), "tasks": tasks, "submissions": submissions}
 
-        return await self.read_on_line(read)
+        return await self.read_queued_before_close(read)
 
     async def abort_task(self, id: TaskId, context: Context) -> str:
         return await self._tasks.abort(id, context)
@@ -391,7 +395,17 @@ class Harness(SessionImpl):
     async def root(
         self, context: Context, options: Mapping[str, Any] | None = None
     ) -> ConversationHandleImpl:
-        return await self._create({"kind": "root"}, options or {}, context)
+        self.assert_usable()
+        values = options or {}
+
+        async def create(tx: Transaction) -> ConversationId:
+            if await tx.conversation(ROOT_CONVERSATION_ID) is not None:
+                return ROOT_CONVERSATION_ID
+            record = await tx.create_root_conversation()
+            await self._apply_creation(tx, record["id"], values)
+            return record["id"]
+
+        return ConversationHandleImpl(await self.commit(create, context), self)
 
     async def conversation(self, id: ConversationId, context: Context) -> ConversationHandleImpl | None:
         self.assert_usable()
@@ -401,44 +415,55 @@ class Harness(SessionImpl):
     async def create_conversation(
         self, options: Mapping[str, Any], context: Context
     ) -> ConversationHandleImpl:
+        ownership = _ownership(options)
         return await self._create(
-            {"kind": "independent", "ownership": options["ownership"]}, options, context
+            options,
+            context,
+            lambda tx: tx.create_conversation({"ownership": ownership}),
+        )
+
+    async def _fork(
+        self,
+        parent_id: ConversationId,
+        at: EntryId,
+        options: Mapping[str, Any],
+        context: Context,
+    ) -> ConversationHandleImpl:
+        ownership = _ownership(options)
+        return await self._create(
+            options,
+            context,
+            lambda tx: tx.fork_conversation(parent_id, at, {"ownership": ownership}),
         )
 
     async def _create(
         self,
-        target: Mapping[str, Any],
         options: Mapping[str, Any],
         context: Context,
+        make: Callable[[Transaction], Awaitable[ConversationRecord]],
     ) -> ConversationHandleImpl:
         self.assert_usable()
 
         async def create(tx: Transaction) -> ConversationId:
-            if target["kind"] == "root":
-                existing = await tx.conversation(ROOT_CONVERSATION_ID)
-                if existing is not None:
-                    return ROOT_CONVERSATION_ID
-                record = await tx.create_root_conversation()
-            elif target["kind"] == "fork":
-                record = await tx.fork_conversation(
-                    target["parent_id"], target["at"], {"ownership": target["ownership"]}
-                )
-            else:
-                record = await tx.create_conversation(
-                    {"ownership": cast(ConversationOwnership, target["ownership"])}
-                )
-            agent = options.get("agent")
-            if agent is not None:
-                await configure(tx, record["id"], agent)
-            init = options.get("init")
-            if init is not None:
-                result = init(tx, record["id"])
-                if hasattr(result, "__await__"):
-                    await cast(Any, result)
+            record = await make(tx)
+            await self._apply_creation(tx, record["id"], options)
             return record["id"]
 
-        id = await self.commit(create, context)
-        return ConversationHandleImpl(id, self)
+        return ConversationHandleImpl(await self.commit(create, context), self)
+
+    async def _apply_creation(
+        self, tx: Transaction, conversation_id: ConversationId, options: Mapping[str, Any]
+    ) -> None:
+        """Apply the conveniences' ``agent`` change and ``init`` inside the creating commit."""
+
+        agent = options.get("agent")
+        if agent is not None:
+            await configure(tx, conversation_id, agent)
+        init = options.get("init")
+        if init is not None:
+            result = init(tx, conversation_id)
+            if hasattr(result, "__await__"):
+                await cast(Any, result)
 
     # ── Submissions ────────────────────────────────────────────────────────
 

@@ -454,8 +454,26 @@ class SessionImpl:
 
     async def read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
         self.assert_usable()
+        return await self._read_on_line(job)
+
+    async def read_queued_before_close(self, job: Callable[[], Awaitable[Any]]) -> Any:
+        """Run a read admitted before ``close()`` sealed admission; a later read rejects.
+
+        The Harness uses this for ``inspect()``: an inspection already queued on the Session line at
+        the seal still runs and reports ``scheduling: "closing"``, while one asked for after the seal
+        rejects like every other new operation.
+        """
+
+        self._assert_healthy()
+        if self._closing is not None:
+            raise self._closed_error()
+        return await self._read_on_line(job)
+
+    async def _read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
         async with self._line:
             self._assert_healthy()
+            if self._closed.done():
+                raise self._closed_error()
             return await job()
 
     async def context(

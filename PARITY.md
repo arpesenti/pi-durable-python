@@ -116,7 +116,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py, test_harness_submissions.py, test_harness_inbox.py, test_harness_input_entries.py, test_harness_generation.py, test_harness_usage.py | tested |
+| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py, test_harness_submissions.py, test_harness_inbox.py, test_harness_input_entries.py, test_harness_generation.py, test_harness_generation_recovery.py, test_harness_usage.py, test_harness_conversations.py, test_harness_inspect.py | tested |
 | `safeNow` | value | `safe_now` | test_harness_storage_failure.py | tested |
 | `SCHEDULER_INDEX_SIZES` | value | `Harness.scheduler_index_sizes` | test_harness_scheduler_retention.py | tested |
 
@@ -186,18 +186,18 @@ is green.
 | `CompactionReason` | type | `CompactionReason` | — | planned |
 | `CompactionResult` | type | `CompactionResult` | — | planned |
 | `ContextView` | type | `ContextView` | test_harness_context.py | tested |
-| `Conversation` | type | `Conversation` | — | planned |
-| `ConversationAbortOptions` | type | `ConversationAbortOptions` | — | planned |
-| `ConversationCreateOptions` | type | `ConversationCreateOptions` | — | planned (#15) |
+| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py | tested (creation, fork, agent, context, entries, reset, abort, and idle waits; compaction with #21, view/watch with #22) |
+| `ConversationAbortOptions` | type | `ConversationAbortOptions` | test_harness_ownership.py | tested |
+| `ConversationCreateOptions` | type | `ConversationCreateOptions` | test_harness_conversations.py | tested |
 | `ConversationHandle` | type | `ConversationHandle` | test_harness_ownership.py | tested |
-| `ConversationInit` | type | `ConversationInit` | — | planned (#15) |
+| `ConversationInit` | type | `ConversationInit` | test_harness_conversations.py | tested |
 | `ConversationRetryPolicy` | type | `ConversationRetryPolicy` | test_harness_generation.py | tested |
 | `ConversationStreamOptions` | type | `ConversationStreamOptions` | test_harness_generation.py | tested |
 | `ConversationWatch` | type | `ConversationWatch` | — | planned |
 | `EnvTarget` | type | `EnvTarget` | test_harness_generation.py | tested |
 | `Extension` | type | `Extension` | test_harness_tasks.py, test_harness_ownership.py, test_harness_registry_agent.py | tested |
 | `GenerationHooks` | type | `GenerationHooks` | test_harness_generation.py | tested |
-| `HarnessInspection` | type | `HarnessInspection` | test_harness_tasks.py, test_harness_cancellation_barrier.py | tested |
+| `HarnessInspection` | type | `HarnessInspection` | test_harness_tasks.py, test_harness_cancellation_barrier.py, test_harness_inspect.py | tested |
 | `HarnessOptions` | type | `HarnessOptions` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
 | `HarnessSettings` | type | `HarnessSettings` | test_harness_generation.py | tested |
 | `HookApi` | type | `HookApi` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
@@ -220,7 +220,7 @@ is green.
 | `SettledTask` | type | `SettledTask` | test_harness_tasks.py | tested |
 | `Submission` | type | `Submission` | test_harness_submissions.py, test_harness_inbox.py | tested |
 | `SubmissionDraft` | type | `SubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
-| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py | tested |
+| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py, test_harness_inspect.py | tested |
 | `ToolControl` | type | `ToolControl` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
 | `ToolDiagnostic` | type | `ToolDiagnostic` | test_harness_tools.py, test_harness_live_deltas.py | tested |
 | `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py | code (#19 `executeTool`) |
@@ -542,11 +542,11 @@ SQLite backend and migrations.
 | 1 Terms and invariants | code |
 | 2 Core records | tested |
 | 2.1 Entries and context | tested |
-| 2.2 Public Harness surface | code (generation, usage, provider, and root lazy creation; compaction and full conversation surface with #15/#21) |
+| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, and root lazy creation with #15; compaction with #21 and the view/watch surface with #22) |
 | 3 Documents | code |
 | 3.1 Definitions | tested |
 | 3.2 Records and lifetimes | tested |
-| 3.3 Access and creation | code |
+| 3.3 Access and creation | code (the Harness creation conveniences and `conversationCreated` hook are tested in test_harness_conversations.py; historical and document access stays in test_session_states.py, test_session_tables.py, and test_session_checkpoints_migrations.py) |
 | 3.4 Mutation ownership | tested |
 | 3.5 Bases and checkpoints | tested |
 | 3.6 Versions and migrations | tested |
@@ -569,7 +569,7 @@ SQLite backend and migrations.
 | 8 Built-in tasks | code (generation and tool; compaction with #21) |
 | 8.1 Built-in entries | code (`pi.user`, `pi.assistant`, `pi.system`, `pi.tool-result`, and `pi.reset`; `pi.compaction` with #21) |
 | 8.2 Live document | code (run, generation, tool slots, and the complete-base rule; compaction status with #21) |
-| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, and tool rounds; threshold/overflow compaction with #21) |
+| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, tool rounds, and reopen recovery in test_harness_generation_recovery.py; threshold/overflow compaction with #21) |
 | 8.4 Tool | tested (model-issued calls; nested calls with #19) |
 | 8.5 Tool rounds | tested |
 | 8.6 Usage | tested |
@@ -735,7 +735,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Per-conversation usage ledger and Session totals | `pi_durable.harness.usage` | tested (`test_harness_usage.py`, `test_harness_generation.py`) |
 | Session-level context read, as `Conversation.context()` uses it | `pi_durable.session.session` | tested (`test_harness_context.py`) |
 | Task scheduler, ownership indexes, and task runtime | `pi_durable.harness.scheduler` | tested (`test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_cancellation_barrier.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_indexes.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
-| Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`) |
+| Harness open/root/conversation/commit/inspect/close surface | `pi_durable.harness.harness` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_tasks_recovery.py`, `test_harness_scheduler_retention.py`, `test_harness_storage_failure.py`, `test_harness_conversations.py`, `test_harness_inspect.py`) |
 | Extension registry, agent resolution, and hook dispatch | `pi_durable.harness.registry`, `pi_durable.harness.agent` | tested (`test_harness_tasks.py`, `test_harness_lifecycle.py`, `test_harness_registry_agent.py`) |
 | Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`, `test_harness_storage_failure.py`) |
 | Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
