@@ -416,29 +416,36 @@ Coding tools; PowerShell is excluded.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createBashTool` | value | `create_bash_tool` | — | planned |
+| `createBashTool` | value | `create_bash_tool` | test_tools.py | tested |
 | `createPowerShellTool` | value | `create_power_shell_tool` | — | excluded |
-| `createEditTool` | value | `create_edit_tool` | — | planned |
-| `DEFAULT_IMAGE_LIMITS` | value | `DEFAULT_IMAGE_LIMITS` | — | planned |
-| `createReadTool` | value | `create_read_tool` | — | planned |
-| `createWriteTool` | value | `create_write_tool` | — | planned |
-| `createCodingTools` | value | `create_coding_tools` | — | planned |
-| `CodingTools` | value | `CodingTools` | — | planned |
-| `BashExecution` | type | `BashExecution` | — | planned |
-| `BashPrepare` | type | `BashPrepare` | — | planned |
-| `BashToolInput` | type | `BashToolInput` | — | planned |
-| `BashToolOptions` | type | `BashToolOptions` | — | planned |
+| `createEditTool` | value | `create_edit_tool` | test_tools.py | tested |
+| `DEFAULT_IMAGE_LIMITS` | value | `DEFAULT_IMAGE_LIMITS` | test_tools.py | tested |
+| `createReadTool` | value | `create_read_tool` | test_tools.py, test_tools_read_differential.py | tested |
+| `createWriteTool` | value | `create_write_tool` | test_tools.py | tested |
+| `createCodingTools` | value | `create_coding_tools` | test_tools.py | tested |
+| `CodingTools` | value | `CodingTools` | test_tools.py | tested |
+| `BashExecution` | type | `BashExecution` | test_tools.py | tested |
+| `BashPrepare` | type | `BashPrepare` | test_tools.py | tested |
+| `BashToolInput` | type | `BashToolInput` | test_tools.py | tested |
+| `BashToolOptions` | type | `BashToolOptions` | test_tools.py | tested |
 | `PowerShellToolInput` | type | `PowerShellToolInput` | — | excluded |
 | `PowerShellToolOptions` | type | `PowerShellToolOptions` | — | excluded |
-| `EditToolDetails` | type | `EditToolDetails` | — | planned |
-| `EditToolInput` | type | `EditToolInput` | — | planned |
-| `ImageLimits` | type | `ImageLimits` | — | planned |
-| `ImageProcessor` | type | `ImageProcessor` | — | planned |
-| `PreparedImage` | type | `PreparedImage` | — | planned |
-| `ReadToolDetails` | type | `ReadToolDetails` | — | planned |
-| `ReadToolInput` | type | `ReadToolInput` | — | planned |
-| `ReadToolOptions` | type | `ReadToolOptions` | — | planned |
-| `WriteToolInput` | type | `WriteToolInput` | — | planned |
+| `EditToolDetails` | type | `EditToolDetails` | test_tools.py | tested |
+| `EditToolInput` | type | `EditToolInput` | test_tools.py | tested |
+| `ImageLimits` | type | `ImageLimits` | test_tools.py | tested |
+| `ImageProcessor` | type | `ImageProcessor` | test_tools.py | tested |
+| `PreparedImage` | type | `PreparedImage` | test_tools.py | tested |
+| `ReadToolDetails` | type | `ReadToolDetails` | test_tools.py | tested |
+| `ReadToolInput` | type | `ReadToolInput` | test_tools.py | tested |
+| `ReadToolOptions` | type | `ReadToolOptions` | test_tools.py | tested |
+| `WriteToolInput` | type | `WriteToolInput` | test_tools.py | tested |
+
+`test_tools.py` translates the upstream `tools` suite: bash streaming, spill, timeout, prefix, and
+`prepare`; read offsets, limits, truncation, image detection, and path safety; write and edit
+serialization through the per-file mutation queue, diffs, BOM/CRLF preservation, symlinks, and
+argument repair. Image cases that need a real decoder use a test-double `ImageProcessor`; there is
+no image implementation. `test_tools_read_differential.py` translates the differential suite: 400
+random files and four offset/limit pairs each, plus an animated PNG found by walking its chunks.
 
 ### `src/tool-search/index.ts` → `pi_durable.tool_search`
 
@@ -559,10 +566,10 @@ SQLite backend and migrations.
 | 5.4 Scheduler, abort, and ownership | tested |
 | 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | tested |
-| 7 Extensions, hooks, tools, and system prompt | code (coding tools with #17, nested calls with #19, tool search with #20) |
+| 7 Extensions, hooks, tools, and system prompt | code (nested calls with #19, tool search with #20) |
 | 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #21) |
 | 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
-| 7.3 Tools | code (model-issued calls, hooks, output bounds, and replay; nested calls and structured output with #19, coding tools with #17) |
+| 7.3 Tools | code (model-issued calls, hooks, output bounds, replay, and the coding tools; nested calls and structured output with #19) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
@@ -680,6 +687,7 @@ an environment failure and a section that reads a document through `input.read`.
 | Hook names | camelCase (`beforeRequest`, `afterResponse`, `onYield`) | camelCase, because extensions register handlers by these names |
 | Host execution backend | `NodeExecutionEnv`, native or polling watches | `PosixExecutionEnv` with polling watches; `mode` is accepted but the portable backend always polls |
 | Execution environment options and result fields | camelCase result fields and option keys | `FileInfo`, `LineScan`, and `ShellExecResult` keep camelCase wire fields (`mtimeMs`, `firstLineEnd`, `exitCode`, `spillPath`); Python-facing option dicts use snake_case (`start_line`, `inherit_env`, `on_output`, `max_entries`, `after_bytes`) |
+| Tool path resolution | the environment resolves relative and absolute paths, with no confinement | resolved against the environment and confined to its `cwd`; a path outside it raises `ValueError` |
 | Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()`, with the caller supplying a `FileSystem` or a `SqliteDatabase`; file-backed SQLite opens through `open_posix_sqlite_storage()` |
 | `Result` values | `{ ok: true, value }` / `{ ok: false, error }` object literals | frozen `Ok(value)` / `Err(error)` dataclasses with the same `ok` role and `value`/`error` fields |
 | Storage conformance registration | Vitest's runtime `describe`/`it` globals | `create_storage_conformance` cases are parametrized by pytest; `register_storage_conformance` keeps the runner-injection protocol |
@@ -729,7 +737,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
 | Kept context ranges for extended reads and retention | `pi_durable.harness.context` | tested (`test_harness_context_ranges.py`) |
 | System prompt replay, section rendering, and positional entry planning | `pi_durable.harness.prompt` | tested (`test_harness_prompt.py`, `test_system_order_cache_e2e.py`) |
-| Model protocol plus pi-ai retry and overflow classifiers | `pi_durable.providers` | tested (`test_harness_generation.py`, `test_harness_usage.py`) |
+| Model protocol (identity, input types, and input limits) plus pi-ai retry and overflow classifiers | `pi_durable.providers` | tested (`test_harness_generation.py`, `test_harness_usage.py`, `test_tools.py`) |
 | Live generation presentation and its complete-base rule | `pi_durable.harness.live`, `pi_durable.harness.generation` | tested (`test_harness_generation.py`, `test_harness_live_deltas.py`) |
 | Provider session identity and its UUIDv7 | `pi_durable.harness.provider` | tested (`test_harness_generation.py`, `test_provider_session_cache_e2e.py`) |
 | Per-conversation usage ledger and Session totals | `pi_durable.harness.usage` | tested (`test_harness_usage.py`, `test_harness_generation.py`) |
@@ -754,8 +762,8 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 4. Tasks, scheduler, submissions, document observation.
 - [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
       Compaction status in `pi.live` lands with #21.
-- [ ] 6. `env`, coding tools, `tool-search`. The `env` suite landed in #16; coding tools (#17) and
-      `tool-search` (#20) remain.
+- [ ] 6. `env`, coding tools, `tool-search`. `env` (#16) and the coding tools (#17) landed;
+      `tool-search` (#20) remains.
 - [ ] 7. Compaction, events/view, task graph, extension reload.
 - [ ] 8. Full translated suite green, docs, version `1.3.0`, release.
 

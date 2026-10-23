@@ -18,13 +18,18 @@ DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000
 
 @dataclass(frozen=True, slots=True)
 class Model:
-    """One provider model's identity and limits."""
+    """One provider model's identity, limits, and input capabilities."""
 
     provider: str
     model_id: str
     context_window: int = 0
     max_tokens: int = 0
     reasoning: bool = True
+    input: tuple[str, ...] = ("text", "image")
+    """What the model takes inline; ``"image"`` enables the ``read`` image placeholder rule."""
+
+    input_limits: Mapping[str, Any] | None = None
+    """Per-input limits, such as ``{"images": {"resize": {"max_width": 2000}}}``."""
 
 
 class AssistantMessageStream(Protocol):
