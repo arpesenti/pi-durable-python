@@ -5,9 +5,9 @@ JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Conte
 the Storage protocol, the Session kernel, document definitions, task definitions, context
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
-built-in generation and tool tasks, nested tool calls with structured output, provider identity,
-and the usage ledger are included; the `tool_search` subpath adds BM25 deferred-tool discovery.
-Compaction and the observation surfaces arrive in later tickets.
+built-in generation, compaction, and tool tasks, nested tool calls with structured output, provider
+identity, and the usage ledger are included; the `tool_search` subpath adds BM25 deferred-tool
+discovery. The observation surfaces arrive in later tickets.
 """
 
 from .documents import (
@@ -46,6 +46,12 @@ from .harness.agent import (
     add_tools,
     configure,
 )
+from .harness.compaction import (
+    CompactionCheckpoint,
+    CompactionInput,
+    CompactionTask,
+    SummaryRequest,
+)
 from .harness.define import (
     define_extension,
     define_tool,
@@ -62,7 +68,15 @@ from .harness.generation import (
 )
 from .harness.harness import Harness
 from .harness.inbox import InboxDoc, InboxItem, InboxState
-from .harness.live import LiveDoc, LiveState, NestedToolSlot, NestedToolSummary, ToolSlot
+from .harness.live import (
+    CompactionFailure,
+    CompactionStatus,
+    LiveDoc,
+    LiveState,
+    NestedToolSlot,
+    NestedToolSummary,
+    ToolSlot,
+)
 from .harness.provider import ProviderDoc, ProviderState
 from .harness.registry import create_registry
 from .harness.tool import (
@@ -80,6 +94,8 @@ from .harness.types import (
     AnyTask,
     CompactionHooks,
     CompactionPolicy,
+    CompactionReason,
+    CompactionResult,
     ContextView,
     Conversation,
     ConversationAbortOptions,
@@ -145,9 +161,16 @@ __all__ = [
     "AnyTask",
     "AssistantEntry",
     "CommonDocDefinition",
+    "CompactionCheckpoint",
     "CompactionEntry",
+    "CompactionFailure",
     "CompactionHooks",
+    "CompactionInput",
     "CompactionPolicy",
+    "CompactionReason",
+    "CompactionResult",
+    "CompactionStatus",
+    "CompactionTask",
     "configure",
     "ContextView",
     "Conversation",
@@ -236,6 +259,7 @@ __all__ = [
     "StorageRequestError",
     "Submission",
     "SubmissionDraft",
+    "SummaryRequest",
     "SystemEntry",
     "Task",
     "TaskDefinition",

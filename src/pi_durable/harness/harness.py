@@ -23,8 +23,9 @@ from ..types import (
     TaskRecord,
 )
 from .agent import AgentDoc, configure, create_agent, resolve_agent, resolve_settings
+from .compaction import create_compaction
 from .inbox import InboxDoc, QueueModes, withdraw_queued_inputs
-from .live import GENERATION_TASK_NAME, LiveDoc, settle_scheduler_outcome, start_run
+from .live import LiveDoc, settle_scheduler_outcome, start_generation
 from .provider import ProviderDoc
 from .registry import BUILTIN_TASKS
 from .scheduler import TaskScheduler
@@ -200,7 +201,14 @@ class ConversationHandleImpl:
         await self._harness._tasks.wait_for_idle(self.id, context)
 
     async def compact(self, instructions: str | None, context: Context) -> TaskId:
-        raise NotImplementedError("Compaction arrives with the built-in tasks")
+        self._harness.resume()
+        value: dict[str, Any] = {"reason": "manual"}
+        if instructions is not None:
+            value["instructions"] = instructions
+        return cast(
+            TaskId,
+            await self.commit(lambda tx: create_compaction(tx, self.id, cast(Any, value)), context),
+        )
 
     async def reset(self, handoff: str | None, context: Context) -> None:
         entry: dict[str, Any] = {"kind": ResetEntry.kind, "head": "self"}
@@ -483,12 +491,8 @@ class Harness(SessionImpl):
     async def _start_run(
         self, tx: Transaction, conversation_id: ConversationId, live: Any, inputs: list[Any]
     ) -> None:
-        task = cast(RegistryReader, self._options["registry"]).snapshot().task(
-            GENERATION_TASK_NAME
-        )
-        if task is None:
-            raise RuntimeError("Registry lacks the pi.generation task")
-        await start_run(tx, conversation_id, live, inputs, task)
+        registry = cast(RegistryReader, self._options["registry"]).snapshot()
+        await start_generation(tx, conversation_id, live, inputs, registry)
 
     # ── Internal scheduler callbacks ───────────────────────────────────────
 

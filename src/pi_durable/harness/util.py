@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Hashable
-from typing import Any, Generic, TypeVar
+from collections.abc import Awaitable, Callable, Hashable, Mapping
+from typing import Any, Generic, TypeVar, cast
 
 from ..context import AbortError, AbortSignal, Context
 from ..errors import SessionFailed
-from ..types import Cursor, Page
+from ..json import JsonObject
+from ..types import Cursor, Page, TaskRecord
 
 T = TypeVar("T")
 K = TypeVar("K", bound=Hashable)
@@ -157,13 +158,47 @@ def _is_array(value: Any) -> bool:
     return isinstance(value, (list, DraftList))
 
 
+#: Host-facing settings use PEP 8 names; provider options and persisted checkpoints use the
+#: camelCase pi-ai request shape.
+_STREAM_OPTION_KEYS = {
+    "timeout_ms": "timeoutMs",
+    "max_retries": "maxRetries",
+    "max_retry_delay_ms": "maxRetryDelayMs",
+    "cache_retention": "cacheRetention",
+}
+
+
+def task_checkpoint(task: TaskRecord) -> dict[str, Any]:
+    """The checkpoint a task's current phase reads."""
+
+    return cast(dict[str, Any], task["state"]["checkpoint"])
+
+
+async def call_hook(handler: Callable[..., Any], *args: Any) -> Any:
+    """Call a hook with only the arguments it declares and await a returned awaitable."""
+
+    result = call_with_args(handler, *args)
+    if hasattr(result, "__await__"):
+        return await cast(Awaitable[Any], result)
+    return result
+
+
+def request_stream_options(stream: Mapping[str, Any]) -> JsonObject:
+    """Map Python-facing stream settings to the camelCase provider request shape."""
+
+    return cast(JsonObject, {_STREAM_OPTION_KEYS.get(key, key): value for key, value in stream.items()})
+
+
 __all__ = [
     "Waiters",
     "assign_json",
+    "call_hook",
     "call_with_args",
     "cancellation_error",
     "closed_error",
     "rejected",
+    "request_stream_options",
     "resolved",
     "scan_all",
+    "task_checkpoint",
 ]

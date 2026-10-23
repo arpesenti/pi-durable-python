@@ -8,10 +8,12 @@ overflow utilities generation uses to decide an attempt's outcome.
 
 from __future__ import annotations
 
+import json
+import math
 import re
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60_000
 
@@ -90,6 +92,103 @@ class Models(Protocol):
 
 
 # ── Usage and token estimates ───────────────────────────────────────────────
+
+CHARS_PER_TOKEN = 3.5
+ESTIMATED_IMAGE_CHARS = 4800
+
+
+def calculate_context_tokens(usage: Mapping[str, Any]) -> int:
+    """The tokens a response's usage counts against its context window."""
+
+    total = usage.get("totalTokens")
+    if total:
+        return int(total)
+    return (
+        int(usage.get("input", 0))
+        + int(usage.get("output", 0))
+        + int(usage.get("cacheRead", 0))
+        + int(usage.get("cacheWrite", 0))
+    )
+
+
+def estimate_text_tokens(text: str) -> int:
+    """pi-ai's text estimate: one token per 3.5 characters, rounded up."""
+
+    return math.ceil(len(text) / CHARS_PER_TOKEN)
+
+
+def estimate_text_and_image_content_tokens(content: Any) -> int:
+    """Estimate a user or tool-result content: text characters plus a fixed cost per image."""
+
+    return math.ceil(_content_chars(content) / CHARS_PER_TOKEN)
+
+
+def estimate_message_tokens(message: Mapping[str, Any]) -> int:
+    """pi-ai's ``estimateMessageTokens()``, the estimate range selection and thresholds use."""
+
+    role = message.get("role")
+    if role == "system":
+        return (
+            estimate_text_tokens(_system_message_text(message))
+            + _estimate_tools_tokens(message.get("toolsAdded"))
+            + _estimate_tools_tokens(message.get("toolsRemoved"))
+        )
+    if role in ("user", "toolResult"):
+        return estimate_text_and_image_content_tokens(message.get("content"))
+    chars = 0
+    for block in cast(Sequence[Mapping[str, Any]], message.get("content") or ()):
+        kind = block.get("type")
+        if kind == "text":
+            chars += len(cast(str, block.get("text") or ""))
+        elif kind == "thinking":
+            chars += len(cast(str, block.get("thinking") or ""))
+        else:
+            chars += len(cast(str, block.get("name") or "")) + len(_safe_json(block.get("arguments")))
+    return math.ceil(chars / CHARS_PER_TOKEN)
+
+
+def _content_chars(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+    chars = 0
+    for block in cast(Sequence[Mapping[str, Any]], content or ()):
+        if block.get("type") == "text":
+            chars += len(cast(str, block.get("text") or ""))
+        else:
+            chars += ESTIMATED_IMAGE_CHARS
+    return chars
+
+
+def _system_message_text(message: Mapping[str, Any]) -> str:
+    """A system message as a complete prompt: its content followed by its sections."""
+
+    content = message.get("content")
+    parts = [content if isinstance(content, str) else _text_of(content)]
+    for value in cast(Mapping[str, str | None], message.get("sections") or {}).values():
+        if value is not None:
+            parts.append(value)
+    return "\n\n".join(part for part in parts if part)
+
+
+def _text_of(content: Any) -> str:
+    return "\n".join(
+        cast(str, block.get("text") or "")
+        for block in cast(Sequence[Mapping[str, Any]], content or ())
+        if block.get("type") == "text"
+    )
+
+
+def _estimate_tools_tokens(tools: Any) -> int:
+    if not tools:
+        return 0
+    return estimate_text_tokens(_safe_json(tools))
+
+
+def _safe_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "[unserializable]"
 
 
 # ── Retry classification ────────────────────────────────────────────────────

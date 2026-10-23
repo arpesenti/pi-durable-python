@@ -4,8 +4,9 @@ Port of v1.3.0 ``src/harness/generation.ts``. The run's inputs live in ``pi.live
 stream through the model protocol; partials are throttled durable commits into ``pi.live`` and are
 converted to aborted assistant entries when an attempt is interrupted. A tool-calling answer starts
 a tool round: one ``pi.tool`` task per call, owned by the generation, which the ``tools`` phase
-waits on and then ends with the round's controls. Compaction is a separate ticket; its branches are
-marked where they will hook in.
+waits on and then ends with the round's controls. Preparation starts a threshold compaction when the
+context estimate crosses a policy threshold, and classification starts an overflow compaction, both
+owned by the generation so the run waits for the summary.
 """
 
 from __future__ import annotations
@@ -28,31 +29,17 @@ from ..session.transaction import Transaction
 from ..tasks import define_task
 from ..types import EntryDraft, MessageRecord, TaskRecord
 from .agent import add_tools
+from .compaction import create_compaction, estimate_context, select_cut
 from .inbox import QueueModes, apply_boundary, prepare_boundary
 from .live import LiveDoc, end_run, start_run
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
-from .types import ModelRef, PromptInput
+from .types import ContextView, ModelRef, PromptInput
 from .usage import record_usage
-from .util import assign_json, call_with_args
+from .util import assign_json, call_hook, request_stream_options, task_checkpoint
 
 DEFAULT_POLL_AFTER_MS = 5_000
-
-#: Host-facing settings use PEP 8 names; provider options and persisted checkpoints use the camelCase
-#: pi-ai request shape.
-_STREAM_OPTION_KEYS = {
-    "timeout_ms": "timeoutMs",
-    "max_retries": "maxRetries",
-    "max_retry_delay_ms": "maxRetryDelayMs",
-    "cache_retention": "cacheRetention",
-}
-
-
-def request_stream_options(stream: Mapping[str, Any]) -> dict[str, Any]:
-    """Map Python-facing stream settings to the camelCase provider request shape."""
-
-    return {_STREAM_OPTION_KEYS.get(key, key): value for key, value in stream.items()}
 
 
 class GenerationInput(TypedDict):
@@ -111,10 +98,6 @@ class GenerationResult(TypedDict):
     entryId: EntryId
 
 
-def _checkpoint(task: TaskRecord) -> dict[str, Any]:
-    return cast(dict[str, Any], task["state"]["checkpoint"])
-
-
 def _prepare(attempt: int, **extra: Any) -> dict[str, Any]:
     return {"phase": "prepare", "attempt": attempt, **extra}
 
@@ -132,7 +115,7 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
     if ref is None or model is None:
         await fail_no_model(runtime, ref, context)
         return
-    checkpoint = _checkpoint(task)
+    checkpoint = task_checkpoint(task)
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     overflow = checkpoint.get("overflow")
@@ -168,8 +151,32 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
     )
     desired = await render_sections(agent.sections, prompt_input, shown, report, context)
     entries = plan_system_entries(view, desired, agent.tools, runtime.now())
-    # Threshold and overflow compaction land with the compaction ticket. Until then every request
-    # is sent and an overflow fails like any other non-retryable model error.
+    threshold = (
+        None
+        if compacted is not None
+        else threshold_compaction(view, entries, model.context_window, settings.compaction)
+    )
+    if threshold == "blocking":
+        # Compact first and prepare again; the transcript is unchanged until the compaction appends.
+
+        async def compact(tx: Transaction) -> dict[str, Any]:
+            child = await create_compaction(tx, conversation_id, {"reason": "threshold"}, runtime.task_id)
+            checkpoint_value: dict[str, Any] = {
+                "phase": "prepare",
+                "attempt": attempt,
+                **_compact_fields(compacted),
+                "compacted": child,
+                "threshold": True,
+            }
+            return {
+                "status": "waiting",
+                "checkpoint": checkpoint_value,
+                "on": [child],
+                "policy": "allSettled",
+            }
+
+        await runtime.commit(compact, context)
+        return
 
     async def request_commit(tx: Transaction) -> dict[str, Any]:
         page = await tx.scan_entries({"conversationId": conversation_id}, 1)
@@ -182,6 +189,10 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
             )["id"]
         if cutoff is None:
             raise RuntimeError(f"Conversation {conversation_id} has no entries to send")
+        # Checked in this commit, so a compaction admitted during preparation counts.
+        live = await tx.doc(LiveDoc, conversation_id)
+        if threshold == "background" and live.get("compactions") is None:
+            await create_compaction(tx, conversation_id, {"reason": "threshold"})
         checkpoint_value: dict[str, Any] = {
             "phase": "request",
             "attempt": attempt,
@@ -197,7 +208,7 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
 
 async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
-    checkpoint = _checkpoint(task)
+    checkpoint = task_checkpoint(task)
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     ref = cast(ModelRef, checkpoint["model"])
@@ -221,7 +232,7 @@ async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
     async def before_request(handler: Callable[..., Any]) -> None:
         nonlocal messages
-        replaced = await _call(handler, {"messages": messages}, runtime, context)
+        replaced = await call_hook(handler, {"messages": messages}, runtime, context)
         if replaced is not None:
             value = replaced.get("messages") if isinstance(replaced, Mapping) else None
             if value is not None:
@@ -247,7 +258,7 @@ async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
 
 async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
-    checkpoint = _checkpoint(task)
+    checkpoint = task_checkpoint(task)
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     await runtime.sleep(int(checkpoint["until"]), context)
@@ -265,7 +276,7 @@ async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None
 
 
 async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
-    checkpoint = _checkpoint(task)
+    checkpoint = task_checkpoint(task)
     ref = cast(ModelRef, checkpoint["model"])
     model = runtime.models.get_model(ref["provider"], ref["modelId"])
     if model is None:
@@ -290,7 +301,7 @@ async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
 
 
 async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
-    checkpoint = cast(ToolsCheckpoint, _checkpoint(task))
+    checkpoint = cast(ToolsCheckpoint, task_checkpoint(task))
     assistant = checkpoint["assistant"]
     started = list(checkpoint["tools"])
     pending = list(checkpoint["pending"])
@@ -319,7 +330,7 @@ async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None
 
 
 async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
-    checkpoint = _checkpoint(task)
+    checkpoint = task_checkpoint(task)
     if checkpoint["phase"] == "poll":
         ref = cast(ModelRef, checkpoint["model"])
         model = runtime.models.get_model(ref["provider"], ref["modelId"])
@@ -371,13 +382,6 @@ GenerationTask = define_task(
         "abort": _abort,
     }
 )
-
-
-async def _call(handler: Callable[..., Any], *args: Any) -> Any:
-    result = call_with_args(handler, *args)
-    if hasattr(result, "__await__"):
-        return await cast(Awaitable[Any], result)
-    return result
 
 
 def _delay(seconds: float) -> Awaitable[None]:
@@ -526,7 +530,7 @@ async def classify(
         return
 
     async def after_response(handler: Callable[..., Any]) -> None:
-        await _call(handler, message, runtime, context)
+        await call_hook(handler, message, runtime, context)
 
     await runtime.hooks.each("afterResponse", after_response)
     calls = [
@@ -542,9 +546,36 @@ async def classify(
         return
 
     settings = runtime.settings
-    # Threshold and overflow compaction land with the compaction ticket. Until then an overflow is
-    # classified like any other non-retryable error.
     overflow = message.get("stopReason") == "error" and is_context_overflow(message)
+    if overflow and compacted is None and settings.compaction.get("enabled"):
+        policy = settings.compaction
+        view = await runtime.context(conversation_id, context, {"at": cutoff})
+        if select_cut(view, int(policy.get("keep_recent_tokens", 0))) is not None:
+            text = str(message.get("errorMessage") or "Context overflow")
+
+            async def compact(tx: Transaction) -> dict[str, Any]:
+                live = await tx.doc(LiveDoc, conversation_id)
+                await append_assistant(tx, conversation_id, message)
+                del live["generation"]
+                child = await create_compaction(
+                    tx, conversation_id, {"reason": "overflow"}, runtime.task_id
+                )
+                checkpoint_value: dict[str, Any] = {
+                    "phase": "prepare",
+                    "attempt": attempt,
+                    **_compact_fields(compacted),
+                    "compacted": child,
+                    "overflow": text,
+                }
+                return {
+                    "status": "waiting",
+                    "checkpoint": checkpoint_value,
+                    "on": [child],
+                    "policy": "allSettled",
+                }
+
+            await runtime.commit(compact, context)
+            return
     policy = settings.retry
     retry = (
         message.get("stopReason") == "error"
@@ -600,7 +631,7 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
         nonlocal continuation
         if continuation is not None:
             return
-        result = await _call(handler, message, runtime, context)
+        result = await call_hook(handler, message, runtime, context)
         if isinstance(result, Mapping):
             continuation = result.get("continue")
 
@@ -789,7 +820,7 @@ async def finish_tool_round(
     results = [slot["entry"] for slot in slots if slot.get("entry") is not None]
 
     async def after_tools(handler: Callable[..., Any]) -> None:
-        await _call(handler, assistant, results, runtime, context)
+        await call_hook(handler, assistant, results, runtime, context)
 
     await runtime.hooks.each("afterTools", after_tools)
     # Every call of the round, including those answered without a task, must ask to terminate.
@@ -920,6 +951,41 @@ def compaction_failure(outcome: Mapping[str, Any]) -> str:
     return "Compaction was aborted"
 
 
+def threshold_compaction(
+    view: ContextView,
+    planned: Sequence[Mapping[str, Any]],
+    context_window: int,
+    policy: Mapping[str, Any],
+) -> str | None:
+    """Which threshold compaction preparation starts before its request (spec section 8.3).
+
+    ``blocking`` above ``contextWindow - reserveTokens``, ``background`` above the background
+    threshold, and only when range selection finds a cut. The caller starts a background one only
+    while no compaction is listed.
+    """
+
+    if not policy.get("enabled") or context_window <= 0:
+        return None
+    planned_messages = [
+        message
+        for entry in planned
+        for message in cast(Sequence[Mapping[str, Any]], entry.get("model") or ())
+    ]
+    tokens = estimate_context(view, planned_messages)
+    blocking = context_window - int(policy.get("reserve_tokens", 0))
+    background = blocking - int(policy.get("background_tokens", 0))
+    over = (
+        "blocking"
+        if tokens > blocking
+        else "background"
+        if int(policy.get("background_tokens", 0)) > 0 and tokens > background
+        else None
+    )
+    if over is None or select_cut(view, int(policy.get("keep_recent_tokens", 0))) is None:
+        return None
+    return over
+
+
 async def convert_partial(
     tx: Transaction, live: Any, conversation_id: ConversationId
 ) -> None:
@@ -1009,4 +1075,5 @@ __all__ = [
     "fail_no_model",
     "hand_over",
     "stream_response",
+    "threshold_compaction",
 ]

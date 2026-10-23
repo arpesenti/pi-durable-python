@@ -76,10 +76,10 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `CompactionTask` | value | `CompactionTask` | — | planned |
-| `CompactionCheckpoint` | type | `CompactionCheckpoint` | — | planned |
-| `CompactionInput` | type | `CompactionInput` | — | planned |
-| `SummaryRequest` | type | `SummaryRequest` | — | planned |
+| `CompactionTask` | value | `CompactionTask` | test_harness_compaction.py | tested |
+| `CompactionCheckpoint` | type | `CompactionCheckpoint` | test_harness_compaction.py | tested (including the recovery cases) |
+| `CompactionInput` | type | `CompactionInput` | test_harness_compaction.py | tested |
+| `SummaryRequest` | type | `SummaryRequest` | test_harness_compaction.py | tested |
 
 ### `./harness/define.ts` → `pi_durable.harness.define`
 
@@ -133,8 +133,8 @@ is green.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py | tested |
-| `CompactionFailure` | type | `CompactionFailure` | — | planned (#21) |
-| `CompactionStatus` | type | `CompactionStatus` | — | planned (#21) |
+| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py | tested (live status; the event stream arrives with #22) |
+| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py | tested (live status; the event stream arrives with #22) |
 | `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
 | `NestedToolSummary` | type | `NestedToolSummary` | test_harness_nested_tools.py | tested |
@@ -183,12 +183,12 @@ is green.
 | `AgentChange` | type | `AgentChange` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `AgentState` | type | `AgentState` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `AnyTask` | type | `AnyTask` | test_harness_tasks.py, test_harness_ownership.py | tested |
-| `CompactionHooks` | type | `CompactionHooks` | — | code (#21) |
-| `CompactionPolicy` | type | `CompactionPolicy` | test_harness_generation.py | tested |
-| `CompactionReason` | type | `CompactionReason` | — | planned |
-| `CompactionResult` | type | `CompactionResult` | — | planned |
+| `CompactionHooks` | type | `CompactionHooks` | test_harness_compaction.py | tested |
+| `CompactionPolicy` | type | `CompactionPolicy` | test_harness_generation.py, test_harness_compaction.py | tested |
+| `CompactionReason` | type | `CompactionReason` | test_harness_compaction.py | tested |
+| `CompactionResult` | type | `CompactionResult` | test_harness_compaction.py | tested |
 | `ContextView` | type | `ContextView` | test_harness_context.py | tested |
-| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py | tested (creation, fork, agent, context, entries, reset, abort, and idle waits; compaction with #21, view/watch with #22) |
+| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py, test_harness_compaction.py | tested (creation, fork, agent, context, entries, compact, reset, abort, and idle waits; view/watch with #22) |
 | `ConversationAbortOptions` | type | `ConversationAbortOptions` | test_harness_ownership.py | tested |
 | `ConversationCreateOptions` | type | `ConversationCreateOptions` | test_harness_conversations.py | tested |
 | `ConversationHandle` | type | `ConversationHandle` | test_harness_ownership.py | tested |
@@ -562,7 +562,7 @@ SQLite backend and migrations.
 | 1 Terms and invariants | code |
 | 2 Core records | tested |
 | 2.1 Entries and context | tested |
-| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, and root lazy creation with #15; compaction with #21 and the view/watch surface with #22) |
+| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, compaction, and root lazy creation with #15; the view/watch surface with #22) |
 | 3 Documents | code |
 | 3.1 Definitions | tested |
 | 3.2 Records and lifetimes | tested |
@@ -580,20 +580,20 @@ SQLite backend and migrations.
 | 5.5 Structured concurrency | tested |
 | 6 Submissions and inbox | tested |
 | 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
-| 7.1 Extensions, registry, and agent resolution | tested (built-in tasks with #21) |
+| 7.1 Extensions, registry, and agent resolution | tested (built-in tasks) |
 | 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
 | 7.3 Tools | tested (model-issued and nested calls, hooks, output bounds, replay, structured output, and the coding tools) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
-| 8 Built-in tasks | code (generation and tool; compaction with #21) |
-| 8.1 Built-in entries | code (`pi.user`, `pi.assistant`, `pi.system`, `pi.tool-result`, and `pi.reset`; `pi.compaction` with #21) |
-| 8.2 Live document | code (run, generation, tool and nested slots, and the complete-base rule; compaction status with #21) |
-| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, tool rounds, and reopen recovery in test_harness_generation_recovery.py; threshold/overflow compaction with #21) |
+| 8 Built-in tasks | tested (generation, compaction, and tool) |
+| 8.1 Built-in entries | tested (`pi.user`, `pi.assistant`, `pi.system`, `pi.tool-result`, `pi.reset`, and `pi.compaction`) |
+| 8.2 Live document | tested (run, generation, tool and nested slots, the complete-base rule, compaction status, and compaction failure) |
+| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, tool rounds, threshold and overflow compaction, and reopen recovery in test_harness_generation_recovery.py and test_harness_compaction.py) |
 | 8.4 Tool | tested (model-issued and nested calls) |
 | 8.5 Tool rounds | tested |
 | 8.6 Usage | tested |
-| 8.7 Compaction | planned |
+| 8.7 Compaction | tested (range selection, serialization, manual/background/blocking starts, retry backoff, placement, abort, failure, and recovery in test_harness_compaction.py; event ordering with #22) |
 | 9 Document observation and Chord | code |
 | 9.1 Document state | tested |
 | 9.2 `watchDoc` | tested |
@@ -662,10 +662,10 @@ same-name tool replacement, wrapper order, and tool filters; wrapper throw/renam
 reports; section ordering, same-key replacement, and the unwrapped `instructions` section; hook
 collection in extension order; and the stored-agent defaults. Hook dispatch order and ordinary-throw
 containment, plus reload of an extension in a live Session at its next phase, are covered there too.
-The registry holds the built-in `pi.generation` and `pi.tool` tasks; `pi.compaction` joins with
-#21, so the built-in-task case is complete for the tasks that exist. The per-hook composition rules
-for tool hooks (replacement chains, first-block wins) are covered by `test_harness_tools.py`, and
-compaction's arrive with #21. The `pi.generation` task-collision row is translated. The resolution
+The registry holds the built-in `pi.generation`, `pi.compaction`, and `pi.tool` tasks. The per-hook
+composition rules for tool hooks (replacement chains, first-block wins) are covered by
+`test_harness_tools.py`; compaction's single `beforeCompact` decision rule is covered by
+`test_harness_compaction.py`. The `pi.generation` task-collision row is translated. The resolution
 half of `harness-callers` is translated alongside: model-only, tools-only, and both callers;
 `modelTools` narrowing without widening what tools may call; enabled filters; and deferred-tool
 resolution through an array or `{remove, add}` (a superset of the upstream resolution cases). Its
@@ -673,6 +673,16 @@ nested `executeTool` end-to-end cases now run in `test_harness_nested_tools.py`,
 cases in `test_harness_tools.py`; `add_tools` (the tool-round edit of
 `tools`/`modelTools`) is covered there, and the deferred-loading half through `{add}` is exercised
 by the resolution cases and end to end in `test_tool_search.py`.
+
+The upstream `harness-compaction` suite is translated in `test_harness_compaction.py`: range
+selection and the context estimate, transcript serialization, manual placement through a write
+submission and its idle/busy/reset outcomes, `beforeCompact` decisions, retry backoff with a pinned
+request, cap and failure classification, background and blocking thresholds, overflow compaction
+and its retry, fork and inbox interactions, recovery across reopen, concurrent summaries, the
+one-compaction rule, and the older-head-marker edits. Its `compaction_start`/`compaction_end`
+ordering, late-joiner snapshots, and kept-entry view assertions read `watchEvents` and
+`viewState`, so they stay skipped until the observation surface (#22); the same committed state is
+checked through `pi.live`, the task outcome, submissions, and the context view.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
@@ -768,7 +778,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
 | Kept context ranges for extended reads and retention | `pi_durable.harness.context` | tested (`test_harness_context_ranges.py`) |
 | System prompt replay, section rendering, and positional entry planning | `pi_durable.harness.prompt` | tested (`test_harness_prompt.py`, `test_system_order_cache_e2e.py`) |
-| Model protocol (identity, input types, and input limits) plus pi-ai retry and overflow classifiers | `pi_durable.providers` | tested (`test_harness_generation.py`, `test_harness_usage.py`, `test_tools.py`) |
+| Model protocol (identity, input types, and input limits) plus pi-ai retry, overflow, and token-estimate classifiers | `pi_durable.providers` | tested (`test_harness_generation.py`, `test_harness_usage.py`, `test_tools.py`, `test_harness_compaction.py`) |
 | Live generation presentation and its complete-base rule | `pi_durable.harness.live`, `pi_durable.harness.generation` | tested (`test_harness_generation.py`, `test_harness_live_deltas.py`) |
 | Provider session identity and its UUIDv7 | `pi_durable.harness.provider` | tested (`test_harness_generation.py`, `test_provider_session_cache_e2e.py`) |
 | Per-conversation usage ledger and Session totals | `pi_durable.harness.usage` | tested (`test_harness_usage.py`, `test_harness_generation.py`) |
@@ -793,9 +803,8 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 3. Storage: memory, JSONL, SQLite, conformance suites.
 - [x] 4. Tasks, scheduler, submissions, document observation.
 - [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
-      Compaction status in `pi.live` lands with #21.
 - [x] 6. `env`, coding tools, `tool-search`.
-- [ ] 7. Compaction, events/view, task graph, extension reload.
+- [ ] 7. Events/view and task graph. Compaction and extension reload are done.
 - [ ] 8. Full translated suite green, docs, version `1.3.0`, release.
 
 ## Updating this file

@@ -2,11 +2,13 @@
 
 ``run`` is present exactly while a run owns the conversation. Generation publishes its attempt,
 partial, retry, and deferred state here; a tool call publishes throttled running output into its
-slot, model-issued or nested. Compaction status arrives with its ticket.
+slot, model-issued or nested. A compaction task lists its status here while it selects, summarizes,
+or waits out a retry backoff, and the newest failure stays for a client to show.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, NotRequired, TypedDict, cast
 
 from ..documents import define_doc
@@ -16,7 +18,7 @@ from ..json import JsonValue
 from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
 from ..types import SubmissionSettlement, TaskRecord
-from .types import ToolDiagnostic
+from .types import CompactionReason, ToolDiagnostic
 
 
 class RunState(TypedDict):
@@ -70,6 +72,24 @@ class NestedToolSlot(SlotProgress):
     summary: NotRequired[NestedToolSummary]
 
 
+class CompactionStatus(TypedDict, total=False):
+    """Presentation of one live compaction task (spec section 8.7)."""
+
+    taskId: TaskId
+    reason: CompactionReason
+    blocking: bool
+    attempt: int
+    retry: dict[str, JsonValue]
+
+
+class CompactionFailure(TypedDict):
+    """The newest compaction that failed since a compaction last produced a summary."""
+
+    taskId: TaskId
+    reason: CompactionReason
+    error: str
+
+
 class LiveState(TypedDict, total=False):
     """Built-in live conversation state."""
 
@@ -77,8 +97,8 @@ class LiveState(TypedDict, total=False):
     generation: dict[str, JsonValue]
     tools: list[ToolSlot]
     nestedTools: list[NestedToolSlot]
-    compactions: list[dict[str, JsonValue]]
-    compactionFailure: dict[str, JsonValue]
+    compactions: list[CompactionStatus]
+    compactionFailure: CompactionFailure
 
 
 def _checkpoint_when(value: dict[str, Any], _ops: Any, _info: Any) -> bool:
@@ -107,7 +127,23 @@ LiveDoc = define_doc(
 
 GENERATION_TASK_NAME = "pi.generation"
 TOOL_TASK_KIND = "pi.tool"
+COMPACTION_TASK_KIND = "pi.compaction"
 RUN_TASK_KINDS = frozenset({GENERATION_TASK_NAME})
+
+
+async def start_generation(
+    tx: Transaction,
+    conversation_id: ConversationId,
+    live: Any,
+    inputs: list[SubmissionId],
+    registry: Any,
+) -> None:
+    """Create the registry's generation task and give it run control of ``inputs``."""
+
+    task = registry.task(GENERATION_TASK_NAME)
+    if task is None:
+        raise RuntimeError("Registry lacks the pi.generation task")
+    await start_run(tx, conversation_id, live, inputs, task)
 
 
 async def start_run(
@@ -143,6 +179,59 @@ def end_run(
     for key in ("generation", "tools", "nestedTools"):
         if key in live:
             del live[key]
+
+
+def add_compaction_status(live: Any, status: Mapping[str, Any]) -> None:
+    """Add the status of a compaction task created in this commit; statuses stay in task ID order."""
+
+    statuses = live.get("compactions")
+    if statuses is None:
+        live["compactions"] = [dict(status)]
+    else:
+        statuses.append(dict(status))
+
+
+def compaction_status(live: Any, task_id: TaskId) -> Any:
+    """The status draft of compaction task ``task_id``, if listed."""
+
+    statuses = live.get("compactions")
+    if statuses is None:
+        return None
+    return next((status for status in statuses if status.get("taskId") == task_id), None)
+
+
+def remove_compaction_status(live: Any, task_id: TaskId) -> None:
+    """Remove the status of compaction task ``task_id``, and the list once empty."""
+
+    statuses = live.get("compactions")
+    if statuses is None:
+        return
+    for index in range(len(statuses)):
+        if statuses[index].get("taskId") == task_id:
+            del statuses[index]
+            break
+    if len(statuses) == 0:
+        del live["compactions"]
+
+
+def clear_compaction_failure(live: Any) -> None:
+    """Remove the recorded compaction failure, once a compaction produces a summary."""
+
+    if "compactionFailure" in live:
+        del live["compactionFailure"]
+
+
+def fail_compaction_status(live: Any, task_id: TaskId, error: str) -> None:
+    """Remove the status of compaction task ``task_id`` and record that it failed with ``error``."""
+
+    status = compaction_status(live, task_id)
+    if status is not None:
+        live["compactionFailure"] = {
+            "taskId": status["taskId"],
+            "reason": status["reason"],
+            "error": error,
+        }
+    remove_compaction_status(live, task_id)
 
 
 def tool_slot(live: Any, task_id: TaskId) -> Any:
@@ -216,6 +305,16 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
             finish_slot(slot)
         remove_nested_slots(live, record["id"])
         return
+    if record["kind"] == COMPACTION_TASK_KIND:
+        failure_text = (
+            str(cast(Mapping[str, Any], outcome.get("error") or {}).get("message", ""))
+            if outcome.get("status") == "faulted"
+            else str(outcome.get("reason", ""))
+        )
+        fail_compaction_status(
+            await tx.doc(LiveDoc, record["conversationId"]), record["id"], failure_text
+        )
+        return
     if record["kind"] not in RUN_TASK_KINDS:
         return
     live = await tx.doc(LiveDoc, record["conversationId"])
@@ -247,7 +346,10 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
 
 
 __all__ = [
+    "COMPACTION_TASK_KIND",
     "GENERATION_TASK_NAME",
+    "CompactionFailure",
+    "CompactionStatus",
     "LiveDoc",
     "LiveState",
     "NestedToolSlot",
@@ -256,11 +358,17 @@ __all__ = [
     "RunState",
     "TOOL_TASK_KIND",
     "ToolSlot",
+    "add_compaction_status",
+    "clear_compaction_failure",
     "clear_progress",
+    "compaction_status",
     "end_run",
+    "fail_compaction_status",
     "finish_slot",
+    "remove_compaction_status",
     "remove_nested_slots",
     "settle_scheduler_outcome",
+    "start_generation",
     "start_run",
     "tool_slot",
 ]

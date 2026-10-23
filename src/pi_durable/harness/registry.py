@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .agent import INSTRUCTIONS_KEY
+from .compaction import CompactionTask
 from .generation import GenerationTask
 from .tool import ToolTask
 from .types import (
@@ -18,8 +19,8 @@ from .types import (
 
 _SECTION_KEY = re.compile(r"^[a-z][a-z0-9_-]*$")
 
-#: Built-in task definitions every registry holds. The compaction task joins with its ticket.
-BUILTIN_TASKS: tuple[AnyTask, ...] = (GenerationTask, ToolTask)
+#: Built-in task definitions every registry holds.
+BUILTIN_TASKS: tuple[AnyTask, ...] = (GenerationTask, ToolTask, CompactionTask)
 
 
 class _RegistryState:

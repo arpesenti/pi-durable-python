@@ -113,5 +113,9 @@ module = ["test_sqlite_storage"]
 disable_error_code = ["call-overload", "index", "list-item", "misc", "typeddict-item"]
 
 [[tool.mypy.overrides]]
+module = ["test_harness_compaction"]
+disable_error_code = ["arg-type", "assignment", "call-overload", "index", "list-item", "method-assign", "misc", "operator", "typeddict-item", "union-attr"]
+
+[[tool.mypy.overrides]]
 module = ["pi_durable.harness.scheduler"]
 disable_error_code = ["arg-type", "assignment", "call-overload", "index", "misc", "return-value", "typeddict-item"]

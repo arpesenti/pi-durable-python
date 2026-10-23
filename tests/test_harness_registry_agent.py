@@ -13,7 +13,7 @@ import pytest
 from session_support import context
 from task_support import aborted_with, completed, deferred, open_tasks
 
-from pi_durable import GenerationTask, MemoryStorage, ToolTask
+from pi_durable import CompactionTask, GenerationTask, MemoryStorage, ToolTask
 from pi_durable.harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_RETRY_POLICY,
@@ -177,10 +177,11 @@ def test_holds_installed_task_definitions_and_removes_them_on_uninstall() -> Non
     assert [each.definition.name for each in registry.snapshot().tasks()] == [
         "pi.generation",
         "pi.tool",
+        "pi.compaction",
     ]
     custom = task("app.custom")
     registry.install(define_extension({"name": "custom", "tasks": [custom]}))
-    assert registry.snapshot().tasks() == [GenerationTask, ToolTask, custom]
+    assert registry.snapshot().tasks() == [GenerationTask, ToolTask, CompactionTask, custom]
     assert registry.snapshot().task("app.custom") is custom
     registry.uninstall(define_extension({"name": "custom"}))
     assert registry.snapshot().task("app.custom") is None

@@ -59,7 +59,7 @@ from .types import (
     ToolRegistration,
 )
 from .usage import record_usage
-from .util import assign_json, call_with_args
+from .util import assign_json, call_hook
 from .validation import (
     ToolArgumentError,
     structured_output_error,
@@ -193,7 +193,7 @@ async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
         if block is not None:
             return
         try:
-            decision = await _call(handler, {**call, "arguments": args}, runtime, context)
+            decision = await call_hook(handler, {**call, "arguments": args}, runtime, context)
             if isinstance(decision, Mapping):
                 if decision.get("block") is not None:
                     block = str(decision["block"])
@@ -830,7 +830,7 @@ async def final_result(
 
     async def after_tool(handler: Callable[..., Any]) -> None:
         nonlocal final
-        replaced = await _call(handler, call, final, runtime, context)
+        replaced = await call_hook(handler, call, final, runtime, context)
         if isinstance(replaced, Mapping):
             final = cast(ToolExecutionResult, dict(replaced))
 
@@ -1311,13 +1311,6 @@ def bound_content(content: Content, limits: OutputLimits) -> _BoundedContent:
     return _BoundedContent(
         content=result, dropped_bytes=bounded.dropped_bytes, dropped_lines=bounded.dropped_lines
     )
-
-
-async def _call(handler: Callable[..., Any], *args: Any) -> Any:
-    result = call_with_args(handler, *args)
-    if hasattr(result, "__await__"):
-        return await cast(Awaitable[Any], result)
-    return result
 
 
 def _reject(waiter: Any, error: BaseException) -> None:

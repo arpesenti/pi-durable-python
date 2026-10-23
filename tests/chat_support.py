@@ -238,6 +238,8 @@ class FauxModels:
         ] or [Model(provider="faux", model_id="faux-1", context_window=200_000, max_tokens=8_192)]
         self.responses: list[Step] = []
         self.requests: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        self.models_used: list[str] = []
+        self.current_model: Model | None = None
         self.call_count = 0
         self.deferred_fetch_count = 0
         self.cancelled_deferred: list[dict[str, Any]] = []
@@ -259,6 +261,7 @@ class FauxModels:
             steps[0].deferred_remaining = pending
         self.responses = steps
         self.requests = []
+        self.models_used = []
         self.call_count = 0
 
     def get_pending_response_count(self) -> int:
@@ -276,10 +279,11 @@ class FauxModels:
         request: Mapping[str, Any],
         options: Mapping[str, Any] | None = None,
     ) -> AssistantStream:
-        del model
         values = dict(options or {})
         request_value = cast(dict[str, Any], copy_json(dict(request)))
         self.requests.append((request_value, values))
+        self.models_used.append(model.model_id)
+        self.current_model = model
         self.call_count += 1
         if not self.responses:
             raise RuntimeError("No faux response is queued")

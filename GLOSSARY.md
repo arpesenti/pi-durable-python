@@ -44,3 +44,18 @@ _Avoid_: flush, drain, checkpoint
 The `pi.generation` task named by `pi.live.run` that owns the placed input submissions it must answer.
 A run is present exactly while the conversation is busy.
 _Avoid_: turn, request, generation
+
+**Compaction**:
+A `pi.compaction` task that replaces an old prefix of the model context with a summary entry.
+It is manual, threshold, or overflow; only a blocking one makes the run wait for it.
+_Avoid_: truncation, pruning
+
+**Cut**:
+The first entry a compaction keeps verbatim. Range selection picks it so the kept entries cover
+`keepRecentTokens`; the summary's `head` is the cut's entry ID.
+_Avoid_: boundary, split
+
+**Summary**:
+The `pi.compaction` entry a compaction places: the wrapped summary text as a user message, with
+`head` naming the cut and `data.reason` naming what started the compaction.
+_Avoid_: checkpoint, digest

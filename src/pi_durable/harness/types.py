@@ -355,6 +355,17 @@ class CompactionPolicy(TypedDict, total=False):
     background_tokens: int
 
 
+CompactionReason = Literal["manual", "threshold", "overflow"]
+"""What started a compaction task."""
+
+
+class CompactionResult(TypedDict, total=False):
+    """A blocking summary's ``entryId``, or a conversation-owned summary's ``submissionId``."""
+
+    entryId: EntryId
+    submissionId: SubmissionId
+
+
 class ProgressPolicy(TypedDict, total=False):
     """How often running progress is committed."""
 
@@ -614,8 +625,7 @@ class ConversationHandle(Protocol):
 class Conversation(Protocol):
     """Stateless handle for one conversation, bound to the Harness that returned it.
 
-    Compaction and the observation surfaces (``compact``, ``view_state``, ``watch``) arrive with
-    their own tickets.
+    The observation surfaces (``view_state``, ``watch``) arrive with their own ticket.
     """
 
     id: ConversationId
@@ -643,6 +653,8 @@ class Conversation(Protocol):
     async def fork(
         self, at: EntryId, options: ConversationCreateOptions, context: Context
     ) -> Conversation: ...
+
+    async def compact(self, instructions: str | None, context: Context) -> TaskId: ...
 
     async def reset(self, handoff: str | None, context: Context) -> None: ...
 
@@ -687,6 +699,8 @@ __all__ = [
     "CommonDocDefinition",
     "CompactionHooks",
     "CompactionPolicy",
+    "CompactionReason",
+    "CompactionResult",
     "ContextView",
     "Conversation",
     "ConversationAbortOptions",
