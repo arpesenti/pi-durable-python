@@ -7,7 +7,8 @@ derivation, the in-memory reference backend, and the durable task scheduler with
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
 built-in generation, compaction, and tool tasks, nested tool calls with structured output, provider
 identity, and the usage ledger are included; the `tool_search` subpath adds BM25 deferred-tool
-discovery, and the conversation view, agent event stream, and task graph expose committed state.
+discovery, the conversation view, agent event stream, and task graph expose committed state, and
+the optional `openai` and `anthropic` extras supply the model adapters generation streams through.
 """
 
 from .documents import (

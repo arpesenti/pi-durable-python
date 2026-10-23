@@ -1,8 +1,9 @@
 """Translated upstream ``provider-session-cache-e2e`` cases.
 
-The upstream suite performs a live Codex prompt-cache measurement and skips without credentials.
-The adapters land with the provider ticket, so the live measurement stays skipped here; the durable
-half — one provider session ID per conversation, reused on every request — runs against fake models.
+The upstream suite performs a live Codex prompt-cache measurement and skips without credentials, so
+that measurement stays skipped here. The durable half — one provider session ID per conversation,
+reused on every request — runs against fake models; test_providers_openai.py checks the adapter half
+by forwarding that identity as OpenAI's prompt-cache key.
 """
 
 from __future__ import annotations
@@ -20,12 +21,9 @@ from pi_durable import AssistantEntry, MemoryStorage, ProviderDoc, UsageDoc
 LIVE = bool(os.environ.get("OPENAI_CODEX_TOKEN"))
 
 
-@pytest.mark.skipif(
-    not LIVE,
-    reason="live Codex prompt-cache measurement needs credentials and the provider adapters",
-)
+@pytest.mark.skipif(not LIVE, reason="live Codex prompt-cache measurement needs credentials")
 async def test_reuses_the_codex_prompt_cache_across_durable_turns() -> None:
-    raise AssertionError("live provider adapters arrive with the provider ticket")
+    raise AssertionError("live credentials are required")
 
 
 async def test_forwards_one_session_id_for_every_turn_of_a_conversation() -> None:

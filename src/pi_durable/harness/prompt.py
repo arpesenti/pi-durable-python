@@ -15,6 +15,7 @@ from typing import Any, Never, NotRequired, TypedDict, cast
 from ..context import Context
 from ..entries import SystemEntry
 from ..json import JsonValue, copy_json
+from ..providers.transcript import current_tools as replay_tools
 from ..types import ContextEdit, MessageRecord, TypedEntryDraft
 from .types import ContextView, PromptInput, PromptSection, ToolRegistration
 
@@ -138,17 +139,12 @@ def _serialized(tool: ToolRegistration | Mapping[str, Any]) -> str:
 
 
 def current_tools(messages: Sequence[Mapping[str, Any]]) -> list[ToolDeclaration]:
-    """Resolve the tools available after applying every transcript delta in order."""
+    """Resolve the tools available after applying every transcript delta in order.
 
-    tools: dict[str, ToolDeclaration] = {}
-    for message in messages:
-        if message.get("role") != "system":
-            continue
-        for reference in cast(Sequence[Mapping[str, Any]], message.get("toolsRemoved") or []):
-            tools.pop(cast(str, reference["name"]), None)
-        for tool in cast(Sequence[Mapping[str, Any]], message.get("toolsAdded") or []):
-            tools[cast(str, tool["name"])] = cast(ToolDeclaration, dict(tool))
-    return list(tools.values())
+    The replay itself lives with the provider adapters, which read the same transcript.
+    """
+
+    return [cast(ToolDeclaration, tool) for tool in replay_tools(messages)]
 
 
 def plan_system_entries(

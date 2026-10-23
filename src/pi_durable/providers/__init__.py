@@ -33,6 +33,9 @@ class Model:
     input_limits: Mapping[str, Any] | None = None
     """Per-input limits, such as ``{"images": {"resize": {"max_width": 2000}}}``."""
 
+    cost: Mapping[str, float] | None = None
+    """Flat USD per million tokens: ``input``, ``output``, ``cacheRead``, and ``cacheWrite``."""
+
 
 class AssistantMessageStream(Protocol):
     """A pi-ai style stream: partial events while it runs, then the terminal message."""
@@ -162,20 +165,10 @@ def _content_chars(content: Any) -> int:
 def _system_message_text(message: Mapping[str, Any]) -> str:
     """A system message as a complete prompt: its content followed by its sections."""
 
-    content = message.get("content")
-    parts = [content if isinstance(content, str) else _text_of(content)]
-    for value in cast(Mapping[str, str | None], message.get("sections") or {}).values():
-        if value is not None:
-            parts.append(value)
-    return "\n\n".join(part for part in parts if part)
+    # Imported lazily because the transcript helpers live above ``Model`` in the package graph.
+    from .transcript import system_message_text
 
-
-def _text_of(content: Any) -> str:
-    return "\n".join(
-        cast(str, block.get("text") or "")
-        for block in cast(Sequence[Mapping[str, Any]], content or ())
-        if block.get("type") == "text"
-    )
+    return system_message_text(message)
 
 
 def _estimate_tools_tokens(tools: Any) -> int:

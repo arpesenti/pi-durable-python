@@ -562,7 +562,7 @@ SQLite backend and migrations.
 | 1 Terms and invariants | code |
 | 2 Core records | tested |
 | 2.1 Entries and context | tested |
-| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation with #15, and the view/watch/task-graph surfaces with #22) |
+| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation with #15, and the view/watch/task-graph surfaces with #22; OpenAI and Anthropic provider streaming in test_providers_openai.py and test_providers_anthropic.py) |
 | 3 Documents | code |
 | 3.1 Definitions | tested |
 | 3.2 Records and lifetimes | tested |
@@ -692,8 +692,9 @@ re-addition; minimal value/removal/addition patches; two-entry order rewrites; h
 omissions and complete post-head baselines; and tool add/remove/replace/order planning riding on
 the last section entry or an entry of its own. `system-order-cache-e2e` has two halves: the
 leading-baseline regression is translated against committed transcripts in
-`test_system_order_cache_e2e.py`; its live Anthropic prompt-cache measurement stays skipped until
-the Anthropic adapter (#23) exists. Generation's `prepare` phase now calls these planners and
+`test_system_order_cache_e2e.py`; its live Anthropic prompt-cache measurement needs live
+credentials, while the adapter's request ordering is covered with fakes in
+`test_providers_anthropic.py`. Generation's `prepare` phase now calls these planners and
 commits their entries; `test_harness_generation.py` covers the request-time integration, including
 an environment failure and a section that reads a document through `input.read`.
 
@@ -750,7 +751,18 @@ suite already translated with #9 and #10, and has no nested-call cases.
 | Storage close identity | `close()` returns one promise per call | `SqliteStorage.close()` returns the one shared `asyncio.Future`, so a repeated close is identity-stable and the database closes only once; the `Storage` protocol accepts any awaitable |
 | `Context` | Chord `Context` | minimal abort signal + value bag |
 | Model access | `pi-ai` dependency | `Model` protocol + OpenAI/Anthropic extras |
+| Provider coverage | pi-ai's full catalog and API list | `pi_durable.providers.openai` speaks OpenAI Chat Completions and `pi_durable.providers.anthropic` speaks Anthropic Messages; other APIs, OAuth flows, Bedrock, Vertex, and their compat switches are out of scope |
+| Provider model catalog | generated pi-ai model database | the caller passes a sequence of `Model` values to the adapter, which resolves `(provider, modelId)` through it; `Model.cost` holds flat USD-per-million-token rates for usage pricing, so pi-ai's `cost.tiers` long-context pricing is not applied |
+| Provider transport | pi-ai's own HTTP and SSE layer | the official `openai` / `anthropic` Python SDKs, imported only when the adapter needs a real client; the SDK's own retries are disabled and pi-ai's request-attempt retry policy is reimplemented against the SDK error shapes |
 | Provider request options | camelCase in `settings.stream` and the persisted checkpoint | snake_case on the Python-facing `ConversationStreamOptions` (`timeout_ms`, `max_retries`, `cache_retention`); generation maps them to the camelCase provider request and checkpoint shape |
+| Mid-conversation system messages | native system/tool-change beta blocks for capable models | both adapters replay every `pi.system` delta into one leading prompt and drop the later entries, pi-ai's default for models without verified mid-conversation support |
+| Provider deferred responses | `fetchDeferred()`/`cancelDeferred()` on capable APIs | the Chat Completions and Messages adapters never produce a `deferred` stop reason and raise `NotImplementedError` from the deferred methods |
+| Provider session identity | `sessionId` reaches every API that supports caching | the OpenAI adapter sends it as `prompt_cache_key` (64-character clamp) when cache retention is not `none`; Anthropic's cache control has no session field, so the adapter does not send it |
+| Thinking requests | pi-ai effort and adaptive-thinking parameters per model | the Anthropic adapter sends budget-based `thinking` (`budget_tokens` from the thinking level) and fits it under `max_tokens`; the OpenAI adapter sends `reasoning_effort` |
+| Thinking replay | signed reasoning fields replayed for matching models | both adapters drop thinking from another model; the OpenAI adapter sends no thinking back to Chat Completions, which has no portable field for it |
+| OpenAI max tokens | `max_completion_tokens` or `max_tokens` chosen per endpoint compat | always `max_completion_tokens` |
+| Streaming tool-call arguments | partial arguments parsed with `partial-json` while deltas arrive | the finished call carries the assembled arguments; while streaming, arguments stay `{}` until their text parses, so no partial-JSON dependency is needed |
+| Anthropic error tool results with images | images split out of an error result and sent after it | images stay in the `tool_result` block; splitting them is not implemented |
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
@@ -782,7 +794,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Context bounds capture and derivation | `pi_durable.harness.context` | tested (`test_harness_context.py`) |
 | Kept context ranges for extended reads and retention | `pi_durable.harness.context` | tested (`test_harness_context_ranges.py`) |
 | System prompt replay, section rendering, and positional entry planning | `pi_durable.harness.prompt` | tested (`test_harness_prompt.py`, `test_system_order_cache_e2e.py`) |
-| Model protocol (identity, input types, and input limits) plus pi-ai retry, overflow, and token-estimate classifiers | `pi_durable.providers` | tested (`test_harness_generation.py`, `test_harness_usage.py`, `test_tools.py`, `test_harness_compaction.py`) |
+| Model protocol (identity, input types, input limits, and cost rates) plus pi-ai retry, overflow, and token-estimate classifiers | `pi_durable.providers` | tested (`test_harness_generation.py`, `test_harness_usage.py`, `test_tools.py`, `test_harness_compaction.py`) |
 | Live generation presentation and its complete-base rule | `pi_durable.harness.live`, `pi_durable.harness.generation` | tested (`test_harness_generation.py`, `test_harness_live_deltas.py`) |
 | Provider session identity and its UUIDv7 | `pi_durable.harness.provider` | tested (`test_harness_generation.py`, `test_provider_session_cache_e2e.py`) |
 | Per-conversation usage ledger and Session totals | `pi_durable.harness.usage` | tested (`test_harness_usage.py`, `test_harness_generation.py`) |
@@ -797,8 +809,20 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
 | BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`) |
 | Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |
-| OpenAI model adapter | `pi_durable.providers.openai` | planned |
-| Anthropic model adapter | `pi_durable.providers.anthropic` | planned |
+| Shared provider plumbing: catalog lookup, request options, transcript replay, cross-model message adaptation, argument parsing, request-attempt retries, usage pricing, and the stream/abort wrapper | `pi_durable.providers.base`, `.request`, `.transcript`, `.json_parse`, `.retry`, `.usage`, `.stream` | tested through the adapter suites (`test_providers_openai.py`, `test_providers_anthropic.py`) |
+| OpenAI model adapter over Chat Completions | `pi_durable.providers.openai` | tested (`test_providers_openai.py`, `test_providers_extras.py`) |
+| Anthropic model adapter over Messages | `pi_durable.providers.anthropic` | tested (`test_providers_anthropic.py`, `test_providers_extras.py`) |
+
+The adapter suites inject fake `AsyncOpenAI`- and `AsyncAnthropic`-shaped clients, so they need no
+credentials and no network. `test_providers_extras.py` runs in subprocesses that block both SDK
+modules, proving the core package and both adapter modules import without either extra, and that a
+missing extra names its install command. CI also installs each extra alone and runs only its
+adapter suite. The adapters translate text, thinking, and tool-call deltas into the port's event
+protocol; usage (including cache reads/writes and cost), stop reasons, provider response IDs, and
+tool-call argument assembly are checked end to end through a Harness, and the provider session ID
+reaches the request as OpenAI's prompt-cache key. Provider failures become `stopReason: "error"`
+messages whose text the shared pi-ai classifiers read, so durable retry and overflow compaction
+work unchanged.
 
 ## Milestones
 
@@ -808,7 +832,7 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 - [x] 4. Tasks, scheduler, submissions, document observation.
 - [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
 - [x] 6. `env`, coding tools, `tool-search`.
-- [ ] 7. Events/view and task graph. Compaction and extension reload are done.
+- [x] 7. Events/view and task graph, compaction, extension reload, and the OpenAI/Anthropic adapters.
 - [ ] 8. Full translated suite green, docs, version `1.3.0`, release.
 
 ## Updating this file

@@ -1,10 +1,10 @@
 """Translated upstream ``system-order-cache-e2e`` regression coverage.
 
 The upstream suite measures Anthropic's prompt-cache hit rate across a tool change. That live
-measurement needs the generation run loop (#14) and the Anthropic adapter (#23), so it stays
-skipped. The ordering regression it protects is translated here against committed transcripts:
-the baseline must lead the request even when the user entry was written before it, and a later
-tool change must arrive positionally without moving the baseline.
+measurement needs Anthropic credentials, so it stays skipped; the ordering regression it protects is
+translated here against committed transcripts: the baseline must lead the request even when the
+user entry was written before it, and a later tool change must arrive positionally without moving
+the baseline. The Anthropic adapter itself is covered with fakes in test_providers_anthropic.py.
 """
 
 from __future__ import annotations
@@ -80,8 +80,7 @@ async def test_keeps_the_system_baseline_leading_across_a_tool_change() -> None:
 
 
 @pytest.mark.skip(
-    reason="Measures Anthropic prompt-cache reads across a tool change; needs the generation "
-    "run loop (#14) and the Anthropic adapter (#23)."
+    reason="Measures Anthropic prompt-cache reads across a tool change; needs live credentials."
 )
 async def test_cache_read_share_across_a_tool_change() -> None:
     raise AssertionError("covered with the provider cache e2e")
