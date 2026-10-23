@@ -7,7 +7,7 @@ derivation, the in-memory reference backend, and the durable task scheduler with
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
 built-in generation, compaction, and tool tasks, nested tool calls with structured output, provider
 identity, and the usage ledger are included; the `tool_search` subpath adds BM25 deferred-tool
-discovery. The observation surfaces arrive in later tickets.
+discovery, and the conversation view, agent event stream, and task graph expose committed state.
 """
 
 from .documents import (
@@ -60,6 +60,14 @@ from .harness.define import (
     wrap_section,
     wrap_tool,
 )
+from .harness.events import (
+    AgentEvent,
+    AgentEventStream,
+    MessageChange,
+    SnapshotEvent,
+    ToolEventCall,
+    watch_events,
+)
 from .harness.generation import (
     GenerationCheckpoint,
     GenerationInput,
@@ -79,6 +87,7 @@ from .harness.live import (
 )
 from .harness.provider import ProviderDoc, ProviderState
 from .harness.registry import create_registry
+from .harness.task_graph import TaskGraph, TaskGraphNode, TaskGraphState, TaskGraphWatch
 from .harness.tool import (
     NestedCallDoc,
     NestedCallState,
@@ -104,6 +113,7 @@ from .harness.types import (
     ConversationInit,
     ConversationRetryPolicy,
     ConversationStreamOptions,
+    ConversationWatch,
     EnvTarget,
     Extension,
     GenerationHooks,
@@ -143,6 +153,7 @@ from .harness.types import (
     Wrap,
 )
 from .harness.usage import UsageDoc, UsageState
+from .harness.view import ConversationView
 from .providers import Model, Models
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
@@ -156,6 +167,8 @@ __all__ = [
     "add_tools",
     "Agent",
     "AgentChange",
+    "AgentEvent",
+    "AgentEventStream",
     "AgentDoc",
     "AgentState",
     "AnyTask",
@@ -183,6 +196,8 @@ __all__ = [
     "ConversationInit",
     "ConversationRetryPolicy",
     "ConversationStreamOptions",
+    "ConversationView",
+    "ConversationWatch",
     "create_registry",
     "create_session",
     "DEFAULT_COMPACTION_POLICY",
@@ -225,6 +240,7 @@ __all__ = [
     "LiveDoc",
     "LiveState",
     "MemoryStorage",
+    "MessageChange",
     "Model",
     "ModelRef",
     "Models",
@@ -255,6 +271,7 @@ __all__ = [
     "SessionImpl",
     "Settings",
     "SettledSubmissionRecord",
+    "SnapshotEvent",
     "SettledTask",
     "StorageRequestError",
     "Submission",
@@ -263,12 +280,17 @@ __all__ = [
     "SystemEntry",
     "Task",
     "TaskDefinition",
+    "TaskGraph",
+    "TaskGraphNode",
+    "TaskGraphState",
+    "TaskGraphWatch",
     "TaskDocFamilyToken",
     "TaskDocToken",
     "TaskInspection",
     "TaskRuntime",
     "ToolControl",
     "ToolDiagnostic",
+    "ToolEventCall",
     "ToolExecutionApi",
     "ToolExecutionMode",
     "ToolExecutionResult",
@@ -287,6 +309,7 @@ __all__ = [
     "UserEntry",
     "UserInput",
     "Wrap",
+    "watch_events",
     "wrap_section",
     "wrap_tool",
 ]

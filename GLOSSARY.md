@@ -59,3 +59,17 @@ _Avoid_: boundary, split
 The `pi.compaction` entry a compaction places: the wrapped summary text as a user message, with
 `head` naming the cut and `data.reason` naming what started the compaction.
 _Avoid_: checkpoint, digest
+
+**Conversation view**:
+A fixed structural mount of one conversation's active entries and built-in documents.
+It advances only from committed publications and keeps at most one mount per conversation.
+_Avoid_: snapshot, projection
+
+**Agent event stream**:
+The experimental adapter that translates one conversation's committed publications into events
+shaped like the coding agent's session events.
+_Avoid_: audit log, replay
+
+**Task graph**:
+The Session-wide mount of every live task, its waits, and the conversations it owns.
+_Avoid_: task tree, scheduler state

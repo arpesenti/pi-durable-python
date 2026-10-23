@@ -96,12 +96,12 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `watchEvents` | value | `watch_events` | — | planned |
-| `AgentEvent` | type | `AgentEvent` | — | planned |
-| `AgentEventStream` | type | `AgentEventStream` | — | planned |
-| `MessageChange` | type | `MessageChange` | — | planned |
-| `SnapshotEvent` | type | `SnapshotEvent` | — | planned |
-| `ToolEventCall` | type | `ToolEventCall` | — | planned |
+| `watchEvents` | value | `watch_events` | test_harness_events.py | tested |
+| `AgentEvent` | type | `AgentEvent` | test_harness_events.py | tested |
+| `AgentEventStream` | type | `AgentEventStream` | test_harness_events.py | tested |
+| `MessageChange` | type | `MessageChange` | test_harness_events.py | tested |
+| `SnapshotEvent` | type | `SnapshotEvent` | test_harness_events.py | tested |
+| `ToolEventCall` | type | `ToolEventCall` | test_harness_events.py | tested |
 
 ### `./harness/generation.ts` → `pi_durable.harness.generation`
 
@@ -133,8 +133,8 @@ is green.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py | tested |
-| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py | tested (live status; the event stream arrives with #22) |
-| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py | tested (live status; the event stream arrives with #22) |
+| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py, test_harness_events.py | tested (live status and its event stream) |
+| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py, test_harness_events.py | tested (live status and the late-joiner snapshot) |
 | `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
 | `NestedToolSummary` | type | `NestedToolSummary` | test_harness_nested_tools.py | tested |
@@ -157,10 +157,10 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `TaskGraph` | type | `TaskGraph` | — | planned |
-| `TaskGraphNode` | type | `TaskGraphNode` | — | planned |
-| `TaskGraphState` | type | `TaskGraphState` | — | planned |
-| `TaskGraphWatch` | type | `TaskGraphWatch` | — | planned |
+| `TaskGraph` | type | `TaskGraph` | test_harness_task_graph.py | tested |
+| `TaskGraphNode` | type | `TaskGraphNode` | test_harness_task_graph.py | tested |
+| `TaskGraphState` | type | `TaskGraphState` | test_harness_task_graph.py | tested |
+| `TaskGraphWatch` | type | `TaskGraphWatch` | test_harness_task_graph.py | tested |
 
 ### `./harness/tool.ts` → `pi_durable.harness.tool`
 
@@ -188,14 +188,14 @@ is green.
 | `CompactionReason` | type | `CompactionReason` | test_harness_compaction.py | tested |
 | `CompactionResult` | type | `CompactionResult` | test_harness_compaction.py | tested |
 | `ContextView` | type | `ContextView` | test_harness_context.py | tested |
-| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py, test_harness_compaction.py | tested (creation, fork, agent, context, entries, compact, reset, abort, and idle waits; view/watch with #22) |
+| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py, test_harness_compaction.py, test_harness_view.py | tested (creation, fork, agent, context, entries, compact, reset, abort, idle waits, view, and watch) |
 | `ConversationAbortOptions` | type | `ConversationAbortOptions` | test_harness_ownership.py | tested |
 | `ConversationCreateOptions` | type | `ConversationCreateOptions` | test_harness_conversations.py | tested |
 | `ConversationHandle` | type | `ConversationHandle` | test_harness_ownership.py | tested |
 | `ConversationInit` | type | `ConversationInit` | test_harness_conversations.py | tested |
 | `ConversationRetryPolicy` | type | `ConversationRetryPolicy` | test_harness_generation.py | tested |
 | `ConversationStreamOptions` | type | `ConversationStreamOptions` | test_harness_generation.py | tested |
-| `ConversationWatch` | type | `ConversationWatch` | — | planned |
+| `ConversationWatch` | type | `ConversationWatch` | test_harness_view.py | tested |
 | `EnvTarget` | type | `EnvTarget` | test_harness_generation.py | tested |
 | `Extension` | type | `Extension` | test_harness_tasks.py, test_harness_ownership.py, test_harness_registry_agent.py | tested |
 | `GenerationHooks` | type | `GenerationHooks` | test_harness_generation.py | tested |
@@ -245,7 +245,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `ConversationView` | type | `ConversationView` | — | planned |
+| `ConversationView` | type | `ConversationView` | test_harness_view.py | tested |
 
 ### `./session/session.ts` → `pi_durable.session.session`
 
@@ -562,7 +562,7 @@ SQLite backend and migrations.
 | 1 Terms and invariants | code |
 | 2 Core records | tested |
 | 2.1 Entries and context | tested |
-| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, compaction, and root lazy creation with #15; the view/watch surface with #22) |
+| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation with #15, and the view/watch/task-graph surfaces with #22) |
 | 3 Documents | code |
 | 3.1 Definitions | tested |
 | 3.2 Records and lifetimes | tested |
@@ -593,13 +593,13 @@ SQLite backend and migrations.
 | 8.4 Tool | tested (model-issued and nested calls) |
 | 8.5 Tool rounds | tested |
 | 8.6 Usage | tested |
-| 8.7 Compaction | tested (range selection, serialization, manual/background/blocking starts, retry backoff, placement, abort, failure, and recovery in test_harness_compaction.py; event ordering with #22) |
-| 9 Document observation and Chord | code |
+| 8.7 Compaction | tested (range selection, serialization, manual/background/blocking starts, retry backoff, placement, abort, failure, recovery, and event ordering in test_harness_compaction.py) |
+| 9 Document observation and Chord | tested |
 | 9.1 Document state | tested |
 | 9.2 `watchDoc` | tested |
-| 9.3 Conversation view | planned |
-| 9.4 Agent events (experimental) | planned |
-| 9.5 Task graph view | planned |
+| 9.3 Conversation view | tested |
+| 9.4 Agent events (experimental) | tested |
+| 9.5 Task graph view | tested |
 | 10 Storage contract | tested |
 | 10.1 Failures | code |
 | 11 Backends | tested |
@@ -610,23 +610,25 @@ SQLite backend and migrations.
 | 13 Non-goals | n/a |
 
 The upstream document-retention suite has two Harness-level cases: one follows a Harness settings
-change at its next use, and one compares agent event streams with documents evicted. They are
-translated with the Harness in #12-#22; the Session-level suite covers the retention semantics.
+change at its next use, and one compares agent event streams with documents evicted. Both are
+translated in `test_session_document_retention.py`.
 
 The four task-integrity suites (`harness-tasks-recovery`, `harness-scheduler-indexes`,
 `harness-scheduler-retention`, and `harness-storage-failure`) are translated for the task core. The
 recovery suite is complete. The scheduler suites translate every case whose work is tasks and
-conversations; the retention cases that queue or withdraw inputs, and the storage-failure cases that
-watch documents or conversation views, land with submissions (#11), the live document (#14), and the
-observation surfaces (#22). `harness-storage-failure` also translates the failure latch, listener
-containment, and clock fallback cases the Session can exercise now.
+conversations; any remaining retention and storage-failure cases that watch documents or
+conversation views belong to the parity audit (#24). `harness-storage-failure` also translates the
+failure latch, listener containment, and clock fallback cases the Session can exercise now.
 
-Deferred from earlier tickets: the `harness-ownership` cases that hold the Session line under a
-queued handle operation or drive an owned subagent from a tool, and the `harness-lifecycle` cases
-that need conversation views or the task-graph watch. The tool-owned conversation case for an
-invocation-bound handle and the tool-hook close case are translated now. Built-in generation
-cleanup, generation recovery, and usage in `harness-lifecycle` were translated earlier, as were the
-open-error, close, reopen, registry-change, cancellation, and durable-commit cases.
+Deferred from earlier tickets are the `harness-ownership` cases that hold the Session line under a
+queued handle operation or drive an owned subagent from a tool. The `harness-lifecycle` cases that
+need conversation views or the task-graph watch are translated in
+`test_harness_lifecycle_observations.py`: no frame from a commit that settles during close, queued
+acquisitions that reject at the seal, and read-only viewers that never enable scheduling. The
+tool-owned conversation case for an invocation-bound handle and the tool-hook close case are
+translated now. Built-in generation cleanup, generation recovery, and usage in `harness-lifecycle`
+were translated earlier, as were the open-error, close, reopen, registry-change, cancellation, and
+durable-commit cases.
 
 The submission suites are translated in three files. `harness-submissions` covers idle input and
 write admission, request-ID deduplication, busy rejection, abort results, lookup, waits, close
@@ -652,7 +654,7 @@ against the Session-level `context()` read. Three of its nine kept-range cases r
 `TaskRuntime.context()`: extended reads scanning only newer entries and honoring an earlier cutoff,
 returned views staying apart from the kept range, and dropping the range under zero retention. The
 remaining six (clock-driven expiry, busy and late reads, extended-read equivalence, baseline found
-in added entries, and shallow-storage freeze) land with #10 and #22.
+in added entries, and shallow-storage freeze) belong to the parity audit (#24).
 
 The upstream `harness-registry` suite is translated in `test_harness_registry_agent.py`: install,
 replace in place, uninstall by name with subscriber publications and immutable old snapshots;
@@ -680,9 +682,9 @@ submission and its idle/busy/reset outcomes, `beforeCompact` decisions, retry ba
 request, cap and failure classification, background and blocking thresholds, overflow compaction
 and its retry, fork and inbox interactions, recovery across reopen, concurrent summaries, the
 one-compaction rule, and the older-head-marker edits. Its `compaction_start`/`compaction_end`
-ordering, late-joiner snapshots, and kept-entry view assertions read `watchEvents` and
-`viewState`, so they stay skipped until the observation surface (#22); the same committed state is
-checked through `pi.live`, the task outcome, submissions, and the context view.
+ordering, late-joiner snapshots, and kept-entry view assertions now run through `watch_events` and
+`view_state` in the same file, alongside the same committed state checked through `pi.live`, the
+task outcome, submissions, and the context view.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
@@ -701,9 +703,11 @@ The upstream `harness-nested-tools` and `harness-nested-tools-restart` suites ar
 `callers` resolution for tools; hooks seeing the parent; unavailable, invalid, blocked, thrown,
 interrupted, aborted, faulted, and orphaned results; output and details with `progress: false`;
 usage; left-running calls aborted before their caller settles, including during a restart cleanup;
-and `abandonOnRestart` for a replay-unsafe caller and the child tasks it creates. Assertions that
-read the nested call's result from an agent event or a late-subscriber view stay with #22; the same
-values are checked through the stored `NestedCallDoc` and `pi.live` snapshots instead, and the
+and `abandonOnRestart` for a replay-unsafe caller and the child tasks it creates. Agent-event
+assertions for nested calls run in `test_harness_events.py` (parent IDs, the nested result, and
+child-before-caller order for deep calls); late-subscriber view assertions remain for the parity
+audit (#24). The same values are checked through the stored `NestedCallDoc` and `pi.live` snapshots
+instead, and the
 upstream `harness-structured-output` suite is translated in
 `test_harness_structured_output.py`: schema-less output shapes, bounds without rendered
 diagnostics, the stored null, validated schema output, every broken-output path for callers and for

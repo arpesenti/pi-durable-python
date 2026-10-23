@@ -30,6 +30,7 @@ from .provider import ProviderDoc
 from .registry import BUILTIN_TASKS
 from .scheduler import TaskScheduler
 from .submissions import AbortResult, Submissions
+from .task_graph import TaskGraphView
 from .types import (
     Agent,
     ContextView,
@@ -43,6 +44,7 @@ from .types import (
 )
 from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
+from .view import ConversationViews
 
 _SCAN_PAGE_SIZE = 256
 
@@ -217,10 +219,10 @@ class ConversationHandleImpl:
         await self.submit({"type": "write", "entry": entry}, context)
 
     async def view_state(self, context: Context) -> Any:
-        raise NotImplementedError("Conversation view arrives with the observation surfaces")
+        return await self._harness._views.state(self.id, context)
 
     async def watch(self, context: Context) -> Any:
-        raise NotImplementedError("Conversation watch arrives with the observation surfaces")
+        return await self._harness._views.watch(self.id, context)
 
 
 class Harness(SessionImpl):
@@ -237,6 +239,8 @@ class Harness(SessionImpl):
         )
         self._options = dict(options)
         self._report_sink = report
+        self._views = ConversationViews(self, self.storage)
+        self._graph = TaskGraphView(self, self.storage)
         self._tasks = TaskScheduler(
             session=self,
             storage=self.storage,
@@ -529,10 +533,17 @@ class Harness(SessionImpl):
         return total
 
     async def task_graph(self, context: Context) -> Any:
-        raise NotImplementedError("Task graph arrives with the observation surfaces")
+        """Return the task-graph mount as a disposable read-only state."""
+
+        self.assert_usable()
+        return await self._graph.state(context)
 
     async def watch_task_graph(self, context: Context) -> Any:
-        raise NotImplementedError("Task graph arrives with the observation surfaces")
+        """Return the task-graph mount through its serialized exact-frame watch."""
+
+        self.assert_usable()
+        return await self._graph.watch(context)
+
 
 
 def _bind_context(binding: Mapping[str, Any], context: Context) -> Context:

@@ -2,16 +2,19 @@
 
 The Session's document cache is bounded by use: unattached documents leave it after the retention
 period and load from Storage again; documents with a watch or a document state never leave it.
-The two Harness-level cases at the end of the upstream suite arrive with the Harness tickets.
+The two Harness-level cases at the end follow a settings change at its next use and compare agent
+event streams with documents kept and evicted right after use.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import Any, cast
 
 import pytest
+from chat_support import assistant_message, chat_setup, faux_tool_call, open_chat
 from session_support import (
     ControlledStorage,
     Deferred,
@@ -19,8 +22,9 @@ from session_support import (
     create_conversation,
     eventually,
 )
+from tool_support import add_tool, tool
 
-from pi_durable import define_doc, define_doc_family
+from pi_durable import MemoryStorage, define_doc, define_doc_family, watch_events
 from pi_durable.ids import ConversationId
 from pi_durable.session import session as session_module
 from pi_durable.session.session import SessionImpl, set_default_document_retention
@@ -566,15 +570,73 @@ async def test_queues_one_sweep_job_not_one_per_document_while_a_commit_holds_th
     await session.close(context)
 
 
-@pytest.mark.skip(
-    reason="Follows a Harness settings change at its next use; the Harness arrives in #12-#22."
-)
 async def test_follows_a_harness_settings_change_at_the_next_use() -> None:
-    raise AssertionError("covered with the Harness settings wiring")
+    previous = session_module._default_document_retention
+    set_default_document_retention(600_000)
+    try:
+        setup = chat_setup()
+        opened = await open_chat(MemoryStorage(), setup)
+        harness, root = opened["harness"], opened["root"]
+
+        async def bump(tx: Any) -> None:
+            (await tx.doc(CounterDoc, root.id))["count"] += 1
+
+        await root.commit(bump, context)
+        assert harness.document_cache_sizes["cached"] > 0
+        setup.settings["document_retention_ms"] = 0
+        await harness.snapshot(CounterDoc, root.id, context)
+
+        async def settled() -> bool:
+            await harness.read_on_line(lambda: asyncio.sleep(0))
+            return harness.document_cache_sizes["cached"] == 0
+
+        await eventually(settled)
+        await harness.close(context)
+    finally:
+        set_default_document_retention(previous)
 
 
-@pytest.mark.skip(reason="Compares agent event streams; watchEvents arrives in #22.")
 async def test_gives_the_same_events_with_documents_evicted_right_after_use_as_with_documents_kept() -> (
     None
 ):
-    raise AssertionError("covered with watchEvents")
+    async def run(document_retention_ms: int) -> list[str]:
+        setup = chat_setup()
+        setup.settings["document_retention_ms"] = document_retention_ms
+        setup.settings["progress"] = {"output_interval_ms": 0}
+
+        async def execute(_args: Any, api: Any, _context: Any) -> dict[str, Any]:
+            for step in ("a\n", "b\n", "c\n"):
+                api.output(step)
+                await asyncio.sleep(0.005)
+            return {}
+
+        add_tool(setup.registry, tool("steps", execute))
+        setup.faux.set_responses(
+            [
+                assistant_message(
+                    [
+                        faux_tool_call("steps", {}, id="s1"),
+                    ],
+                    stop_reason="toolUse",
+                ),
+                assistant_message([{"type": "text", "text": "done"}]),
+            ]
+        )
+        opened = await open_chat(MemoryStorage(), setup)
+        harness, root = opened["harness"], opened["root"]
+        events: list[Any] = []
+        stream = await watch_events(harness, root.id, context)
+        stream.start(lambda batch, _context: events.extend(batch))
+        await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+        await harness.wait_for_idle(context)
+        await stream.stop()
+        await harness.close(context)
+        # Ids and times differ between runs; the sequence of event types and tool outputs must not.
+        return [
+            f"update:{json.dumps(event['output'], sort_keys=True)}"
+            if event["type"] == "tool_execution_update"
+            else event["type"]
+            for event in events
+        ]
+
+    assert await run(0) == await run(600_000)

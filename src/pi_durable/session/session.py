@@ -48,7 +48,12 @@ from ..types import (
     TaskQuery,
     TaskRecord,
 )
-from .observation import CommittedWatch, ObservedDocumentValue, observed_operations
+from .observation import (
+    CommittedState,
+    CommittedWatch,
+    ObservedDocumentValue,
+    observed_operations,
+)
 from .transaction import LoadedDocument, Transaction, TransactionScope
 
 #: Default document retention: ten minutes, as for kept contexts.
@@ -128,14 +133,6 @@ def _record_address_id(record: DocumentRecord) -> str:
 
 
 @dataclass(slots=True)
-class Delivery:
-    """One state delivery: hydration at sequence 0, then one per committed update."""
-
-    kind: str
-    sequence: int
-
-
-@dataclass(slots=True)
 class _WatchAttachment:
     """One watch subscribed to a committed incarnation, and the incarnation it pins."""
 
@@ -161,20 +158,10 @@ class DocumentCacheSizes(TypedDict):
     sweeps: int
 
 
-class DocumentState:
+class DocumentState(CommittedState):
     """Disposable, read-only committed state bound to one document incarnation."""
 
-    __slots__ = (
-        "_closed",
-        "_disposed",
-        "_listeners",
-        "_observed_version",
-        "_record_id",
-        "_release",
-        "_session",
-        "_sequence",
-        "_value",
-    )
+    __slots__ = ("_observed_version", "_record_id", "_session")
 
     def __init__(
         self,
@@ -184,82 +171,22 @@ class DocumentState:
         observed_version: int,
         release: Callable[[], None],
     ) -> None:
+        super().__init__(value, release, session.report)
         self._session = session
         self._record_id = record_id
-        self._value: JsonObject | None = value
         self._observed_version = observed_version
-        self._release = release
-        self._sequence = 0
-        self._listeners: list[Callable[[Any, Context, Delivery], Any]] = []
-        self._disposed = False
-        self._closed = False
 
     @property
     def value(self) -> JsonObject | None:
-        return self._value
-
-    def subscribe(self, listener: Callable[[Any, Context, Delivery], Any]) -> Callable[[], None]:
-        """Subscribe; hydration is delivered immediately with sequence 0."""
-
-        if self._disposed:
-            raise RuntimeError("Document state is disposed")
-        self._listeners.append(listener)
-        self._deliver(listener, self._value, BACKGROUND_CONTEXT, Delivery("hydrate", self._sequence))
-
-        def unsubscribe() -> None:
-            try:
-                self._listeners.remove(listener)
-            except ValueError:
-                pass
-
-        return unsubscribe
+        return cast(JsonObject | None, self._value)
 
     def dispose(self) -> None:
         """Idempotently stop future deliveries; the last value remains readable."""
 
         if self._disposed:
             return
-        self._disposed = True
-        self._listeners.clear()
-        self._release_pin()
+        super().dispose()
         self._session._detach_state(self)
-
-    def _release_pin(self) -> None:
-        """A retired incarnation keeps its last value but pins nothing (spec §4)."""
-
-        self._release()
-
-    def _advance(self, value: JsonObject | None, context: Context) -> None:
-        if self._disposed or self._closed:
-            return
-        self._value = value
-        self._sequence += 1
-        delivery = Delivery("update", self._sequence)
-        for listener in list(self._listeners):
-            self._deliver(listener, value, without_abort_signal(context), delivery)
-
-    def _close_session(self) -> None:
-        """Keep the last value at the Session's seal and receive no commit that settles later."""
-
-        if self._closed:
-            return
-        self._closed = True
-        self._listeners.clear()
-        self._release_pin()
-
-    @staticmethod
-    def _deliver(
-        listener: Callable[[Any, Context, Delivery], Any],
-        value: JsonObject | None,
-        context: Context,
-        delivery: Delivery,
-    ) -> None:
-        try:
-            result = listener(value, context, delivery)
-            if hasattr(result, "__await__"):
-                asyncio.ensure_future(cast(Awaitable[Any], result))
-        except Exception:
-            pass
 
 
 class _SessionHost:
@@ -717,6 +644,21 @@ class SessionImpl:
             self._idle_documents.clear()
 
     # ── Document reads and observation ─────────────────────────────────────
+
+    async def _document_on_line(self, token: AnyDocToken, *args: Any) -> LoadedDocument | None:
+        """Load and validate one document while the caller holds the Session line.
+
+        Internal: conversation-view mounts capture their documents in the same line job as their
+        entries, so no commit can land between the two reads.
+        """
+
+        definition = token.definition
+        resolved = resolve_address(definition, args)
+        context = args[resolved.next_argument]
+        loaded = await self._load_document(definition, resolved.id, resolved.address, context)
+        if loaded is not None:
+            _validate_document(definition, loaded)
+        return loaded
 
     async def snapshot(self, token: AnyDocToken, *args: Any) -> JsonObject | None:
         self.assert_usable()

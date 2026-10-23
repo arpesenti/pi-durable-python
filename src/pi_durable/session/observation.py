@@ -1,18 +1,20 @@
-"""Committed document observation: exact-frame watches over one incarnation.
+"""Committed observation: exact-frame watches and read-only attached states.
 
-A watch is bound to one committed document revision. It queues every committed change while its
-listener runs, so callbacks never overlap, and collapses more than
+A watch is bound to one committed revision or view mount. It queues every committed change while
+its listener runs, so callbacks never overlap, and collapses more than
 ``MAX_PENDING_WATCH_FRAMES`` pending frames into one root replacement. Retirement and close end
-the watch with the v1.3.0 reason.
+the watch with the v1.3.0 reason. A state publishes every later revision in order through its
+listeners and keeps its last value at close.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
-from ..context import AbortSignal, Context, without_abort_signal
+from ..context import BACKGROUND_CONTEXT, AbortSignal, Context, without_abort_signal
 from ..delta import Op
 from ..errors import is_failure
 from ..json import JsonObject
@@ -26,6 +28,129 @@ MAX_PENDING_WATCH_FRAMES = 100
 
 RETIREMENT_OPERATIONS: list[Op] = [["r", None]]
 """Canonical terminal update for a retired document incarnation."""
+
+
+@dataclass(slots=True)
+class Delivery:
+    """One state delivery: hydration at sequence 0, then one per committed update."""
+
+    kind: str
+    sequence: int
+
+
+class CommittedState:
+    """Disposable, read-only committed state over one immutable value.
+
+    A document state binds it to one incarnation; a conversation view or task graph binds it to
+    the Harness's mount. Subscribing delivers the acquisition revision immediately and then every
+    later committed revision, in order, without another read.
+    """
+
+    __slots__ = (
+        "_closed",
+        "_disposed",
+        "_listeners",
+        "_release",
+        "_released",
+        "_report",
+        "_sequence",
+        "_value",
+    )
+
+    def __init__(
+        self,
+        value: Any,
+        release: Callable[[], None],
+        report: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        self._value = value
+        self._release = release
+        self._report = report
+        self._released = False
+        self._sequence = 0
+        self._listeners: list[Callable[[Any, Context, Delivery], Any]] = []
+        self._disposed = False
+        self._closed = False
+
+    @property
+    def value(self) -> Any:
+        return self._value
+
+    def subscribe(self, listener: Callable[[Any, Context, Delivery], Any]) -> Callable[[], None]:
+        """Subscribe; hydration is delivered immediately with sequence 0."""
+
+        if self._disposed:
+            raise RuntimeError("State is disposed")
+        self._listeners.append(listener)
+        self._deliver(listener, self._value, BACKGROUND_CONTEXT, Delivery("hydrate", self._sequence))
+
+        def unsubscribe() -> None:
+            try:
+                self._listeners.remove(listener)
+            except ValueError:
+                pass
+
+        return unsubscribe
+
+    def dispose(self) -> None:
+        """Idempotently stop future deliveries; the last value remains readable."""
+
+        if self._disposed:
+            return
+        self._disposed = True
+        self._listeners.clear()
+        self._release_pin()
+
+    def _release_pin(self) -> None:
+        """Release the observer once; a retired incarnation keeps its last value but pins nothing."""
+
+        if self._released:
+            return
+        self._released = True
+        self._release()
+
+    def advance(self, value: Any, _ops: list[Op], context: Context) -> None:
+        """Publish one exact committed revision to every listener."""
+
+        self._advance(value, context)
+
+    def _advance(self, value: Any, context: Context) -> None:
+        if self._disposed or self._closed:
+            return
+        self._value = value
+        self._sequence += 1
+        delivery = Delivery("update", self._sequence)
+        for listener in list(self._listeners):
+            self._deliver(listener, value, without_abort_signal(context), delivery)
+
+    def close_session(self, _failure: BaseException | None = None) -> None:
+        """An observer's Session-close callback; the last value and this state remain."""
+
+        self._close_session()
+
+    def _close_session(self) -> None:
+        """Keep the last value at the Session's seal and receive no commit that settles later."""
+
+        if self._closed:
+            return
+        self._closed = True
+        self._listeners.clear()
+        self._release_pin()
+
+    def _deliver(
+        self,
+        listener: Callable[[Any, Context, Delivery], Any],
+        value: Any,
+        context: Context,
+        delivery: Delivery,
+    ) -> None:
+        try:
+            result = listener(value, context, delivery)
+            if hasattr(result, "__await__"):
+                asyncio.ensure_future(cast(Awaitable[Any], result))
+        except Exception as error:
+            if self._report is not None:
+                self._report(error)
 
 
 def observed_operations(
@@ -59,6 +184,8 @@ class CommittedWatch:
         "_listener",
         "_observed_version",
         "_pending",
+        "_release",
+        "_replace",
         "_report",
         "_retired",
         "_running",
@@ -69,21 +196,23 @@ class CommittedWatch:
 
     def __init__(
         self,
-        value: ObservedDocumentValue,
+        value: Any,
         detach: Callable[[], None],
         report: Callable[[BaseException], None],
-        observed_version: int,
+        observed_version: int = 0,
+        replace: Callable[[], Any] | None = None,
     ) -> None:
-        self._value = value
+        self._value: Any = value
         self._detach = detach
         self._report = report
         self._observed_version = observed_version
+        self._replace = replace
         self._closed: asyncio.Future[WatchEnd] = asyncio.get_running_loop().create_future()
         # Awaiting a cancellation must not cancel the watch's own terminal result; `closed` and
         # every `stop()` return this same shielded value, as v1.3.0 returns one common promise.
         self._terminal: asyncio.Future[WatchEnd] = asyncio.shield(self._closed)
-        self._pending: list[tuple[ObservedDocumentValue, list[Op], Context]] = []
-        self._listener: Callable[[ObservedDocumentValue, list[Op], Context], Any] | None = None
+        self._pending: list[tuple[Any, list[Op], Context]] = []
+        self._listener: Callable[[Any, list[Op], Context], Any] | None = None
         self._started = False
         self._scheduled = False
         self._running = False
@@ -93,7 +222,7 @@ class CommittedWatch:
         self._cancellation_remove: Callable[[], None] | None = None
 
     @property
-    def value(self) -> ObservedDocumentValue:
+    def value(self) -> Any:
         """Acquisition revision before start; latest delivered revision afterward."""
 
         return self._value
@@ -110,7 +239,7 @@ class CommittedWatch:
 
     def start(
         self,
-        listener: Callable[[ObservedDocumentValue, list[Op], Context], Awaitable[None] | None],
+        listener: Callable[[Any, list[Op], Context], Awaitable[None] | None],
     ) -> None:
         """Install the sole asynchronous listener. Never invokes it inline."""
 
@@ -151,7 +280,7 @@ class CommittedWatch:
             self._terminate({"reason": "session_failed", "error": failure})
 
     def advance(self, change: DocumentCommittedChange, context: Context) -> None:
-        """Queue the committed change, skipping one this observer already holds."""
+        """Queue the committed document change, skipping one this observer already holds."""
 
         if self._end is not None or self._retired:
             return
@@ -159,12 +288,19 @@ class CommittedWatch:
         if not ops:
             return
         self._observed_version = version
-        value = change["value"]
+        self.advance_frame(change["value"], ops, context)
+
+    def advance_frame(self, value: Any, ops: list[Op], context: Context) -> None:
+        """Queue one exact committed frame for a view, graph, or event stream."""
+
+        if self._end is not None or self._retired:
+            return
         if value is None:
             self._retired = True
         if len(self._pending) >= MAX_PENDING_WATCH_FRAMES:
             self._pending.clear()
-            self._pending.append((value, [["r", value]], context))
+            replacement = self._replace() if self._replace is not None else value
+            self._pending.append((replacement, [["r", replacement]], context))
         else:
             self._pending.append((value, ops, context))
         if self._started:
@@ -228,7 +364,9 @@ class CommittedWatch:
 
 
 __all__ = [
+    "CommittedState",
     "CommittedWatch",
+    "Delivery",
     "MAX_PENDING_WATCH_FRAMES",
     "ObservedDocumentValue",
     "RETIREMENT_OPERATIONS",

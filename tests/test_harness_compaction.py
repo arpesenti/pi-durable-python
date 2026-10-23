@@ -28,6 +28,7 @@ from task_support import Deferred, aborted, completed, deferred, eventually
 from tool_support import add_hooks, add_task, add_tool
 
 from pi_durable import (
+    AgentEvent,
     CompactionTask,
     LiveDoc,
     MemoryStorage,
@@ -35,6 +36,7 @@ from pi_durable import (
     UsageDoc,
     define_task,
     define_tool,
+    watch_events,
 )
 from pi_durable.harness.compaction import select_cut, serialize_conversation
 from pi_durable.harness.context import order_tool_results
@@ -1153,13 +1155,22 @@ async def test_records_a_compaction_failure_in_pi_live_until_a_summary_is_produc
     chat = await open_compaction(context_window=2000)
     await history(chat)
     chat.setup.settings["compaction"] = dict(BACKGROUND)
+    events: list[AgentEvent] = []
+    stream = await watch_events(chat.harness, chat.root.id, context)
+    stream.start(lambda batch, _context: events.extend(batch))
     chat.faux.summaries.append(failure("bad request"))
     await turn(chat, text("u4", 100), text("a4", 100))
     await eventually(lambda: _has_failure(chat))
     recorded = (await live(chat))["compactionFailure"]
     assert recorded["reason"] == "threshold"
     assert recorded["error"] == "Summarization failed: bad request"
-    # The compaction_end and snapshot event stream arrives with the observation surfaces (#22).
+    await eventually(
+        lambda: any(event["type"] == "compaction_end" for event in events)
+    )
+    ended = next(event for event in events if event["type"] == "compaction_end")
+    assert ended["taskId"] == recorded["taskId"]
+    assert ended["reason"] == "threshold"
+    assert ended["error"] == "Summarization failed: bad request"
     # A compaction that produces a summary removes the failure.
     chat.setup.settings["compaction"] = dict(MANUAL)
     chat.faux.summaries.append(summary())
@@ -1309,6 +1320,9 @@ async def test_blocking_compaction_is_aborted_with_its_generation_by_esc() -> No
     chat.setup.settings["compaction"] = dict(BLOCKING)
     reached = deferred()
     chat.faux.summaries.append(gated(deferred(), summary(), reached))
+    events: list[AgentEvent] = []
+    stream = await watch_events(chat.harness, chat.root.id, context)
+    stream.start(lambda batch, _context: events.extend(batch))
     input = await chat.root.submit({"type": "input", "content": text("u4", 200)}, context)
     await reached.promise
     [child] = await compaction_tasks(chat)
@@ -1317,7 +1331,10 @@ async def test_blocking_compaction_is_aborted_with_its_generation_by_esc() -> No
     assert settled["status"] == "unanswered" and settled["reason"] == "aborted"
     record = await chat.harness.get_task(child["id"], context)
     assert record["state"]["outcome"] == {"status": "aborted"}
-    # The compaction_end before run_end event order arrives with the observation surfaces (#22).
+    await eventually(lambda: any(event["type"] == "run_end" for event in events))
+    types = [event["type"] for event in events]
+    assert types.index("compaction_end") < types.index("run_end")
+    await stream.stop()
     await chat.harness.close(context)
 
 
@@ -1586,7 +1603,10 @@ async def test_compacts_a_fork_whose_cut_falls_on_a_parent_entry() -> None:
     assert kept == [text("u3", 100), text("a3", 100)]
     # The parent is untouched.
     assert "pi.compaction" not in await kinds(chat.root)
-    # The fork's view keeping the parent entries arrives with the observation surfaces (#22).
+    # The fork's view keeps the parent entries the summary kept.
+    state = await fork.view_state(context)
+    assert state.value["entries"] == view["entries"]
+    state.dispose()
     await chat.harness.close(context)
 
 
@@ -1714,14 +1734,67 @@ async def test_lists_concurrent_compactions_in_task_id_order() -> None:
     await chat.harness.close(context)
 
 
-@pytest.mark.skip(reason="Watches compaction events; the agent event stream arrives with #22.")
+async def _compaction_retrying(chat: Chat) -> bool:
+    statuses = (await live(chat)).get("compactions") or []
+    return bool(statuses and statuses[0].get("retry") is not None)
+
+
 async def test_reports_start_and_end_and_the_retry_backoff_in_a_late_joiners_snapshot() -> None:
-    raise AssertionError("unreachable")
+    chat = await open_compaction()
+    await history(chat)
+    chat.setup.settings["retry"] = {
+        "enabled": True,
+        "max_retries": 2,
+        "base_delay_ms": 60_000,
+    }
+    events: list[AgentEvent] = []
+    stream = await watch_events(chat.harness, chat.root.id, context)
+    stream.start(lambda batch, _context: events.extend(batch))
+    chat.faux.summaries.append(failure("overloaded"))
+    id = await chat.root.compact(None, context)
+    await eventually(lambda: _compaction_retrying(chat))
+    late = await watch_events(chat.harness, chat.root.id, context)
+    [status] = late.snapshot["compactions"]
+    assert status["taskId"] == id
+    assert status["reason"] == "manual"
+    assert status["blocking"] is False
+    assert status["attempt"] == 1
+    assert status["retry"]["error"] == "overloaded"
+    assert isinstance(status["retry"]["at"], int)
+    await late.stop()
+    await chat.harness.abort_task(id, context)
+    await eventually(
+        lambda: any(event["type"] == "compaction_end" for event in events)
+    )
+    assert [
+        event for event in events if event["type"].startswith("compaction_")
+    ] == [
+        {
+            "type": "compaction_start",
+            "taskId": id,
+            "reason": "manual",
+            "blocking": False,
+        },
+        {"type": "compaction_end", "taskId": id, "reason": "manual"},
+    ]
+    await stream.stop()
+    await chat.harness.close(context)
 
 
-@pytest.mark.skip(reason="Shows a summarizing compaction to a late joiner through watchEvents (#22).")
 async def test_shows_a_late_joiner_a_compaction_that_is_summarizing() -> None:
-    raise AssertionError("unreachable")
+    chat = await open_compaction()
+    await history(chat)
+    reached = deferred()
+    chat.faux.summaries.append(gated(deferred(), summary(), reached))
+    id = await chat.root.compact(None, context)
+    await reached.promise
+    stream = await watch_events(chat.harness, chat.root.id, context)
+    assert stream.snapshot["compactions"] == [
+        {"taskId": id, "reason": "manual", "blocking": False, "attempt": 1}
+    ]
+    await stream.stop()
+    await chat.harness.abort_task(id, context)
+    await chat.harness.close(context)
 
 
 # ─── Recovery ─────────────────────────────────────────────────────────────
@@ -2010,9 +2083,19 @@ async def test_loses_an_application_edit_placed_while_a_compaction_summarizes() 
     await chat.harness.close(context)
 
 
-@pytest.mark.skip(reason="Mounts the kept entries in the conversation view; viewState arrives with #22.")
 async def test_keeps_the_kept_entries_mounted_in_the_conversation_view() -> None:
-    raise AssertionError("unreachable")
+    chat = await open_compaction()
+    await history(chat)
+    state = await chat.root.view_state(context)
+    chat.faux.summaries.append(summary())
+    await result(chat, await chat.root.compact(None, context))
+    await eventually(
+        lambda: state.value["entries"]
+        and state.value["entries"][0]["kind"] == "pi.compaction"
+    )
+    assert state.value["entries"] == (await chat.root.context(context))["entries"]
+    state.dispose()
+    await chat.harness.close(context)
 
 
 # ─── Compaction edge cases ────────────────────────────────────────────────
@@ -2145,14 +2228,62 @@ async def test_treats_a_length_stop_as_an_ordinary_answer_not_an_overflow() -> N
     await chat.harness.close(context)
 
 
-@pytest.mark.skip(reason="Watches the events of a summary placed at once; watchEvents arrives with #22.")
 async def test_orders_the_events_of_a_summary_placed_at_once() -> None:
-    raise AssertionError("unreachable")
+    chat = await open_compaction()
+    await history(chat)
+    events: list[AgentEvent] = []
+    stream = await watch_events(chat.harness, chat.root.id, context)
+    stream.start(lambda batch, _context: events.extend(batch))
+    chat.faux.summaries.append(summary())
+    await result(chat, await chat.root.compact(None, context))
+    await eventually(
+        lambda: any(event["type"] == "compaction_end" for event in events)
+    )
+    end = next(
+        index for index, event in enumerate(events) if event["type"] == "compaction_end"
+    )
+    assert [event["type"] for event in events[end - 2:end + 3]] == [
+        "message_start",
+        "message_end",
+        "compaction_end",
+        "submission",
+        "usage_changed",
+    ]
+    await stream.stop()
+    await chat.harness.close(context)
 
 
-@pytest.mark.skip(reason="Watches the preparation commit's events; watchEvents arrives with #22.")
 async def test_puts_compaction_start_last_in_the_batch_of_the_preparation_commit() -> None:
-    raise AssertionError("unreachable")
+    chat = await open_compaction(context_window=2000)
+    await history(chat)
+    chat.setup.settings["compaction"] = dict(BACKGROUND)
+    batches: list[list[AgentEvent]] = []
+    stream = await watch_events(chat.harness, chat.root.id, context)
+    stream.start(lambda batch, _context: batches.append(list(batch)))
+    # A new section makes the preparation commit append a system entry next to the compaction's status.
+    add_section(chat.setup.registry, "extra", lambda *_args: "extra")
+    chat.faux.summaries.append(gated(deferred(), summary()))
+    await turn(chat, text("u4", 100), "a4")
+    await eventually(
+        lambda: any(
+            any(event["type"] == "compaction_start" for event in batch)
+            for batch in batches
+        )
+    )
+    batch = next(
+        batch
+        for batch in batches
+        if any(event["type"] == "compaction_start" for event in batch)
+    )
+    assert [event["type"] for event in batch] == [
+        "message_start",
+        "message_end",
+        "compaction_start",
+    ]
+    await stream.stop()
+    [task] = await compaction_tasks(chat)
+    await chat.harness.abort_task(task["id"], context)
+    await chat.harness.close(context)
 
 
 async def test_keeps_a_background_summary_queued_through_a_retry_backoff_while_blocking_wins() -> None:

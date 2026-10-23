@@ -44,6 +44,7 @@ from ..types import (
     TaskOutcome,
     TaskRecord,
     TaskState,
+    WatchHandle,
     WriteDoneRecord,
     WriteUnansweredRecord,
 )
@@ -623,10 +624,7 @@ class ConversationHandle(Protocol):
 
 
 class Conversation(Protocol):
-    """Stateless handle for one conversation, bound to the Harness that returned it.
-
-    The observation surfaces (``view_state``, ``watch``) arrive with their own ticket.
-    """
+    """Stateless handle for one conversation, bound to the Harness that returned it."""
 
     id: ConversationId
 
@@ -663,6 +661,14 @@ class Conversation(Protocol):
     ) -> None: ...
 
     async def wait_for_idle(self, context: Context) -> None: ...
+
+    async def view_state(self, context: Context) -> Any: ...
+
+    async def watch(self, context: Context) -> Any: ...
+
+
+ConversationWatch: TypeAlias = WatchHandle[Any]
+"""A serialized exact-frame watch of one conversation's view."""
 
 
 class Submission(Protocol):
