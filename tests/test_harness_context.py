@@ -1,8 +1,8 @@
 """Translated v1.3.0 ``harness-context`` suite: context derivation cases.
 
 The Harness-level cases of that suite — kept ranges across a task's reads and their retention,
-``TaskRuntime.context()``, and the freeze guarantees of a kept range — arrive with the Harness
-(#12-#22) and are skipped here with their reasons.
+``TaskRuntime.context()``, and the freeze guarantees of a kept range — are translated in
+``test_harness_context_ranges.py``.
 """
 
 from __future__ import annotations
@@ -445,45 +445,3 @@ async def test_reads_the_context_as_of_an_earlier_entry_as_a_fork_at_that_entry_
 async def test_returns_the_empty_view_for_a_conversation_without_entries() -> None:
     s = await setup()
     assert await s.read() == {"head": None, "entries": [], "contributions": [], "messages": []}
-
-
-@pytest.mark.skip(
-    reason="Keeps a context read across tasks and for the retention period; the Harness arrives in #12-#22."
-)
-async def test_keeps_a_context_read_across_tasks_and_for_the_retention_period_once_idle() -> None:
-    raise AssertionError("covered with the Harness context retention")
-
-
-@pytest.mark.skip(
-    reason="Compares extended reads with whole reads from a task; TaskRuntime arrives with #9-#10."
-)
-async def test_derives_the_same_view_from_extended_reads_as_from_whole_reads() -> None:
-    raise AssertionError("covered with the Harness kept-range extension")
-
-
-@pytest.mark.skip(
-    reason="Finds the baseline among entries an extended read adds; "
-    "the kept range arrives with the Harness in #12-#22."
-)
-async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> None:
-    raise AssertionError("covered with the Harness kept-range extension")
-
-
-@pytest.mark.skip(reason="Freezes kept entries deeply; the kept range arrives with the Harness.")
-async def test_freezes_kept_entries_deeply_even_when_storage_freezes_them_shallowly() -> None:
-    raise AssertionError("covered with the Harness kept-range cache")
-
-
-@pytest.mark.skip(
-    reason="Drops a read that finishes after its task ended; "
-    "TaskRuntime and context retention arrive with #9-#10."
-)
-async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None:
-    raise AssertionError("covered with TaskRuntime.context()")
-
-
-@pytest.mark.skip(
-    reason="Drops an idle context read on a timer; the Harness context retention arrives in #12-#22."
-)
-async def test_drops_an_idle_context_read_on_a_timer_when_nothing_else_runs() -> None:
-    raise AssertionError("covered with the Harness context retention")

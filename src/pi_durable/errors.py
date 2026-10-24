@@ -10,8 +10,6 @@ from .ids import ConversationId
 def error_message(error: object) -> str:
     """Return a message for any thrown value without throwing while formatting it."""
 
-    if isinstance(error, BaseException):
-        return str(error)
     try:
         return str(error)
     except Exception:

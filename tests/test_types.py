@@ -17,6 +17,7 @@ import json
 from typing import TYPE_CHECKING
 
 from pi_durable import ToolResultEntry
+from pi_durable.harness.types import HooksOf
 from pi_durable.ids import (
     ConversationId,
     DocumentId,
@@ -55,10 +56,12 @@ from pi_durable.types import (
     LatestConversationSemantics,
     NextTaskState,
     Page,
+    PhaseHandler,
     RewindableConversationSemantics,
     RunningTask,
     ScanOrder,
     SessionDocumentCreate,
+    SessionEnd,
     SettledTaskRecord,
     StorageWrite,
     StoredDocument,
@@ -247,6 +250,16 @@ conversation_write: StorageWrite = {
     "type": "conversation",
     "value": {"id": conversation_id},
 }
+session_end_closed: SessionEnd = {"reason": "closed"}
+session_end_failed: SessionEnd = {"reason": "failed", "error": RuntimeError("disk gone")}
+
+
+async def phase_handler(task: RunningTask, runtime: object, context: object) -> None:
+    del task, runtime, context
+
+
+handler: PhaseHandler = phase_handler
+hooks: HooksOf = {"beforeTool": None}
 
 
 def test_positive_record_shapes_are_plain_json_values() -> None:
@@ -329,6 +342,10 @@ def test_discriminators_select_the_expected_fields() -> None:
     assert delta_content["kind"] == "delta"
     assert conversation_document["fork"] == "asOf"
     assert completed_outcome["status"] == "completed"
+    assert session_end_closed["reason"] == "closed"
+    assert session_end_failed["reason"] == "failed"
+    assert handler is phase_handler
+    assert hooks == {"beforeTool": None}
 
 
 if TYPE_CHECKING:

@@ -8,7 +8,7 @@ from typing import Any
 from session_support import ControlledStorage, context, flush
 from task_support import aborted, deferred, eventually, open_tasks
 
-from pi_durable import MemoryStorage
+from pi_durable import LiveDoc, MemoryStorage
 from pi_durable.context import AbortController, with_abort_signal
 from pi_durable.errors import SessionFailed, StorageRequestError
 from pi_durable.harness.define import define_extension
@@ -654,3 +654,79 @@ async def test_ends_waits_and_running_tasks_with_the_first_error() -> None:
     await eventually(lambda: signals == ["aborted"])
     assert opened["reports"] == [failure]
     await opened["harness"].close(context)
+
+
+async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> None:
+    opened = await started(MemoryStorage())
+    harness, root = opened["harness"], opened["root"]
+    failure = RuntimeError("observer broke")
+
+    class FailingObserver:
+        def advance_frame(self, *_args: Any) -> None:
+            raise failure
+
+        def close_session(self, _failure: Any) -> None:
+            pass
+
+    async def attach(_value: Any, _release: Any, _storage: Any, _views: Any) -> Any:
+        return FailingObserver()
+
+    await harness._views.attach(root.id, attach, context)
+    watch = await root.watch(context)
+    seen: list[Any] = []
+    watch.start(lambda value, _ops, _context: seen.append(value))
+    await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "note"}), context)
+    await eventually(lambda: len(seen) > 0)
+    assert opened["reports"] == [failure]
+    await harness.close(context)
+    assert (await watch.closed)["reason"] == "session_closed"
+
+
+async def test_faults_only_the_task_and_ends_the_watch_for_an_unformattable_value() -> None:
+    class Unformattable(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("cannot format")
+
+    unformattable = Unformattable()
+
+    async def throws_run(_task: Any, _runtime: Any, _ctx: Any) -> None:
+        raise unformattable
+
+    Throws = define_task(
+        {
+            "name": "test.throws-unformattable",
+            "version": 1,
+            "initial": lambda _input: {"phase": "work"},
+            "phases": {"work": throws_run},
+            "abort": lambda task, runtime, ctx: None,
+        }
+    )
+    opened = await open_tasks(MemoryStorage(), [Throws])
+    harness = opened["harness"]
+    root = await harness.root(context)
+    watch = await harness.watch_doc(LiveDoc, root.id, context)
+    assert watch is not None
+
+    async def listener(_value: Any, _ops: Any, _context: Any) -> None:
+        raise unformattable
+
+    watch.start(listener)
+    id = await root.commit(
+        lambda tx: tx.create_task(Throws, None, {"ownership": {"kind": "conversation"}}),
+        context,
+    )
+    harness.resume()
+    outcome = (await harness.wait_for_task(id, context))["state"]["outcome"]
+    assert outcome["status"] == "faulted"
+    assert isinstance(outcome["error"]["message"], str)
+
+    async def touch(tx: Any) -> None:
+        live = await tx.doc(LiveDoc, root.id)
+        live["compactions"] = []
+
+    await root.commit(touch, context)
+    assert (await watch.closed)["reason"] == "listener_error"
+    assert await root.commit(
+        lambda tx: tx.append_entry(root.id, {"kind": "note"}), context
+    )
+    await harness.close(context)

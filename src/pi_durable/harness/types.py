@@ -206,6 +206,10 @@ class PromptSection:
     tag: bool | None = None
 
 
+HooksOf: TypeAlias = Any
+"""Hook handler map a task definition declares; erased to ``Any`` in Python's runtime typing."""
+
+
 @dataclass(frozen=True, slots=True)
 class HookRegistration:
     """Hook handlers matching tasks by name."""
@@ -729,6 +733,7 @@ __all__ = [
     "HookRegistration",
     "HookResult",
     "HookRunner",
+    "HooksOf",
     "InputEntry",
     "InputSubmissionDraft",
     "ModelRef",

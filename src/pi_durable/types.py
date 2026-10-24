@@ -44,7 +44,7 @@ from .ids import (
 from .json import JsonObject, JsonValue, copy_json, freeze_json
 
 if TYPE_CHECKING:
-    from .harness.types import ContextView
+    from .harness.types import ContextView, TaskRuntime
 
 __all__ = [
     "ROOT_CONVERSATION_ID",
@@ -80,10 +80,12 @@ __all__ = [
     "JsonObject",
     "JsonValue",
     "Page",
+    "PhaseHandler",
     "RunningTask",
     "ScanOrder",
     "Seq",
     "Session",
+    "SessionEnd",
     "Storage",
     "StorageWrite",
     "StoredDocument",
@@ -541,6 +543,10 @@ class RunningTaskRecord(TaskRecordBase):
 
 
 RunningTask: TypeAlias = RunningTaskRecord
+
+
+PhaseHandler: TypeAlias = Callable[[RunningTask, "TaskRuntime", Context], Awaitable[None]]
+"""Runs one checkpoint phase; it must commit durable progress through ``TaskRuntime.commit()``."""
 
 
 class TaskOptions(TypedDict):
@@ -1117,6 +1123,22 @@ class DocumentReader(Protocol):
     async def snapshot_as_of(self, token: Any, *args: Any) -> JsonObject | None: ...
 
 
+class SessionEndClosed(TypedDict):
+    """The Session ended with ``close()``."""
+
+    reason: Literal["closed"]
+
+
+class SessionEndFailed(TypedDict):
+    """The Session failed and closed itself; ``error`` is the first Storage error."""
+
+    reason: Literal["failed"]
+    error: Any
+
+
+SessionEnd: TypeAlias = SessionEndClosed | SessionEndFailed
+
+
 class Session(Protocol):
     """Owner of one mutation line, its records, and its tracked documents."""
 
@@ -1125,7 +1147,7 @@ class Session(Protocol):
     async def close(self, context: Context) -> None: ...
 
     @property
-    def closed(self) -> Any: ...
+    def closed(self) -> asyncio.Future[SessionEnd]: ...
 
     def subscribe_commits(self, listener: Any) -> Any: ...
 

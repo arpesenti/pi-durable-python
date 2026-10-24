@@ -22,6 +22,8 @@ targeting **v1.3.0**.
 - [`docs/upstream/spec-1.3.0.md`](./docs/upstream/spec-1.3.0.md) — vendored normative spec.
 - [`docs/adr/0001-parity-baseline-and-boundary.md`](./docs/adr/0001-parity-baseline-and-boundary.md) —
   why this is a rewrite, and what is in and out of scope.
+- [`docs/parity-report.md`](./docs/parity-report.md) — how every in-scope v1.3.0 suite was
+  translated, the audit fixes, and the remaining explicit deviations.
 
 ## Status
 

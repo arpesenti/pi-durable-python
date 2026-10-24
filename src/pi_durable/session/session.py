@@ -40,6 +40,7 @@ from ..types import (
     EntryRecord,
     EntryWithHead,
     Page,
+    SessionEnd,
     Storage,
     StorageWrite,
     StoredDocument,
@@ -248,7 +249,7 @@ class SessionImpl:
         self._failure: BaseException | None = None
         loop = _current_loop()
         self._failed: asyncio.Future[SessionFailed] = loop.create_future()
-        self._closed: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._closed: asyncio.Future[SessionEnd] = loop.create_future()
         self._failed.add_done_callback(lambda future: future.exception())
         self._clock_fn = now or _now_ms
 
@@ -273,7 +274,7 @@ class SessionImpl:
     # ── Lifecycle and commits ───────────────────────────────────────────────
 
     @property
-    def closed(self) -> asyncio.Future[dict[str, Any]]:
+    def closed(self) -> asyncio.Future[SessionEnd]:
         return self._closed
 
     @property

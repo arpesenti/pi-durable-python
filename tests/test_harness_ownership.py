@@ -1,4 +1,9 @@
-"""Translated upstream ``harness-ownership`` cases for the durable task core."""
+"""Translated upstream ``harness-ownership`` cases for the durable task core.
+
+Also translates the "owned conversations from tools and supervisors" cases: invocation-bound
+handles, a queued handle operation that loses its invocation, a subagent run aborted with its
+parent, and a running tool aborting its owned child.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ import pytest
 from session_support import ControlledStorage, context
 from task_support import (
     Deferred,
+    aborted,
     deferred,
     eventually,
     open_tasks,
@@ -16,8 +22,9 @@ from task_support import (
     with_signal,
 )
 
-from pi_durable import MemoryStorage
-from pi_durable.context import AbortController
+from pi_durable import LiveDoc, MemoryStorage
+from pi_durable.context import AbortController, AbortError
+from pi_durable.harness.util import cancellation_error
 from pi_durable.ids import TaskId
 from pi_durable.tasks import define_task
 
@@ -652,3 +659,181 @@ def assistant_text(text: str) -> dict[str, Any]:
     from chat_support import assistant_message, faux_text
 
     return assistant_message([faux_text(text)])
+
+
+def gated(message: dict[str, Any], gate: Deferred, reached: Deferred) -> Any:
+    """A faux step that waits for ``gate``, or rejects when the request is cancelled."""
+
+    async def respond(_request: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
+        reached.resolve()
+        signal = options.get("signal")
+        waiters = [asyncio.ensure_future(asyncio.shield(gate.promise))]
+        if signal is not None:
+            waiters.append(asyncio.ensure_future(aborted(signal)))
+        done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        for waiter in pending:
+            waiter.cancel()
+        for waiter in done:
+            waiter.exception()
+        if signal is not None and signal.aborted:
+            raise cancellation_error(signal)
+        return message
+
+    return respond
+
+
+async def test_rejects_a_queued_handle_operation_when_the_invocation_ends_first() -> None:
+    from chat_support import chat_setup, open_chat
+    from tool_support import add_tool, calls, tool
+
+    setup = chat_setup()
+    ready = deferred()
+    go = deferred()
+    queued = deferred()
+    held: dict[str, Any] = {}
+
+    async def delegate(_args: Any, api: Any, call_context: Any) -> Any:
+        async def create(tx: Any) -> Any:
+            created = await tx.create_conversation(
+                {"ownership": {"kind": "task", "taskId": api.task_id}}
+            )
+            return created["id"]
+
+        child = await api.commit(create, call_context)
+        handle = await api.conversation(child, call_context)
+        held["child"] = child
+        ready.resolve({"child": child, "task_id": api.task_id})
+        await go.promise
+        # Called while the invocation is alive, with a context that is not the call's: the handle
+        # binds it to the invocation. It reaches the line only after the abort mark.
+        submitting = asyncio.ensure_future(
+            handle.submit({"type": "input", "content": "late"}, context)
+        )
+        submitting.add_done_callback(
+            lambda done: done.exception() if not done.cancelled() else None
+        )
+        held["submitting"] = submitting
+        queued.resolve()
+        await aborted(call_context.abort_signal)
+
+    add_tool(setup.registry, tool("delegate", delegate))
+    setup.faux.set_responses(
+        [
+            calls(["delegate", {}, "c1"]),
+        ]
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await root.submit({"type": "input", "content": "go"}, context)
+    tree = await ready.promise
+    # Hold the Session line, queue the abort mark behind it, then let the tool queue its submit.
+    release = deferred()
+    holding = asyncio.ensure_future(root.commit(lambda _tx: release.promise, context))
+    aborting = asyncio.ensure_future(harness.abort_task(tree["task_id"], context))
+    go.resolve()
+    await queued.promise
+    release.resolve()
+    await holding
+    await aborting
+    with pytest.raises(AbortError):
+        await held["submitting"]
+    child = await harness.conversation(tree["child"], context)
+    entries = await child.entries({}, 10, None, context)
+    assert entries["items"] == []
+    inspection = await harness.inspect(context)
+    assert [
+        record for record in inspection["submissions"] if record["conversationId"] == tree["child"]
+    ] == []
+    await harness.close(context)
+
+
+async def test_aborts_a_subagent_run_and_rejects_its_waiting_tool() -> None:
+    from chat_support import assistant_message, chat_setup, faux_text, open_chat
+    from tool_support import add_tool, calls, tool
+
+    from pi_durable import configure
+
+    setup = chat_setup()
+    child_run = deferred()
+    reached = deferred()
+    tool_wait = deferred()
+    held: dict[str, Any] = {}
+
+    async def delegate(_args: Any, api: Any, call_context: Any) -> Any:
+        async def create(tx: Any) -> Any:
+            created = await tx.create_conversation(
+                {"ownership": {"kind": "task", "taskId": api.task_id}}
+            )
+            await configure(tx, created["id"], {"model": {"provider": "faux", "modelId": "faux-1"}})
+            return created["id"]
+
+        child = await api.commit(create, call_context)
+        held["child"] = child
+        handle = await api.conversation(child, call_context)
+        submission = await handle.submit({"type": "input", "content": "child task"}, call_context)
+        try:
+            settled = await submission.wait(call_context)
+            return {"output": [{"type": "text", "text": settled["status"]}]}
+        except BaseException as error:
+            tool_wait.resolve(str(error))
+            raise
+
+    add_tool(setup.registry, tool("delegate", delegate))
+    child_response = gated(assistant_message([faux_text("never")]), child_run, reached)
+    setup.faux.set_responses([calls(["delegate", {}, "c1"]), child_response])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    input = await root.submit({"type": "input", "content": "go"}, context)
+    await reached.promise
+    await root.abort(context)
+    assert (await input.wait(context))["status"] == "unanswered"
+    assert (await input.wait(context)).get("reason") == "aborted"
+    assert await tool_wait.promise
+    child = await harness.conversation(held["child"], context)
+    await child.wait_for_idle(context)
+    assert await harness.snapshot(LiveDoc, held["child"], context) == {}
+    inspection = await harness.inspect(context)
+    assert [
+        record for record in inspection["submissions"] if record["conversationId"] == held["child"]
+    ] == []
+    await harness.wait_for_idle(context)
+    await harness.close(context)
+
+
+async def test_lets_a_running_tool_abort_its_owned_child_and_continue() -> None:
+    from chat_support import assistant_message, chat_setup, faux_text, open_chat
+    from tool_support import DONE, add_tool, calls, tool
+
+    from pi_durable import configure
+
+    setup = chat_setup()
+    child_run = deferred()
+    reached = deferred()
+
+    async def delegate(_args: Any, api: Any, call_context: Any) -> Any:
+        async def create(tx: Any) -> Any:
+            created = await tx.create_conversation(
+                {"ownership": {"kind": "task", "taskId": api.task_id}}
+            )
+            await configure(tx, created["id"], {"model": {"provider": "faux", "modelId": "faux-1"}})
+            return created["id"]
+
+        child = await api.commit(create, call_context)
+        handle = await api.conversation(child, call_context)
+        submission = await handle.submit({"type": "input", "content": "child task"}, call_context)
+        await reached.promise
+        await handle.abort(call_context)
+        settled = await submission.wait(call_context)
+        return {"output": [{"type": "text", "text": f"child {settled['status']}"}]}
+
+    add_tool(setup.registry, tool("delegate", delegate))
+    child_response = gated(assistant_message([faux_text("never")]), child_run, reached)
+    setup.faux.set_responses([calls(["delegate", {}, "c1"]), child_response, DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    settled = await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    assert settled["status"] == "done"
+    await harness.close(context)

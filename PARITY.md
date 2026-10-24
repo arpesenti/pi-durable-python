@@ -7,6 +7,8 @@
 
 **Decision record:** [`docs/adr/0001-parity-baseline-and-boundary.md`](./docs/adr/0001-parity-baseline-and-boundary.md).
 
+**Audit report:** [`docs/parity-report.md`](./docs/parity-report.md).
+
 This file is the parity contract. Every public export and spec section gets a row. A row may
 not be marked `tested` until the Python implementation exists, its translated test exists, and CI
 is green.
@@ -205,7 +207,7 @@ is green.
 | `HookApi` | type | `HookApi` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
 | `HookRegistration` | type | `HookRegistration` | test_harness_tasks.py | tested |
 | `HookResult` | type | `HookResult` | test_harness_tools.py | tested |
-| `HooksOf` | type | `HooksOf` | — | planned |
+| `HooksOf` | type | `HooksOf` | test_types.py, test_spec_usage.py | tested (erased to `Any`; see Allowed deviations) |
 | `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
@@ -313,7 +315,7 @@ is green.
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
 | `NextTaskState` | type | `NextTaskState` | test_types.py | tested |
 | `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
-| `PhaseHandler` | type | `PhaseHandler` | — | planned |
+| `PhaseHandler` | type | `PhaseHandler` | test_types.py | tested |
 | `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | test_session_definitions.py | tested |
 | `RewindableConversationDocToken` | type | `RewindableConversationDocToken` | test_session_definitions.py | tested |
 | `RewindableConversationSemantics` | type | `RewindableConversationSemantics` | test_types.py | tested |
@@ -323,7 +325,7 @@ is green.
 | `Session` | type | `Session` | test_session_tables.py | tested |
 | `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | test_session_definitions.py | tested |
 | `SessionDocToken` | type | `SessionDocToken` | test_session_definitions.py | tested |
-| `SessionEnd` | type | `SessionEnd` | — | planned |
+| `SessionEnd` | type | `SessionEnd` | test_types.py, test_harness_storage_failure.py | tested |
 | `Storage` | type | `Storage` | test_storage_protocol.py | tested |
 | `StorageWrite` | type | `StorageWrite` | test_types.py, test_storage_protocol.py | tested |
 | `StoredDocument` | type | `StoredDocument` | test_types.py, test_storage_protocol.py | tested |
@@ -559,14 +561,14 @@ SQLite backend and migrations.
 
 | Section | Status |
 | --- | --- |
-| 1 Terms and invariants | code |
+| 1 Terms and invariants | tested (atomic commits, durable publication, revoked drafts, and failure rules across test_session_*, test_harness_storage_failure.py, and test_harness_context_ranges.py) |
 | 2 Core records | tested |
 | 2.1 Entries and context | tested |
-| 2.2 Public Harness surface | code (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation with #15, and the view/watch/task-graph surfaces with #22; OpenAI and Anthropic provider streaming in test_providers_openai.py and test_providers_anthropic.py) |
-| 3 Documents | code |
+| 2.2 Public Harness surface | tested (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation, the view/watch/task-graph surfaces, and the spec usage examples in test_spec_usage.py; OpenAI and Anthropic provider streaming in test_providers_openai.py and test_providers_anthropic.py) |
+| 3 Documents | tested (definitions, records, access, ownership, bases, versions, and forks across test_session_*; the audit report lists the section-to-suite mapping) |
 | 3.1 Definitions | tested |
 | 3.2 Records and lifetimes | tested |
-| 3.3 Access and creation | code (the Harness creation conveniences and `conversationCreated` hook are tested in test_harness_conversations.py; historical and document access stays in test_session_states.py, test_session_tables.py, and test_session_checkpoints_migrations.py) |
+| 3.3 Access and creation | tested (the Harness creation conveniences and `conversationCreated` hook in test_harness_conversations.py; explicit creation, historical access, and document creation in test_session_documents.py, test_session_states.py, test_session_tables.py, and test_session_checkpoints_migrations.py) |
 | 3.4 Mutation ownership | tested |
 | 3.5 Bases and checkpoints | tested |
 | 3.6 Versions and migrations | tested |
@@ -601,12 +603,12 @@ SQLite backend and migrations.
 | 9.4 Agent events (experimental) | tested |
 | 9.5 Task graph view | tested |
 | 10 Storage contract | tested |
-| 10.1 Failures | code |
+| 10.1 Failures | tested (the failure latch, SessionFailed, listener containment, unformattable values, clock fallback, and watch termination in test_harness_storage_failure.py) |
 | 11 Backends | tested |
 | 11.1 Memory | tested |
 | 11.2 SQLite | tested |
 | 11.3 JSONL | tested |
-| 12 API footguns | planned |
+| 12 API footguns | tested (every bullet mapped to a translated test in docs/parity-report.md) |
 | 13 Non-goals | n/a |
 
 The upstream document-retention suite has two Harness-level cases: one follows a Harness settings
@@ -614,14 +616,16 @@ change at its next use, and one compares agent event streams with documents evic
 translated in `test_session_document_retention.py`.
 
 The four task-integrity suites (`harness-tasks-recovery`, `harness-scheduler-indexes`,
-`harness-scheduler-retention`, and `harness-storage-failure`) are translated for the task core. The
-recovery suite is complete. The scheduler suites translate every case whose work is tasks and
-conversations; any remaining retention and storage-failure cases that watch documents or
-conversation views belong to the parity audit (#24). `harness-storage-failure` also translates the
-failure latch, listener containment, and clock fallback cases the Session can exercise now.
+`harness-scheduler-retention`, and `harness-storage-failure`) are fully translated for the task
+core. The recovery suite is complete. The scheduler suites translate every case whose work is
+tasks and conversations, including the withdrawal cases whose inputs are queued in forgotten
+conversations and the no-scan case where nothing cancels. `harness-storage-failure` translates the
+failure latch, listener and view-observer containment, unformattable thrown values, and clock
+fallback.
 
-Deferred from earlier tickets are the `harness-ownership` cases that hold the Session line under a
-queued handle operation or drive an owned subagent from a tool. The `harness-lifecycle` cases that
+The `harness-ownership` cases that hold the Session line under a queued handle operation or drive
+an owned subagent from a tool are translated in `test_harness_ownership.py`, alongside the
+invocation-bound handle, subagent abort, and child-abort cases. The `harness-lifecycle` cases that
 need conversation views or the task-graph watch are translated in
 `test_harness_lifecycle_observations.py`: no frame from a commit that settles during close, queued
 acquisitions that reject at the seal, and read-only viewers that never enable scheduling. The
@@ -650,11 +654,14 @@ written whole; details diff leaf by leaf and diagnostics append; and a sequentia
 keeps every `pi.live` commit's base exactly in the moments nothing runs.
 
 The upstream `harness-context` suite is translated in three parts. Its thirteen derivation cases run
-against the Session-level `context()` read. Three of its nine kept-range cases run against
-`TaskRuntime.context()`: extended reads scanning only newer entries and honoring an earlier cutoff,
-returned views staying apart from the kept range, and dropping the range under zero retention. The
-remaining six (clock-driven expiry, busy and late reads, extended-read equivalence, baseline found
-in added entries, and shallow-storage freeze) belong to the parity audit (#24).
+against the Session-level `context()` read. All nine kept-range cases run against
+`TaskRuntime.context()` in `test_harness_context_ranges.py`: extended reads scanning only newer
+entries and honoring an earlier cutoff, returned views staying apart from the kept range, dropping
+the range under zero retention, a kept read across tasks and its retention period, clock-driven
+expiry, equivalent derivation from extended reads under random edits, the baseline found among
+added entries, the shallow-storage deep-freeze guarantee, and a late read the finished task must
+not keep. The baseline case exposed and fixed the `UNDECIDED` sentinel gap described in the audit
+report.
 
 The upstream `harness-registry` suite is translated in `test_harness_registry_agent.py`: install,
 replace in place, uninstall by name with subscriber publications and immutable old snapshots;
@@ -706,15 +713,18 @@ interrupted, aborted, faulted, and orphaned results; output and details with `pr
 usage; left-running calls aborted before their caller settles, including during a restart cleanup;
 and `abandonOnRestart` for a replay-unsafe caller and the child tasks it creates. Agent-event
 assertions for nested calls run in `test_harness_events.py` (parent IDs, the nested result, and
-child-before-caller order for deep calls); late-subscriber view assertions remain for the parity
-audit (#24). The same values are checked through the stored `NestedCallDoc` and `pi.live` snapshots
-instead, and the
-upstream `harness-structured-output` suite is translated in
+child-before-caller order for deep calls). The late-subscriber agent-event snapshot and the
+per-slot updates for several running nested calls run in `test_harness_nested_tools.py`; the same
+values are also checked through the stored `NestedCallDoc` and `pi.live` snapshots.
+
+The upstream `harness-structured-output` suite is translated in
 `test_harness_structured_output.py`: schema-less output shapes, bounds without rendered
 diagnostics, the stored null, validated schema output, every broken-output path for callers and for
 the model's calls, Harness-written errors, the schema tool's error-text diagnostic, `afterTool`
 replacement, and `bash`'s structured output. `harness-structured` is the structured-concurrency
-suite already translated with #9 and #10, and has no nested-call cases.
+suite already translated with #9 and #10, and has no nested-call cases; its seven wait-graph
+cases (two-task, held-owner, two-hold, background, orchestrator/worker/reviewer, diamond, and
+longer-cycle) are translated in `test_harness_structured_cycles.py`.
 
 ## Allowed deviations
 
@@ -772,6 +782,7 @@ suite already translated with #9 and #10, and has no nested-call cases.
 | Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
 | Promise-returning watcher methods | `stop()` returns the one common promise | `CommittedWatch.stop()` and `closed` return the one common `asyncio.Future`, so each is identity-stable and awaiting a cancellation does not cancel it |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
+| Hook map extraction | `HooksOf<K>` conditionally extracts a task's hook map | `HooksOf` is an `Any` alias; Python cannot conditionally extract it from a generic task token, and `hook()` accepts the mapping directly |
 | ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
 | Version | `1.3.0` | `1.3.0` lockstep |
 
@@ -823,6 +834,12 @@ tool-call argument assembly are checked end to end through a Harness, and the pr
 reaches the request as OpenAI's prompt-cache key. Provider failures become `stopReason: "error"`
 messages whose text the shared pi-ai classifiers read, so durable retry and overflow compaction
 work unchanged.
+
+## Parity audit
+
+The v1.3.0 parity audit is recorded in [`docs/parity-report.md`](./docs/parity-report.md): all 56
+in-scope upstream suites are translated, the six excluded suites are listed above, two live
+credential cases skip by design, and every remaining deviation is explicit.
 
 ## Milestones
 

@@ -49,6 +49,20 @@ class EntryRange(TypedDict):
     maxEntryId: EntryId
 
 
+class _Undecided:
+    """Marker for a range whose entries so far leave the baseline open."""
+
+    def __repr__(self) -> str:
+        return "UNDECIDED"
+
+
+UNDECIDED = _Undecided()
+"""No entry so far supplies a baseline, and a later entry still may."""
+
+Baseline = MessageRecord | None | _Undecided
+"""The baseline's system message, ``None`` when the range cannot have one, or ``UNDECIDED``."""
+
+
 class ContextRange(TypedDict):
     """A derived context range, reusable as the previous range of a later read."""
 
@@ -58,7 +72,7 @@ class ContextRange(TypedDict):
     edited: set[EntryId]
     settled: list[MessageRecord]
     open: list[MessageRecord]
-    baseline: MessageRecord | None
+    baseline: Baseline
 
 
 class ContextSession(Protocol):
@@ -230,7 +244,7 @@ def extend_range(
         [*previous["open"], *[message for messages in contributions for message in messages]],
     )
     baseline = previous["baseline"]
-    if baseline is None:
+    if baseline is UNDECIDED:
         baseline = find_baseline(bounds["head"], added)
     view: ContextView = {
         "head": bounds["head"],
@@ -306,13 +320,13 @@ def settle(
 def find_baseline(
     head: EntryWithHead | None,
     entries: Sequence[EntryRecord],
-) -> MessageRecord | None:
+) -> Baseline:
     """Return the baseline system message among ``entries``, oldest first.
 
     The baseline is the system message of the first ``pi.system`` entry after the head marker, or
     of the transcript without one, when generation wrote it with every section and tool in effect.
-    ``None`` when no entry supplies one: an earlier entry carries a system message, the first
-    ``pi.system`` entry has none, or no ``pi.system`` entry follows.
+    ``None`` when an earlier entry carries a system message or the first ``pi.system`` entry has
+    none, and ``UNDECIDED`` when no entry so far settles it.
     """
 
     # An edit that targets the baseline replaces or omits its messages, so the entry's own system
@@ -327,7 +341,7 @@ def find_baseline(
             )
         if head is None and carries_system_message(entry):
             return None
-    return None
+    return UNDECIDED
 
 
 def carries_system_message(entry: EntryRecord) -> bool:
@@ -344,7 +358,7 @@ def carries_system_message(entry: EntryRecord) -> bool:
 
 def lead_with_system(
     messages: Sequence[MessageRecord],
-    baseline: MessageRecord | None,
+    baseline: Baseline,
 ) -> list[MessageRecord]:
     """Move the first system message to the front when only user messages precede it.
 
@@ -474,10 +488,12 @@ def _find_last_index(values: Sequence[Any], predicate: Callable[[Any], bool]) ->
 __all__ = [
     "EXCLUDED_STOP_REASONS",
     "MISSING_RESULT_TEXT",
+    "Baseline",
     "ContextBounds",
     "ContextRange",
     "ContextSession",
     "EntryRange",
+    "UNDECIDED",
     "capture_context_bounds",
     "carries_system_message",
     "contribute",

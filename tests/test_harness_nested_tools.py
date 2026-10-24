@@ -26,7 +26,7 @@ from tool_support import (
     tool,
 )
 
-from pi_durable import LiveDoc, MemoryStorage, NestedCallDoc, ToolTask, UsageDoc
+from pi_durable import LiveDoc, MemoryStorage, NestedCallDoc, ToolTask, UsageDoc, watch_events
 from pi_durable.context import AbortController, with_abort_signal
 
 
@@ -1023,9 +1023,22 @@ async def test_reports_several_running_nested_calls_in_their_slots() -> None:
     harness.resume()
     submission = await root.submit({"type": "input", "content": "go"}, context)
     await asyncio.gather(running["one"].promise, running["two"].promise)
+    stream = await watch_events(harness, root.id, context)
+    assert [
+        (slot["callId"], slot["status"]) for slot in stream.snapshot["nestedTools"]
+    ] == [("c1/1", "running"), ("c1/2", "running")]
+    updates: list[tuple[str, Any]] = []
+
+    def listen(batch: Any, _context: Any) -> None:
+        for event in batch:
+            if event["type"] == "tool_execution_update" and "output" in event:
+                updates.append((event["toolCallId"], event["output"]))
+
+    stream.start(listen)
     # The second slot writes first, so a wrong slot index in the update path would show.
     wrote["two"].resolve()
     await wrote["two"].promise
+    await eventually(lambda: len(updates) == 1)
 
     async def two_shows() -> bool:
         live = await harness.snapshot(LiveDoc, root.id, context)
@@ -1035,6 +1048,7 @@ async def test_reports_several_running_nested_calls_in_their_slots() -> None:
     await eventually(two_shows)
     wrote["one"].resolve()
     await wrote["one"].promise
+    await eventually(lambda: len(updates) == 2)
 
     async def both_show() -> bool:
         live = await harness.snapshot(LiveDoc, root.id, context)
@@ -1043,6 +1057,8 @@ async def test_reports_several_running_nested_calls_in_their_slots() -> None:
     await eventually(both_show)
     release.resolve()
     await submission.wait(context)
+    await stream.stop()
+    assert updates == [("c1/2", {"set": "two\n"}), ("c1/1", {"set": "one\n"})]
     await harness.close(context)
 
 

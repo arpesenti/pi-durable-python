@@ -14,6 +14,7 @@ import pytest
 from session_support import ControlledStorage, context
 from task_support import aborted, deferred, eventually, open_tasks, settled
 
+from pi_durable import LiveDoc
 from pi_durable.tasks import define_task
 
 gates: dict[str, Any] = {}
@@ -639,3 +640,127 @@ async def test_lets_a_task_wait_on_a_forgotten_ended_owner() -> None:
     outcome = (await opened["harness"].wait_for_task(waiter, context))["state"]["outcome"]
     assert outcome["status"] == "completed"
     await opened["harness"].close(context)
+
+
+async def test_withdraws_an_input_queued_in_a_forgotten_conversation_below_an_abort_marked_owner() -> None:
+    opened = await open_retention()
+    harness, root = opened["harness"], opened["root"]
+
+    # Live P -> ended B -> conversation C with no task; C gets a queued input while P is cancelling.
+    async def create(tx: Any) -> dict[str, Any]:
+        p = await tx.create_task(Hold, {"name": "p"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.create_task(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": p}})
+        c = await tx.create_conversation({"ownership": {"kind": "task", "taskId": b}})
+        keep = await tx.create_task(
+            Hold, {"name": "keep"}, {"ownership": {"kind": "task", "taskId": p}}
+        )
+        return {"p": p, "b": b, "c": c["id"], "keep": keep}
+
+    tree = await root.commit(create, context)
+    gate("b").resolve()
+    await harness.wait_for_task(tree["b"], context)
+    c = await harness.conversation(tree["c"], context)
+    assert c is not None
+
+    async def busy(tx: Any) -> None:
+        live = await tx.doc(LiveDoc, tree["c"])
+        live["run"] = {"taskId": tree["keep"], "inputs": []}
+
+    await c.commit(busy, context)
+    queued = await c.submit({"type": "input", "content": "later"}, context)
+    await harness.abort_task(tree["p"], context)
+
+    async def unanswered() -> bool:
+        return (await queued.status(context))["status"] == "unanswered"
+
+    await eventually(unanswered)
+    assert (await queued.status(context))["reason"] == "aborted"
+    await harness.wait_for_task(tree["p"], context)
+    await harness.close(context)
+
+
+async def test_withdraws_an_input_queued_two_ended_levels_below_an_owner_whose_intent_appears_later() -> None:
+    opened = await open_retention()
+    harness, root = opened["harness"], opened["root"]
+
+    # Live P -> ended B -> ended A -> conversation C with no task, and a live child keeping P holding.
+    async def create(tx: Any) -> dict[str, Any]:
+        p = await tx.create_task(Hold, {"name": "p"}, {"ownership": {"kind": "conversation"}})
+        b = await tx.create_task(Hold, {"name": "b"}, {"ownership": {"kind": "task", "taskId": p}})
+        a = await tx.create_task(Hold, {"name": "a"}, {"ownership": {"kind": "task", "taskId": b}})
+        c = await tx.create_conversation({"ownership": {"kind": "task", "taskId": a}})
+        keep = await tx.create_task(
+            Hold, {"name": "keep"}, {"ownership": {"kind": "task", "taskId": p}}
+        )
+        return {"p": p, "b": b, "c": c["id"], "keep": keep}
+
+    tree = await root.commit(create, context)
+    gate("a").resolve()
+    gate("b").resolve()
+    await harness.wait_for_task(tree["b"], context)
+    c = await harness.conversation(tree["c"], context)
+    assert c is not None
+
+    async def busy(tx: Any) -> None:
+        live = await tx.doc(LiveDoc, tree["c"])
+        live["run"] = {"taskId": tree["keep"], "inputs": []}
+
+    await c.commit(busy, context)
+    # Queued while nothing cancels: no withdrawal scan.
+    queued = await c.submit({"type": "input", "content": "later"}, context)
+    await eventually(lambda: sizes(harness)["drop_queue"] == 0)
+
+    # P fails while its child runs: it holds the failed outcome, which is cancellation intent.
+    async def fail_owner(tx: Any) -> None:
+        record = await tx.task(tree["p"])
+        assert record is not None
+        tx.set_task(
+            {
+                **record,
+                "state": {
+                    "status": "completing",
+                    "outcome": {"status": "failed", "error": {"message": "x"}},
+                },
+            }
+        )
+
+    await harness.commit(fail_owner, context)
+
+    async def unanswered() -> bool:
+        return (await queued.status(context))["status"] == "unanswered"
+
+    await eventually(unanswered)
+    assert (await queued.status(context))["reason"] == "aborted"
+    await harness.close(context)
+
+
+async def test_does_not_scan_queued_submissions_for_an_input_when_nothing_cancels() -> None:
+    storage = ControlledStorage()
+    scans = {"queued": 0}
+    scan_submissions = storage.scan_submissions
+
+    async def counting(query: Any, limit: int, cursor: Any, scan_context: Any) -> Any:
+        if query.get("status") == "queued":
+            scans["queued"] += 1
+        return await scan_submissions(query, limit, cursor, scan_context)
+
+    storage.scan_submissions = counting  # type: ignore[method-assign, assignment]
+    opened = await open_retention(storage)
+    harness, root = opened["harness"], opened["root"]
+    busy = await root.commit(
+        lambda tx: tx.create_task(Hold, {"name": "busy"}, {"ownership": {"kind": "conversation"}}),
+        context,
+    )
+
+    async def mark_busy(tx: Any) -> None:
+        live = await tx.doc(LiveDoc, root.id)
+        live["run"] = {"taskId": busy, "inputs": []}
+
+    await root.commit(mark_busy, context)
+    before = scans["queued"]
+    await root.submit({"type": "input", "content": "queued"}, context)
+    # Let any reconcile it would cause run.
+    await asyncio.sleep(0.02)
+    assert scans["queued"] == before
+    gate("busy").resolve()
+    await harness.close(context)

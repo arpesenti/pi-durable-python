@@ -124,6 +124,7 @@ from .harness.types import (
     HookRegistration,
     HookResult,
     HookRunner,
+    HooksOf,
     InputEntry,
     InputSubmissionDraft,
     ModelRef,
@@ -159,7 +160,7 @@ from .providers import Model, Models
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
-from .types import DocumentReader, Session, Tx
+from .types import DocumentReader, PhaseHandler, Session, SessionEnd, Tx
 
 __version__ = "1.3.0"
 
@@ -233,6 +234,7 @@ __all__ = [
     "HookRegistration",
     "HookResult",
     "HookRunner",
+    "HooksOf",
     "InboxDoc",
     "InboxItem",
     "InboxState",
@@ -250,6 +252,7 @@ __all__ = [
     "NestedToolExecutionResult",
     "NestedToolSlot",
     "NestedToolSummary",
+    "PhaseHandler",
     "PreparedMemoryCommit",
     "ProgressPolicy",
     "PromptInput",
@@ -268,6 +271,7 @@ __all__ = [
     "Session",
     "SessionDocFamilyToken",
     "SessionDocToken",
+    "SessionEnd",
     "SessionFailed",
     "SessionImpl",
     "Settings",
