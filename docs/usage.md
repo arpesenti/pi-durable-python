@@ -1,12 +1,13 @@
 # Usage guide
 
-A tour of the 1.3.0 surface: the Session kernel, tasks, the Harness, providers, storage, tools, and
+A tour of the public surface: the Session kernel, tasks, the Harness, providers, storage, tools, and
 the testing helpers. Snippets marked with an `<!-- example -->` marker run in the test suite
 (`tests/test_release_docs.py`); the rest are shaped like the code but need credentials, an SDK, or a
 deployment decision.
 
-The normative description is the [vendored 1.3.0 specification](./upstream/spec-1.3.0.md). This
-guide shows the Python spelling of it; [`PARITY.md`](../PARITY.md) is the export-by-export contract.
+The normative description is the [vendored specification](./upstream/spec-1.3.0.md). This guide
+shows the Python spelling of it; [`PARITY.md`](../PARITY.md) is the export-by-export contract and
+[`upstream/README.md`](./upstream/README.md) records the upstream baseline it pins.
 
 - Python names follow PEP 8: `max_tokens`, `when_busy`, `model_id`.
 - Persisted JSON keeps camelCase: a `ModelRef` is `{"provider": ..., "modelId": ...}`, an agent change
@@ -627,5 +628,5 @@ The adapter suites in `tests/` do exactly that.
 - [`../PARITY.md`](../PARITY.md) — every export, its Python target, and its tests.
 - [`../docs/parity-report.md`](./parity-report.md) — the translated suites and the deviations that
   remain.
-- [`upstream/spec-1.3.0.md`](./upstream/spec-1.3.0.md) — the normative specification.
+- [the vendored specification](./upstream/spec-1.3.0.md) — the normative specification.
 - [`../GLOSSARY.md`](../GLOSSARY.md) — the vocabulary this guide uses.

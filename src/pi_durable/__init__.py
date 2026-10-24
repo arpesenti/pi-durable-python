@@ -1,6 +1,7 @@
-"""Python port of ``@earendil-works/pi-durable`` v1.3.0.
+"""Python port of ``@earendil-works/pi-durable``.
 
-The public surface is rebuilt against the vendored 1.3.0 specification. This layer provides strict
+The package version follows the upstream release it translates, and the public surface is rebuilt
+against that release's vendored specification. This layer provides strict
 JSON copies, branded numeric IDs, public errors, entry tokens, the minimal Context/abort signal,
 the Storage protocol, the Session kernel, document definitions, task definitions, context
 derivation, the in-memory reference backend, and the durable task scheduler with its registry,

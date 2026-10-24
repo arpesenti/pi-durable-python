@@ -1,8 +1,9 @@
-"""Release-docs contract for the 1.3.0 release: docs, examples, and metadata stay in step.
+"""Release-docs contract: docs, examples, and metadata stay in step.
 
 The release ticket's acceptance criteria are documentation-shaped, so the suite treats them as
-testable claims: the README installs the package, names every declared extra, records the baseline,
-and every snippet marked runnable in the README or the usage guide actually runs.
+testable claims: the README installs the package, names every declared extra, states the version
+policy without pinning the current baseline, and every snippet marked runnable in the README or the
+usage guide actually runs.
 """
 
 from __future__ import annotations
@@ -19,7 +20,12 @@ from pi_durable import __version__
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 USAGE = ROOT / "docs" / "usage.md"
+RELEASE = ROOT / "docs" / "release.md"
+GLOSSARY = ROOT / "GLOSSARY.md"
 PYPROJECT = ROOT / "pyproject.toml"
+
+#: Docs that outlive one release; the pinned baseline belongs in PARITY.md and docs/upstream/.
+LIVING_DOCS = (README, USAGE, RELEASE, GLOSSARY)
 
 EXAMPLE_MARKER = "<!-- example -->"
 
@@ -99,8 +105,15 @@ def examples(path: Path) -> list[tuple[int, str]]:
 
 
 def test_packaging_version_agrees_with_the_package() -> None:
-    # The lockstep literal lives in tests/test_scaffold.py; this checks the artifact metadata agrees.
+    # The upstream baseline is checked in tests/test_scaffold.py; this checks the artifact metadata
+    # agrees with the code it ships.
     assert project()["version"] == __version__
+
+
+def test_packaging_summary_does_not_repeat_the_version() -> None:
+    # The version field carries the sync; the summary stays stable across releases.
+    description = str(project()["description"])
+    assert str(project()["version"]) not in description
 
 
 def test_readme_documents_installation() -> None:
@@ -131,12 +144,25 @@ def test_readme_describes_each_extra() -> None:
             assert label in rows[name], f"README row for {name} does not describe {requirement}"
 
 
-def test_readme_records_the_baseline() -> None:
+def test_readme_states_the_version_policy() -> None:
     text = read(README)
-    version = str(project()["version"])
-    assert f"v{version}" in text
-    assert "71023ae" in text, "README does not name the upstream commit the port tracks"
-    assert "earendil-works/pi-durable" in text
+    assert "lockstep" in text.lower(), "README does not state the lockstep version policy"
+    assert "PARITY.md" in text
+    assert "docs/upstream/README.md" in text, (
+        "README does not point at the file that pins the current upstream baseline"
+    )
+
+
+@pytest.mark.parametrize(
+    "path", LIVING_DOCS, ids=[str(path.relative_to(ROOT)) for path in LIVING_DOCS]
+)
+def test_living_docs_do_not_pin_the_baseline(path: Path) -> None:
+    text = read(path)
+    for anchor in ("v1.3.0", "71023ae"):
+        assert anchor not in text, (
+            f"{path.name} pins the {anchor} baseline; the tag and commit belong in PARITY.md and "
+            "docs/upstream/README.md, not in docs that outlive the release"
+        )
 
 
 def test_readme_links_the_usage_docs() -> None:

@@ -1,7 +1,11 @@
 # pi-durable-python
 
-A Python port of [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/v1.3.0/packages/durable)
-**v1.3.0**: durable conversations, tasks, and documents for agents, on `asyncio`.
+A Python port of [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable):
+durable conversations, tasks, and documents for agents, on `asyncio`.
+
+The port follows the upstream package's releases one for one: each version here translates the
+same-numbered upstream version, and parity is held to that release's semantics and persisted record
+shapes.
 
 The process can die at any point. A run, a tool round, a compaction, or an inbox placement only
 happens after the state it depends on is committed, so a restart resumes from what storage holds
@@ -13,7 +17,7 @@ rather than from what memory held.
   storage backends all ship in it. Model adapters and JSON Schema validation are separate extras.
 - **Composable.** A `Session` is the kernel; the `Harness` adds conversations, submissions,
   scheduling, compaction, extensions, and hooks on top of it.
-- **Parity, not resemblance.** This is a mechanical translation of the v1.3.0 source held to its
+- **Parity, not resemblance.** This is a mechanical translation of the upstream source held to its
   semantics and persisted record shapes. [`PARITY.md`](./PARITY.md) is the contract.
 
 ## Requirements
@@ -198,16 +202,16 @@ executed by `tests/test_release_docs.py`.
 
 The [usage guide](./docs/usage.md) walks through documents, tasks, the Harness, providers, storage
 backends, and extensions with runnable examples. The normative details are in the
-[vendored 1.3.0 specification](./docs/upstream/spec-1.3.0.md); the parity matrix is
+[vendored specification](./docs/upstream/spec-1.3.0.md); the parity matrix is
 [`PARITY.md`](./PARITY.md), and the [audit report](./docs/parity-report.md) lists the translated
 suites and the remaining explicit deviations.
 
 ## Stability and versioning
 
-- **Lockstep.** The package version tracks the upstream release it translates: 1.3.0 here is
-  `@earendil-works/pi-durable` v1.3.0 (tag `v1.3.0`, commit
-  `71023aec1546d6d677a65669c5665c0927ce0dd0`). Adopting a later upstream release is a version bump,
-  not a routine sync.
+- **Lockstep with upstream.** `pi-durable-python` X.Y.Z translates `@earendil-works/pi-durable`
+  X.Y.Z: syncing to a new upstream release is a version bump, not a routine merge. The tag and
+  commit this tree pins live in [`PARITY.md`](./PARITY.md) and
+  [`docs/upstream/README.md`](./docs/upstream/README.md).
 - **Parity is semantics and persisted shapes.** Python names follow PEP 8 while classes stay
   PascalCase and persisted JSON keeps camelCase, so a stored record round-trips as the specification
   describes. Cross-language storage interoperability is incidental, not a contract; see
@@ -234,5 +238,5 @@ full release steps: verify, build, tag, publish.
 
 ## License
 
-MIT. The vendored v1.3.0 specification is MIT, copyright (c) 2025 Mario Zechner; see
+MIT. The vendored specification is MIT, copyright (c) 2025 Mario Zechner; see
 [`docs/upstream/LICENSE`](./docs/upstream/LICENSE).
