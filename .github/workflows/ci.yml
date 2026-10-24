@@ -48,6 +48,52 @@ jobs:
       - name: Test
         run: pytest
 
+  package:
+    name: sdist and wheel install in fresh environments
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build both artifacts
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Install the wheel in a fresh environment
+        run: |
+          python -m venv wheel-env
+          wheel-env/bin/python -m pip install --upgrade pip
+          wheel-env/bin/python -m pip install dist/*.whl
+          wheel-env/bin/python -c "import tomllib, pi_durable; expected = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; assert pi_durable.__version__ == expected, (pi_durable.__version__, expected)"
+          test -f wheel-env/lib/python*/site-packages/pi_durable/py.typed
+
+      - name: Install the sdist in a fresh environment
+        run: |
+          python -m venv sdist-env
+          sdist-env/bin/python -m pip install --upgrade pip
+          sdist-env/bin/python -m pip install dist/*.tar.gz
+          sdist-env/bin/python -c "import tomllib, pi_durable; expected = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; assert pi_durable.__version__ == expected, (pi_durable.__version__, expected)"
+
+      - name: Install every extra from the built wheel
+        run: |
+          wheel="$(ls "$PWD"/dist/*.whl)"
+          for extra in openai anthropic schema all dev; do
+            python -m venv "extra-$extra"
+            "extra-$extra/bin/python" -m pip install --upgrade pip
+            "extra-$extra/bin/python" -m pip install "pi-durable-python[$extra] @ file://$wheel"
+          done
+          extra-openai/bin/python -c "import pi_durable.providers.openai, importlib.util; assert importlib.util.find_spec('anthropic') is None"
+          extra-anthropic/bin/python -c "import pi_durable.providers.anthropic, importlib.util; assert importlib.util.find_spec('openai') is None"
+          extra-schema/bin/python -c "import jsonschema"
+          extra-dev/bin/python -c "import pytest, ruff, mypy"
+
   extras:
     name: ${{ matrix.extra }} extra installs alone
     runs-on: ubuntu-latest
