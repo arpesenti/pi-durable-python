@@ -570,7 +570,9 @@ async def test_cleanup_terminates_active_shell_processes(env: PosixExecutionEnv)
         await _wait_for(started)
     finally:
         await env.cleanup(BACKGROUND_CONTEXT)
-    result = await asyncio.wait_for(execution, 3)
+    # The invariant is that cleanup terminates the shell, not how fast the runner reaps the child.
+    # A killed `sleep 60` settles well inside this; a missed kill still fails long before it ends.
+    result = await asyncio.wait_for(execution, 20)
     assert isinstance(result, Ok)
 
 
