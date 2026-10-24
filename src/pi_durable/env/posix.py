@@ -923,6 +923,7 @@ class PosixExecutionEnv(ExecutionEnv):
         self._poll_interval_ms = int(watch_options.get("poll_interval_ms", _DEFAULT_POLL_INTERVAL_MS))
         self._max_directories = int(watch_options.get("max_directories", _DEFAULT_MAX_DIRECTORIES))
         self._children: set[asyncio.subprocess.Process] = set()
+        self._cleanup_generation = 0
 
     async def absolute_path(self, path: str, context: Context) -> Result[str, FileError]:
         del context
@@ -1418,6 +1419,9 @@ class PosixExecutionEnv(ExecutionEnv):
             opts.get("env"),
             bool(opts.get("inherit_env", True)),
         )
+        # cleanup() cannot see a process that is still spawning, so remember the generation and
+        # kill the process once it exists if cleanup ran in between.
+        cleanup_generation = self._cleanup_generation
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv,
@@ -1432,6 +1436,8 @@ class PosixExecutionEnv(ExecutionEnv):
             return err(ExecutionError("spawn_error", str(error), error))
 
         self._children.add(process)
+        if cleanup_generation != self._cleanup_generation:
+            _kill_process(process)
         loop = asyncio.get_running_loop()
         timed_out = False
         callback_error: ExecutionError | None = None
@@ -1533,6 +1539,8 @@ class PosixExecutionEnv(ExecutionEnv):
 
     async def cleanup(self, context: Context) -> None:
         del context
+        # Bumping the generation also terminates a child whose spawn is still in flight.
+        self._cleanup_generation += 1
         for process in list(self._children):
             _kill_process(process)
         self._children.clear()

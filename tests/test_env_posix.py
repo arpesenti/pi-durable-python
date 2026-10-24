@@ -570,9 +570,30 @@ async def test_cleanup_terminates_active_shell_processes(env: PosixExecutionEnv)
         await _wait_for(started)
     finally:
         await env.cleanup(BACKGROUND_CONTEXT)
-    # The invariant is that cleanup terminates the shell, not how fast the runner reaps the child.
-    # A killed `sleep 60` settles well inside this; a missed kill still fails long before it ends.
-    result = await asyncio.wait_for(execution, 20)
+    # The child is killed by cleanup; a missed kill runs for the full minute.
+    result = await asyncio.wait_for(execution, 3)
+    assert isinstance(result, Ok)
+
+
+async def test_cleanup_racing_the_spawn_still_terminates_the_shell(
+    env: PosixExecutionEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleanup that lands between the spawn and the registration must still kill the child.
+
+    The event loop can run ``cleanup()`` after the child exists but before ``exec()`` resumes and
+    adds it to ``_children``; cleanup then sees nothing to kill.
+    """
+
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_then_cleanup(*args: Any, **kwargs: Any) -> Any:
+        process = await spawn(*args, **kwargs)
+        await env.cleanup(BACKGROUND_CONTEXT)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_then_cleanup)
+    execution = asyncio.create_task(env.exec("sleep 60", None, BACKGROUND_CONTEXT))
+    result = await asyncio.wait_for(execution, 10)
     assert isinstance(result, Ok)
 
 
