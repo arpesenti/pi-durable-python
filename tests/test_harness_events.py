@@ -133,8 +133,11 @@ async def live(harness: Any, conversation: Any) -> dict[str, Any]:
 async def test_streams_a_run_as_lifecycle_events_and_text_deltas_that_rebuild_the_answer() -> None:
     setup = chat_setup()
     text = "streamed answer text " * 20
+    # One second of stream against a 100 ms partial throttle: several partials commit before the
+    # answer, which the delta assertions need. A 200 ms stream left the second flush a 10 ms margin
+    # and Linux runners that sleep precisely committed only the first.
     setup.faux.set_responses(
-        [slow_message(assistant_message([faux_text(text)]), chunks=20, interval=0.01)]
+        [slow_message(assistant_message([faux_text(text)]), chunks=20, interval=0.05)]
     )
     opened = await open_chat(MemoryStorage(), setup)
     harness, root = opened["harness"], opened["root"]
