@@ -83,8 +83,8 @@ git tag -a v1.3.0 -m "pi-durable-python 1.3.0 (parity with @earendil-works/pi-du
 git push origin main
 git push origin v1.3.0
 
-uv publish dist/*                       # reads ~/.pypirc or UV_PUBLISH_TOKEN
-# or: python -m twine upload dist/*
+python -m twine upload dist/*           # reads ~/.pypirc
+# or: uv publish --token "$UV_PUBLISH_TOKEN" dist/*   (uv does not read ~/.pypirc)
 ```
 
 Publish only artifacts built from the tagged commit. The version is immutable once PyPI accepts it;
