@@ -27,6 +27,7 @@ from task_support import (
 from pi_durable import MemoryStorage, TaskGraph
 from pi_durable.context import AbortController
 from pi_durable.delta import apply_immutable
+from pi_durable.harness.define import define_extension
 from pi_durable.ids import ConversationId, TaskId
 from pi_durable.storage.sqlite import SqliteStorage
 from pi_durable.storage.sqlite.posix import open_posix_sqlite_database
@@ -507,3 +508,79 @@ async def test_publishes_no_revision_for_a_commit_that_changes_no_node_and_share
     assert rebuilt.value is not last
     rebuilt.dispose()
     await harness.close(context)
+
+
+async def test_publishes_a_sleeping_state_and_a_derived_blocked_reason() -> None:
+    clock = [1_000]
+
+    async def nap(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.sleep_until(clock[0] + 500, {"phase": "later"}, ctx)
+
+    async def later(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda: completed(None), ctx)
+
+    Nap = define_task(
+        {
+            "name": "test.graph-nap",
+            "version": 1,
+            "initial": lambda _input: {"phase": "nap"},
+            "phases": {"nap": nap, "later": later},
+            "abort": lambda _task, _runtime, _ctx: None,
+        }
+    )
+    Missing = define_task(
+        {
+            "name": "test.graph-missing",
+            "version": 1,
+            "initial": lambda _input: {"phase": "run"},
+            "phases": {"run": nap},
+            "abort": lambda _task, _runtime, _ctx: None,
+        }
+    )
+    opened = await open_tasks(MemoryStorage(), [Nap], {"now": lambda: clock[0]})
+    harness = opened["harness"]
+    root = await harness.root(context)
+
+    async def create(tx: Any) -> tuple[TaskId, TaskId]:
+        sleeping = await tx.create_task(Nap, None, {"ownership": {"kind": "conversation"}})
+        # Created through a token the registry does not hold: nothing can run it.
+        missing = await tx.create_task(Missing, None, {"ownership": {"kind": "conversation"}})
+        return sleeping, missing
+
+    sleeping, missing = await root.commit(create, context)
+    harness.resume()
+    graph = await harness.task_graph(context)
+    await eventually(
+        lambda: graph.value["tasks"].get(str(sleeping), {}).get("state", {}).get("status")
+        == "sleeping"
+    )
+    assert graph.value["tasks"][str(sleeping)]["state"] == {
+        "status": "sleeping",
+        "phase": "later",
+        "until": 1_500,
+    }
+    await eventually(
+        lambda: graph.value["tasks"].get(str(missing), {}).get("blocked") == "missing_task"
+    )
+    opened["registry"].install(define_extension({"name": "late", "tasks": [_late_definition()]}))
+    # A registry change derives the reason again, without a commit.
+    await eventually(
+        lambda: graph.value["tasks"].get(str(missing), {}).get("blocked") is None
+    )
+    graph.dispose()
+    await harness.close(context)
+
+
+def _late_definition() -> Any:
+    async def run(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda: completed(None), ctx)
+
+    return define_task(
+        {
+            "name": "test.graph-missing",
+            "version": 1,
+            "initial": lambda _input: {"phase": "run"},
+            "phases": {"run": run},
+            "abort": lambda _task, _runtime, _ctx: None,
+        }
+    )

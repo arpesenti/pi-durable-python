@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import partial
 from typing import Any, Literal, cast
@@ -11,6 +12,7 @@ from ..entries import ResetEntry
 from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..session.session import SessionImpl, _now_ms, contained
 from ..session.transaction import Transaction, TransactionScope
+from ..timers import host_timers
 from ..types import (
     ROOT_CONVERSATION_ID,
     ConversationOwnership,
@@ -32,15 +34,19 @@ from .scheduler import TaskScheduler
 from .submissions import AbortResult, Submissions
 from .task_graph import TaskGraphView
 from .types import (
+    LISTENER,
     Agent,
     ContextView,
     ConversationHandle,
     HarnessInspection,
     RegistryReader,
     RegistrySnapshot,
+    ReportInfo,
     SettledSubmissionRecord,
     SettledTask,
     Submission,
+    Wake,
+    host_error,
 )
 from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
@@ -58,29 +64,67 @@ def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
     return cast(ConversationOwnership, ownership)
 
 
-def _safe_report(on_report: Callable[[BaseException], Any] | None) -> Callable[[BaseException], None]:
-    def report(error: BaseException) -> None:
+def _report_arity(on_report: Callable[..., Any]) -> int:
+    """How many positional arguments a host ``on_report`` takes: it may take just the error."""
+
+    try:
+        parameters = list(inspect.signature(on_report).parameters.values())
+    except (TypeError, ValueError):
+        return 2
+    if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        return 2
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return min(len(positional), 2)
+
+
+def _safe_report(
+    on_report: Callable[..., Any] | None,
+) -> Callable[[BaseException, ReportInfo | None], None]:
+    """``on_report`` that cannot fail: it is the last place an error goes, so its own throw is dropped."""
+
+    arity = _report_arity(on_report) if on_report is not None else 2
+
+    def report(error: BaseException, info: ReportInfo | None = None) -> None:
+        values = info if info is not None else LISTENER
+
         def call() -> Any:
-            return None if on_report is None else on_report(error)
+            if on_report is None:
+                return None
+            return on_report(error) if arity == 1 else on_report(error, values)
 
         contained(call, lambda _error: None)
 
     return report
 
 
-def safe_now(now: Callable[[], int] | None, report: Callable[[BaseException], None]) -> Callable[[], int]:
+def safe_now(now: Callable[[], int] | None, report: Callable[..., None]) -> Callable[[], int]:
+    """The host clock, falling back to the wall clock when it throws.
+
+    A broken clock must not stop commits: the first throw is reported, with its ``host_error`` info
+    when the sink takes one, and later throws are not.
+    """
+
     if now is None:
         return _now_ms
     reported = False
+    arity = _report_arity(report)
 
     def clock() -> int:
         nonlocal reported
         try:
             return now()
         except Exception as error:
+            # Set first: a report handler that reads the clock again must not report again.
             if not reported:
                 reported = True
-                report(error)
+                if arity == 1:
+                    report(error)
+                else:
+                    report(error, host_error("now"))
             return _now_ms()
 
     return clock
@@ -232,37 +276,51 @@ class Harness(SessionImpl):
         report = _safe_report(options.get("on_report"))
         now = safe_now(options.get("now"), report)
         settings_option = options.get("settings")
+        host_settings = _current_settings(settings_option)
         super().__init__(
             raw_storage,
             now,
-            lambda: _settings_value(settings_option, "document_retention_ms"),
+            lambda: _settings_value(host_settings(), "document_retention_ms"),
+            options.get("set_timer", options.get("setTimer")),
         )
         self._options = dict(options)
         self._report_sink = report
+        self._host_settings = host_settings
         self._views = ConversationViews(self, self.storage)
-        self._graph = TaskGraphView(self, self.storage)
         self._tasks = TaskScheduler(
             session=self,
             storage=self.storage,
             registry=cast(RegistryReader, options.get("registry")),
-            models=options.get("models"),
+            models=_current_models(options.get("models")),
             agent=lambda id, snapshot, call_context: self.resolve_agent(id, snapshot, call_context),
-            settings=lambda: resolve_settings(settings_option),
+            settings=lambda: resolve_settings(host_settings()),
             env=lambda id, call_context: self.build_env(id, call_context),
             now=now,
             report=report,
+            on_wake=options.get("on_wake", options.get("onWake")),
+            timers=host_timers(
+                options.get("set_timer", options.get("setTimer")),
+                lambda error: report(error, host_error("setTimer")),
+            ),
+            write_at_close=self.write_at_close,
             settle_outcome=lambda tx, record, outcome: self._settle_outcome(tx, record, cast(Any, outcome)),
-            withdraw_inputs=lambda tx, conversation_id: self._withdraw_inputs(tx, conversation_id),
+            withdraw_inputs=self._withdraw_inputs,
             conversation=lambda id, binding, call_context: self._bound_conversation(
                 id, binding, call_context
             ),
             context=without_abort_signal(context),
         )
+        self._graph = TaskGraphView(
+            self,
+            self.storage,
+            blocked=lambda record: self._tasks.blocked_reason(record),
+            subscribe_blocked=lambda listener: self._tasks.subscribe_blocked(listener),
+        )
         self._settings_option = settings_option
         self._submissions = Submissions(
             session=self,
             now=now,
-            queue_modes=lambda: _queue_modes(settings_option),
+            queue_modes=lambda: _queue_modes(host_settings()),
             resume=self._tasks.resume,
             start_run=self._start_run,
         )
@@ -305,8 +363,10 @@ class Harness(SessionImpl):
 
     # ── Harness surface ────────────────────────────────────────────────────
 
-    def report(self, error: BaseException) -> None:
-        self._report_sink(error)
+    def report(self, error: BaseException, info: Mapping[str, Any] | None = None) -> None:
+        """Forward a report to the host; ``info`` says what happened (spec section 10.1)."""
+
+        self._report_sink(error, cast(ReportInfo, dict(info)) if info is not None else LISTENER)
 
     def close(self, context: Context) -> Coroutine[Any, Any, None]:
         """A Harness seals admission synchronously, before it signals and joins its handlers."""
@@ -345,8 +405,15 @@ class Harness(SessionImpl):
     ) -> Agent:
         registry = snapshot or cast(RegistryReader, self._options["registry"]).snapshot()
         state = await self.snapshot(AgentDoc, id, context)
-        settings = resolve_settings(self._settings_option)
-        return resolve_agent(state, registry, settings, self.report)
+        settings = resolve_settings(self._host_settings())
+
+        def report(error: BaseException, extension: str) -> None:
+            self.report(
+                error,
+                {"type": "extension_error", "conversationId": id, "extension": extension},
+            )
+
+        return resolve_agent(state, registry, settings, report)
 
     async def build_env(self, id: ConversationId, context: Context) -> Any:
         build = self._options.get("env")
@@ -364,6 +431,18 @@ class Harness(SessionImpl):
     def resume(self) -> None:
         self.assert_usable()
         self._tasks.resume()
+
+    def wake(self) -> Wake:
+        """When this Session next needs a running process, from the scheduler's memory."""
+
+        self.assert_usable()
+        return self._tasks.wake()
+
+    async def retry_task(self, id: TaskId, context: Context) -> None:
+        """Run a task parked by ``settings.restart_limit`` again."""
+
+        self.assert_usable()
+        await self._tasks.retry(id, context)
 
     async def get_task(self, id: TaskId, context: Context) -> TaskRecord | None:
         return await self.read_on_line(lambda: self.storage.task(id, context))
@@ -503,8 +582,10 @@ class Harness(SessionImpl):
     async def _settle_outcome(self, tx: Transaction, record: TaskRecord, outcome: TaskOutcome) -> None:
         await settle_scheduler_outcome(tx, record, cast(Any, outcome))
 
-    async def _withdraw_inputs(self, tx: Transaction, conversation_id: ConversationId) -> None:
-        await withdraw_queued_inputs(tx, conversation_id)
+    async def _withdraw_inputs(
+        self, tx: Transaction, conversation_id: ConversationId, reason: str = "aborted"
+    ) -> None:
+        await withdraw_queued_inputs(tx, conversation_id, reason)
 
     async def _bound_conversation(
         self,
@@ -557,6 +638,22 @@ def _queue_modes(settings: Any) -> QueueModes:
         steering_mode=resolved.steering_mode,
         follow_up_mode=resolved.follow_up_mode,
     )
+
+
+def _current_settings(settings: Any) -> Callable[[], Any]:
+    """``HarnessOptions.settings`` as a function: plain settings, or none, are returned at every call."""
+
+    if callable(settings):
+        return cast(Callable[[], Any], settings)
+    return lambda: settings
+
+
+def _current_models(models: Any) -> Callable[[], Any]:
+    """``HarnessOptions.models`` as a function, read at each use."""
+
+    if callable(models) and not hasattr(models, "get_model"):
+        return cast(Callable[[], Any], models)
+    return lambda: models
 
 
 def _settings_value(settings: Any, name: str) -> Any:

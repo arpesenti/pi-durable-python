@@ -12,7 +12,7 @@ owned by the generation so the run waits for the summary.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NotRequired, TypedDict, cast
 
 from ..context import Context
@@ -28,16 +28,22 @@ from ..session.drafts import DraftList, DraftObject
 from ..session.transaction import Transaction
 from ..tasks import define_task
 from ..types import EntryDraft, MessageRecord, TaskRecord
-from .agent import add_tools
-from .compaction import create_compaction, estimate_context, select_cut
-from .inbox import QueueModes, apply_boundary, prepare_boundary
+from .agent import add_tools, section_extension
+from .compaction import compaction_policy, create_compaction, estimate_context, select_cut
+from .inbox import Boundary, QueueModes, apply_boundary, prepare_boundary, withdraw_queued_inputs
 from .live import LiveDoc, end_run, start_run
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
-from .types import ContextView, ModelRef, PromptInput
+from .types import AfterFailedRun, ContextView, ModelRef, PromptInput
 from .usage import record_usage
-from .util import assign_json, call_hook, request_stream_options, task_checkpoint
+from .util import (
+    assign_json,
+    call_hook,
+    optional_extension,
+    request_stream_options,
+    task_checkpoint,
+)
 
 DEFAULT_POLL_AFTER_MS = 5_000
 
@@ -134,14 +140,13 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
             return
     view = await runtime.context(conversation_id, context)
     shown = replay_sections(view["messages"])
-    report = runtime.report
     env: Any = None
     try:
         env = await runtime.env(context)
     except BaseException as error:
         if context.abort_signal is not None and context.abort_signal.aborted:
             raise
-        report(error)
+        runtime.report(error, {"type": "host", "callback": "env"})
     prompt_input = PromptInput(
         conversation_id=conversation_id,
         agent=agent,
@@ -149,12 +154,24 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
         shown=shown,
         read=runtime,
     )
+
+    def report(error: BaseException, failed_section: Any) -> None:
+        runtime.report(
+            error,
+            {
+                "type": "extension",
+                **optional_extension(section_extension(agent, failed_section.key)),
+            },
+        )
+
     desired = await render_sections(agent.sections, prompt_input, shown, report, context)
     entries = plan_system_entries(view, desired, agent.tools, runtime.now())
     threshold = (
         None
         if compacted is not None
-        else threshold_compaction(view, entries, model.context_window, settings.compaction)
+        else threshold_compaction(
+            view, entries, model.context_window, compaction_policy(settings, ref)
+        )
     )
     if threshold == "blocking":
         # Compact first and prepare again; the transcript is unchanged until the compaction appends.
@@ -258,10 +275,15 @@ async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
 
 async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """After the backoff's sleep; a run before ``until`` sleeps again (spec section 8.3)."""
+
     checkpoint = task_checkpoint(task)
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
-    await runtime.sleep(int(checkpoint["until"]), context)
+    until = int(checkpoint["until"])
+    if until > runtime.now():
+        await runtime.sleep_until(until, checkpoint, context)
+        return
     conversation_id = runtime.conversation_id
 
     async def retry(tx: Transaction) -> dict[str, Any]:
@@ -276,13 +298,18 @@ async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None
 
 
 async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """After the sleep until ``pollAt``; a run before it sleeps again (spec section 8.3)."""
+
     checkpoint = task_checkpoint(task)
+    poll_at = int(checkpoint["pollAt"])
+    if poll_at > runtime.now():
+        await runtime.sleep_until(poll_at, checkpoint, context)
+        return
     ref = cast(ModelRef, checkpoint["model"])
     model = runtime.models.get_model(ref["provider"], ref["modelId"])
     if model is None:
         await fail_no_model(runtime, ref, context)
         return
-    await runtime.sleep(int(checkpoint["pollAt"]), context)
     message = await runtime.models.fetch_deferred(
         model, cast(JsonObject, checkpoint["handle"]), {"signal": runtime.signal}
     )
@@ -340,7 +367,8 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
                     model, cast(JsonObject, checkpoint["handle"]), {"signal": runtime.signal}
                 )
             except BaseException as error:
-                runtime.report(error)
+                # A provider call such as cancelling a deferred response is a host callback.
+                runtime.report(error, {"type": "host", "callback": "models"})
     conversation_id = runtime.conversation_id
     # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results.
     unstarted = (
@@ -382,10 +410,6 @@ GenerationTask = define_task(
         "abort": _abort,
     }
 )
-
-
-def _delay(seconds: float) -> Awaitable[None]:
-    return asyncio.sleep(seconds)
 
 
 class _Flusher:
@@ -514,7 +538,8 @@ async def classify(
             live = await tx.doc(LiveDoc, conversation_id)
             live["generation"] = {"attempt": attempt, "deferred": {"pollAt": poll_at}}
             return {
-                "status": "running",
+                "status": "sleeping",
+                "until": poll_at,
                 "checkpoint": {
                     "phase": "poll",
                     "attempt": attempt,
@@ -547,10 +572,10 @@ async def classify(
 
     settings = runtime.settings
     overflow = message.get("stopReason") == "error" and is_context_overflow(message)
-    if overflow and compacted is None and settings.compaction.get("enabled"):
-        policy = settings.compaction
+    compaction = compaction_policy(settings, ref)
+    if overflow and compacted is None and compaction.enabled:
         view = await runtime.context(conversation_id, context, {"at": cutoff})
-        if select_cut(view, int(policy.get("keep_recent_tokens", 0))) is not None:
+        if select_cut(view, compaction.keep_recent_tokens) is not None:
             text = str(message.get("errorMessage") or "Context overflow")
 
             async def compact(tx: Transaction) -> dict[str, Any]:
@@ -587,13 +612,16 @@ async def classify(
     until = runtime.now() + retry_delay_ms(policy, attempt) if retry else 0
 
     async def settle(tx: Transaction) -> dict[str, Any]:
+        # Read before the first table write; only a failure uses it.
+        failure = None if retry else await _prepare_failure(tx, runtime)
         live = await tx.doc(LiveDoc, conversation_id)
         await append_assistant(tx, conversation_id, message)
-        if retry:
+        if failure is None:
             error_text = str(message.get("errorMessage") or "")
             live["generation"] = {"attempt": attempt, "retry": {"at": until, "error": error_text}}
             return {
-                "status": "running",
+                "status": "sleeping",
+                "until": until,
                 "checkpoint": {
                     "phase": "retry",
                     "attempt": attempt,
@@ -605,10 +633,11 @@ async def classify(
             message.get("errorMessage")
             or f"Model response ended with stop reason {message.get('stopReason')}"
         )
-        end_run(
+        await _end_failed_run(
             tx,
+            runtime,
             live,
-            runtime.task_id,
+            failure,
             {"status": "unanswered", "reason": "model_error", "detail": text},
         )
         return {
@@ -898,15 +927,65 @@ def task_for(runtime: Any) -> Any:
     return task
 
 
+class _Failure(TypedDict):
+    """What a failed run's end needs from the table, read before the commit's first table write."""
+
+    policy: AfterFailedRun
+    boundary: NotRequired[Boundary]
+
+
+async def _prepare_failure(tx: Transaction, runtime: Any) -> _Failure:
+    settings = runtime.settings
+    policy = cast(AfterFailedRun, settings.after_failed_run)
+    if policy != "continue":
+        return {"policy": policy}
+    boundary = await prepare_boundary(
+        tx,
+        runtime.conversation_id,
+        QueueModes(
+            steering_mode=settings.steering_mode,
+            follow_up_mode=settings.follow_up_mode,
+        ),
+    )
+    return {"policy": policy, "boundary": boundary}
+
+
+async def _end_failed_run(
+    tx: Transaction,
+    runtime: Any,
+    live: Any,
+    failure: _Failure,
+    settlement: Any,
+) -> None:
+    """End a failed run and do with the inputs queued behind it what ``after_failed_run`` says.
+
+    ``keep`` leaves them queued, ``continue`` starts the next run with them, and ``withdraw`` settles
+    them ``unanswered`` with reason ``run_failed`` while queued writes stay (spec section 6).
+    """
+
+    conversation_id = runtime.conversation_id
+    end_run(tx, live, runtime.task_id, settlement)
+    if failure["policy"] == "withdraw":
+        await withdraw_queued_inputs(tx, conversation_id, "run_failed")
+    boundary = failure.get("boundary")
+    if boundary is None:
+        return
+    placed = await apply_boundary(tx, boundary, "final", runtime.now())
+    if placed.users:
+        await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
+
+
 async def fail_model_error(runtime: Any, text: str, context: Context) -> None:
     conversation_id = runtime.conversation_id
 
     async def fail(tx: Transaction) -> dict[str, Any]:
+        failure = await _prepare_failure(tx, runtime)
         live = await tx.doc(LiveDoc, conversation_id)
-        end_run(
+        await _end_failed_run(
             tx,
+            runtime,
             live,
-            runtime.task_id,
+            failure,
             {"status": "unanswered", "reason": "model_error", "detail": text},
         )
         return {
@@ -929,8 +1008,11 @@ async def fail_no_model(runtime: Any, ref: ModelRef | None, context: Context) ->
     conversation_id = runtime.conversation_id
 
     async def fail(tx: Transaction) -> dict[str, Any]:
+        failure = await _prepare_failure(tx, runtime)
         live = await tx.doc(LiveDoc, conversation_id)
-        end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "no_model"})
+        await _end_failed_run(
+            tx, runtime, live, failure, {"status": "unanswered", "reason": "no_model"}
+        )
         return {
             "status": "terminal",
             "outcome": {
@@ -955,7 +1037,7 @@ def threshold_compaction(
     view: ContextView,
     planned: Sequence[Mapping[str, Any]],
     context_window: int,
-    policy: Mapping[str, Any],
+    policy: Any,
 ) -> str | None:
     """Which threshold compaction preparation starts before its request (spec section 8.3).
 
@@ -964,7 +1046,7 @@ def threshold_compaction(
     while no compaction is listed.
     """
 
-    if not policy.get("enabled") or context_window <= 0:
+    if not policy.enabled or context_window <= 0:
         return None
     planned_messages = [
         message
@@ -972,16 +1054,16 @@ def threshold_compaction(
         for message in cast(Sequence[Mapping[str, Any]], entry.get("model") or ())
     ]
     tokens = estimate_context(view, planned_messages)
-    blocking = context_window - int(policy.get("reserve_tokens", 0))
-    background = blocking - int(policy.get("background_tokens", 0))
+    blocking = context_window - policy.reserve_tokens
+    background = blocking - policy.background_tokens
     over = (
         "blocking"
         if tokens > blocking
         else "background"
-        if int(policy.get("background_tokens", 0)) > 0 and tokens > background
+        if policy.background_tokens > 0 and tokens > background
         else None
     )
-    if over is None or select_cut(view, int(policy.get("keep_recent_tokens", 0))) is None:
+    if over is None or select_cut(view, policy.keep_recent_tokens) is None:
         return None
     return over
 

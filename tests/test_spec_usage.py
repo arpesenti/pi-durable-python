@@ -9,12 +9,14 @@ Behavioral coverage for every pattern lives in the suite files named in
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 from pi_durable import (
     DEFAULT_COMPACTION_POLICY,
     AgentDoc,
+    CompactionSettings,
     CompactionTask,
     ContextView,
     GenerationTask,
@@ -33,9 +35,10 @@ from pi_durable import (
     wrap_tool,
 )
 from pi_durable.context import Context
+from pi_durable.harness.types import HarnessSettings, ReportInfo, TaskRuntime, Wake
 from pi_durable.session.transaction import Transaction
 from pi_durable.tools import create_bash_tool, create_edit_tool, create_read_tool
-from pi_durable.types import EntryDraft, EntryId, Storage
+from pi_durable.types import EntryDraft, EntryId, RunningTask, Storage, TaskId
 
 # ─── Names the spec leaves to the application ────────────────────────────────
 
@@ -96,6 +99,83 @@ class SettingsManager:
 
 
 manager = SettingsManager()
+
+
+# ─── Section 5.6: sleeping, timers, and wakeups ──────────────────────────────
+
+
+async def _step_a() -> int:
+    return 1
+
+
+async def _step_b(value: int) -> int:
+    return value + 1
+
+
+async def sleep_until_next_phase(task: RunningTask, runtime: TaskRuntime, context: Context) -> None:
+    """The spec's §5.6 example: work after a wait belongs in the next phase."""
+
+    a = await _step_a()
+    await runtime.sleep_until(
+        runtime.now() + 10 * 60_000, {"phase": "afterSleep", "a": a}, context
+    )
+
+
+async def after_sleep(task: RunningTask, runtime: TaskRuntime, context: Context) -> None:
+    checkpoint = cast(Mapping[str, Any], task["state"]["checkpoint"])
+    b = await _step_b(checkpoint["a"])
+    await runtime.commit(
+        lambda: {"status": "running", "checkpoint": {"phase": "next", "b": b}}, context
+    )
+
+
+def set_timer(
+    callback: Callable[[], None], delay_ms: float, *, background: bool = False
+) -> Callable[[], None]:
+    """A host timer as ``HarnessOptions.set_timer`` takes it: arms once, returns a disarm."""
+
+    handle = asyncio.get_running_loop().call_later(max(0.0, delay_ms) / 1000.0, callback)
+
+    def disarm() -> None:
+        handle.cancel()
+
+    return disarm
+
+
+def wake_host(wake: Wake) -> None:
+    """A host's ``on_wake``: arm its own wakeup from ``active`` / ``at``."""
+
+    if wake["active"]:
+        return
+    at = wake.get("at")
+    if at is not None:
+        _ = at
+
+
+def report_to_a_breaker(error: BaseException, info: ReportInfo) -> None:
+    """A host's ``on_report``: act on the typed info, not only the error."""
+
+    kind = info["type"]
+    if kind == "task_faulted" and info.get("reason") == "restart_limit":
+        _ = info["task"]["id"]
+
+
+async def retry_a_parked_task(harness: Harness, id: TaskId, context: Context) -> None:
+    await harness.retry_task(id, context)
+    if harness.wake()["active"]:
+        harness.resume()
+
+
+def settings_from_a_function() -> HarnessSettings:
+    """``HarnessOptions.settings`` may be a value or a function returning the current one."""
+
+    return {"restart_limit": 3, "after_failed_run": "withdraw"}
+
+
+COMPACTION_WITH_OVERRIDES: CompactionSettings = {
+    "keep_recent_tokens": 20_000,
+    "model_overrides": {"anthropic/claude-sonnet": {"keep_recent_tokens": 60_000}},
+}
 
 
 # ─── Examples ────────────────────────────────────────────────────────────────
@@ -183,6 +263,7 @@ def examples() -> dict[str, Any]:
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"enabled": False},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     PlanMode = define_extension(
@@ -328,6 +409,7 @@ def examples() -> dict[str, Any]:
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"image": "python:3.13"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
 

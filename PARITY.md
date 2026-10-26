@@ -1,11 +1,12 @@
 # Parity Matrix
 
-**Baseline:** `@earendil-works/pi-durable` **v1.3.0**, tag `v1.3.0`, commit
-`71023aec1546d6d677a65669c5665c0927ce0dd0`.
+**Baseline:** `@earendil-works/pi-durable` **v1.4.0**, tag `v1.4.0`, commit
+`4a080252f06caf63a525d7873c5d94d3c23887e0`.
 
-**Normative reference:** [`docs/upstream/spec-1.3.0.md`](./docs/upstream/spec-1.3.0.md).
+**Normative reference:** [`docs/upstream/spec-1.4.0.md`](./docs/upstream/spec-1.4.0.md).
 
-**Decision record:** [`docs/adr/0001-parity-baseline-and-boundary.md`](./docs/adr/0001-parity-baseline-and-boundary.md).
+**Decision records:** [`docs/adr/0001-parity-baseline-and-boundary.md`](./docs/adr/0001-parity-baseline-and-boundary.md)
+and [`docs/adr/0002-upstream-1-4-0-scope.md`](./docs/adr/0002-upstream-1-4-0-scope.md).
 
 **Audit report:** [`docs/parity-report.md`](./docs/parity-report.md).
 
@@ -25,13 +26,14 @@ is green.
 
 ## Scope
 
-- **Root:** the v1.3.0 root export (`src/index.ts`).
+- **Root:** the v1.4.0 root export (`src/index.ts`).
 - **Subpaths:** `env`, `tools`, `tool-search`, `testing`, and the storage backends.
 - **Providers:** OpenAI and Anthropic adapters as optional extras.
 - **Excluded:** Code Mode, the image implementation (`ImageProcessor` protocol remains),
-  Cloudflare adapters, PowerShell, Windows support, and benchmark helpers.
-- **Storage:** the v1.3.0 backends are ported faithfully. Cross-language storage
-  interoperability is incidental, not a supported contract.
+  Cloudflare adapters, IndexedDB and `test-workers`, telemetry, pi-ai client identity,
+  PowerShell, Windows support, and benchmark helpers.
+- **Storage:** the v1.4.0 backends are ported faithfully, including the SQLite schema-version-2
+  rebuild. Cross-language storage interoperability is incidental, not a supported contract.
 
 ## Root exports
 
@@ -72,6 +74,7 @@ is green.
 | `configure` | value | `configure` | test_harness_registry_agent.py | tested |
 | `DEFAULT_COMPACTION_POLICY` | value | `DEFAULT_COMPACTION_POLICY` | test_harness_registry_agent.py | tested |
 | `DEFAULT_PROGRESS_POLICY` | value | `DEFAULT_PROGRESS_POLICY` | test_harness_registry_agent.py | tested |
+| `DEFAULT_RESTART_LIMIT` | value | `DEFAULT_RESTART_LIMIT` | test_harness_blocked.py, test_harness_registry_agent.py | tested |
 | `DEFAULT_RETRY_POLICY` | value | `DEFAULT_RETRY_POLICY` | test_harness_registry_agent.py | tested |
 
 ### `./harness/compaction.ts` → `pi_durable.harness.compaction`
@@ -118,8 +121,11 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py, test_harness_submissions.py, test_harness_inbox.py, test_harness_input_entries.py, test_harness_generation.py, test_harness_generation_recovery.py, test_harness_usage.py, test_harness_conversations.py, test_harness_inspect.py | tested |
-| `safeNow` | value | `safe_now` | test_harness_storage_failure.py | tested |
+| `DEFAULT_HARNESS_IDENTITY` | value | — | — | excluded (pi-ai client identity; see ADR 0002) |
+| `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py, test_harness_submissions.py, test_harness_inbox.py, test_harness_input_entries.py, test_harness_generation.py, test_harness_generation_recovery.py, test_harness_usage.py, test_harness_conversations.py, test_harness_inspect.py, test_harness_sleep.py, test_harness_blocked.py, test_harness_reports.py, test_harness_host_inputs.py, test_harness_failed_run_inbox.py | tested |
+| `Harness.wake` | value | `Harness.wake` | test_harness_sleep.py, test_harness_blocked.py | tested |
+| `Harness.retryTask` | value | `Harness.retry_task` | test_harness_blocked.py | tested |
+| `safeNow` | value | `safe_now` | test_harness_storage_failure.py, test_harness_reports.py | tested |
 | `SCHEDULER_INDEX_SIZES` | value | `Harness.scheduler_index_sizes` | test_harness_scheduler_retention.py | tested |
 
 ### `./harness/inbox.ts` → `pi_durable.harness.inbox`
@@ -155,6 +161,18 @@ is green.
 | --- | --- | --- | --- | --- |
 | `createRegistry` | value | `create_registry` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_registry_agent.py | tested |
 
+### `./harness/scheduler.ts` → `pi_durable.harness.scheduler`
+
+| Upstream | Kind | Python target | Tests | Status |
+| --- | --- | --- | --- | --- |
+| `BlockedReason` | type | `BlockedReason` | test_harness_blocked.py, test_harness_inspect.py, test_harness_task_graph.py | tested |
+
+### `./harness/telemetry.ts` → `pi_durable.harness.telemetry`
+
+| Upstream | Kind | Python target | Tests | Status |
+| --- | --- | --- | --- | --- |
+| `DURABLE_TELEMETRY_SCHEMA` | value | — | — | excluded (host observability; see ADR 0002) |
+
 ### `./harness/task-graph.ts` → `pi_durable.harness.task_graph`
 
 | Upstream | Kind | Python target | Tests | Status |
@@ -181,6 +199,7 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
+| `AfterFailedRun` | type | `AfterFailedRun` | test_harness_failed_run_inbox.py | tested |
 | `Agent` | type | `Agent` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `AgentChange` | type | `AgentChange` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
 | `AgentState` | type | `AgentState` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
@@ -189,6 +208,7 @@ is green.
 | `CompactionPolicy` | type | `CompactionPolicy` | test_harness_generation.py, test_harness_compaction.py | tested |
 | `CompactionReason` | type | `CompactionReason` | test_harness_compaction.py | tested |
 | `CompactionResult` | type | `CompactionResult` | test_harness_compaction.py | tested |
+| `CompactionSettings` | type | `CompactionSettings` | test_harness_compaction.py, test_harness_generation.py | tested |
 | `ContextView` | type | `ContextView` | test_harness_context.py | tested |
 | `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py, test_harness_compaction.py, test_harness_view.py | tested (creation, fork, agent, context, entries, compact, reset, abort, idle waits, view, and watch) |
 | `ConversationAbortOptions` | type | `ConversationAbortOptions` | test_harness_ownership.py | tested |
@@ -208,6 +228,7 @@ is green.
 | `HookRegistration` | type | `HookRegistration` | test_harness_tasks.py | tested |
 | `HookResult` | type | `HookResult` | test_harness_tools.py | tested |
 | `HooksOf` | type | `HooksOf` | test_types.py, test_spec_usage.py | tested (erased to `Any`; see Allowed deviations) |
+| `HostCallback` | type | `HostCallback` | test_harness_reports.py | tested |
 | `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
@@ -216,24 +237,29 @@ is green.
 | `PromptInput` | type | `PromptInput` | test_harness_prompt.py | tested |
 | `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py, test_harness_prompt.py | tested |
 | `QueueMode` | type | `QueueMode` | test_harness_inbox.py | tested |
+| `ReportFrom` | type | `ReportFrom` | test_harness_reports.py | tested |
+| `ReportInfo` | type | `ReportInfo` | test_harness_reports.py, test_harness_blocked.py, test_harness_sleep.py | tested |
+| `ReportTask` | type | `ReportTask` | test_harness_reports.py, test_harness_blocked.py | tested |
 | `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
 | `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
 | `RegistrySnapshot` | type | `RegistrySnapshot` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
-| `Settings` | type | `Settings` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
+| `SetTimer` | type | `SetTimer` | test_harness_sleep.py | tested |
+| `Settings` | type | `Settings` | test_harness_tasks.py, test_harness_registry_agent.py, test_harness_failed_run_inbox.py | tested |
 | `SettledSubmissionRecord` | type | `SettledSubmissionRecord` | test_harness_submissions.py | tested |
 | `SettledTask` | type | `SettledTask` | test_harness_tasks.py | tested |
 | `Submission` | type | `Submission` | test_harness_submissions.py, test_harness_inbox.py | tested |
 | `SubmissionDraft` | type | `SubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
-| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py, test_harness_inspect.py | tested |
-| `ToolControl` | type | `ToolControl` | test_harness_tools.py, test_harness_tools_recovery.py | tested |
+| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py, test_harness_inspect.py, test_harness_sleep.py, test_harness_blocked.py | tested (including `sleeping` and `blocked` `restart_limit`) |
+| `ToolControl` | type | `ToolControl` | test_harness_tools.py, test_harness_tools_recovery.py | tested (a boolean `terminate`; only `True` ends a round) |
 | `ToolDiagnostic` | type | `ToolDiagnostic` | test_harness_tools.py, test_harness_live_deltas.py | tested |
-| `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested |
+| `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested (including `now()`) |
 | `ToolExecutionMode` | type | `ToolExecutionMode` | test_harness_tools.py | tested |
 | `ToolExecutionResult` | type | `ToolExecutionResult` | test_harness_tools.py | tested |
 | `ToolHookCall` | type | `ToolHookCall` | test_harness_tools.py | tested |
 | `ToolHooks` | type | `ToolHooks` | test_harness_tools.py | tested |
 | `ToolRegistration` | type | `ToolRegistration` | test_harness_tasks.py, test_harness_registry_agent.py, test_harness_prompt.py, test_harness_tools.py | tested |
 | `UserInput` | type | `UserInput` | test_harness_input_entries.py | tested |
+| `Wake` | type | `Wake` | test_harness_sleep.py, test_harness_blocked.py | tested |
 | `Wrap` | type | `Wrap` | test_harness_registry_agent.py | tested |
 
 ### `./harness/usage.ts` → `pi_durable.harness.usage`
@@ -313,7 +339,7 @@ is green.
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
-| `NextTaskState` | type | `NextTaskState` | test_types.py | tested |
+| `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
 | `PhaseHandler` | type | `PhaseHandler` | test_types.py | tested |
 | `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | test_session_definitions.py | tested |
@@ -344,10 +370,10 @@ is green.
 | `TaskOutcome` | type | `TaskOutcome` | test_types.py | tested |
 | `TaskOutcomeError` | type | `TaskOutcomeError` | test_types.py | tested |
 | `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
-| `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py | tested |
+| `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py, test_testing_conformance.py | tested (scans `sleeping` tasks) |
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
 | `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py | tested |
-| `TaskState` | type | `TaskState` | test_types.py | tested |
+| `TaskState` | type | `TaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
@@ -556,6 +582,9 @@ SQLite backend and migrations.
 | `./storage/jsonl/node` | Node filesystem adapter; Python passes a `FileSystem` (such as `PosixExecutionEnv`) to `JsonlStorage.open()`. |
 | `./storage/sqlite/node` | Node SQLite driver; Python opens the stdlib-backed `PosixSqliteDatabase` facade and passes it to `SqliteStorage.open()`. |
 | `./storage/sqlite/cloudflare` | Cloudflare-only adapter. |
+| `./storage/indexeddb` | Browser storage backend; out of scope like the Cloudflare adapters. |
+| `./harness/telemetry` | Host observability tied to `@earendil-works/pi-telemetry`, with no normative spec section; see ADR 0002. |
+| `test-workers/*` | Browser and Cloudflare Workers suites; out of scope with the adapters they exercise. |
 
 ## Spec sections
 
@@ -566,11 +595,11 @@ SQLite backend and migrations.
 | 2.1 Entries and context | tested |
 | 2.2 Public Harness surface | tested (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation, the view/watch/task-graph surfaces, and the spec usage examples in test_spec_usage.py; OpenAI and Anthropic provider streaming in test_providers_openai.py and test_providers_anthropic.py) |
 | 3 Documents | tested (definitions, records, access, ownership, bases, versions, and forks across test_session_*; the audit report lists the section-to-suite mapping) |
-| 3.1 Definitions | tested |
+| 3.1 Definitions | tested (`checkpoint_when` is required on every definition; test_session_definitions.py) |
 | 3.2 Records and lifetimes | tested |
 | 3.3 Access and creation | tested (the Harness creation conveniences and `conversationCreated` hook in test_harness_conversations.py; explicit creation, historical access, and document creation in test_session_documents.py, test_session_states.py, test_session_tables.py, and test_session_checkpoints_migrations.py) |
 | 3.4 Mutation ownership | tested |
-| 3.5 Bases and checkpoints | tested |
+| 3.5 Bases and checkpoints | tested (no default predicate: a definition that keeps only required bases returns `False`, in test_session_checkpoints_migrations.py) |
 | 3.6 Versions and migrations | tested |
 | 3.7 Forks | tested |
 | 4 Transactions and storage ownership | tested |
@@ -578,9 +607,10 @@ SQLite backend and migrations.
 | 5.1 Definition | tested |
 | 5.2 Effect sandwich | tested |
 | 5.3 Terminal tasks | tested |
-| 5.4 Scheduler, abort, and ownership | tested |
+| 5.4 Scheduler, abort, and ownership | tested (the crash-loop guard, parking, `retry_task()`, and the graph's derived blocked reason in test_harness_blocked.py; close writes stopped tasks back as `pending`) |
 | 5.5 Structured concurrency | tested |
-| 6 Submissions and inbox | tested |
+| 5.6 Sleeping, timers, and wakeups | tested (durable sleeps, `wake()`, `on_wake`, `set_timer`, invocation timers, and timer disarm in test_harness_sleep.py) |
+| 6 Submissions and inbox | tested (`after_failed_run` keep/continue/withdraw in test_harness_failed_run_inbox.py) |
 | 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
 | 7.1 Extensions, registry, and agent resolution | tested (built-in tasks) |
 | 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
@@ -603,10 +633,10 @@ SQLite backend and migrations.
 | 9.4 Agent events (experimental) | tested |
 | 9.5 Task graph view | tested |
 | 10 Storage contract | tested |
-| 10.1 Failures | tested (the failure latch, SessionFailed, listener containment, unformattable values, clock fallback, and watch termination in test_harness_storage_failure.py) |
+| 10.1 Failures | tested (the failure latch, SessionFailed, listener containment, unformattable values, clock fallback, and watch termination in test_harness_storage_failure.py; the typed `ReportInfo` of every report in test_harness_reports.py) |
 | 11 Backends | tested |
 | 11.1 Memory | tested |
-| 11.2 SQLite | tested |
+| 11.2 SQLite | tested (schema version 2 rebuilds the task table to admit `sleeping`; the 1.3.0-to-1.4.0 upgrade and the newer-version refusal in test_sqlite_migrations.py) |
 | 11.3 JSONL | tested |
 | 12 API footguns | tested (every bullet mapped to a translated test in docs/parity-report.md) |
 | 13 Non-goals | n/a |
@@ -750,7 +780,10 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | JSONL serialization | `JSON.stringify` (raw UTF-8, well-formed lone-surrogate escapes) | `json.dumps(ensure_ascii=True)` (escaped non-ASCII); the decoded JSON values are identical |
 | SQLite serialization | `JSON.stringify` (raw UTF-8), indexed strings kept as `JSON.stringify` output | `json.dumps(ensure_ascii=True, separators=(",", ":"))`; decoded values are identical, and indexed strings stay JSON-encoded because stdlib `sqlite3` cannot bind lone surrogates |
 | PowerShell tool | exported | excluded |
-| Document eviction timers | `setTimeout(...).unref()`, commits-only where timers cannot be unreferenced | `asyncio` timers never keep the process alive, so every loop keeps one; a loop that cannot schedule one evicts on commits only |
+| Host timers | `HarnessOptions.setTimer` defaults to `setTimeout`, background timers unreferenced, and declines background timers in Cloudflare Workers | `Timers` in `pi_durable.timers` arms the same foreground/background split through a Python `set_timer(callback, delay_ms, *, background=False)`; the default is an asyncio timer, which cannot keep a process alive, and `None` declines one. `Sleeping` tasks store deadlines on the Harness clock in both |
+| Telemetry | `HarnessOptions.telemetry` and `DURABLE_TELEMETRY_SCHEMA` | excluded; see ADR 0002 |
+| pi-ai client identity | `HarnessOptions.identity` and `DEFAULT_HARNESS_IDENTITY` on every model request | excluded; the provider adapters keep their own attribution headers (ADR 0002) |
+| IndexedDB and `test-workers` | `IndexedDbStorage` and the Workers suites | excluded with the browser and Cloudflare backends (ADR 0002) |
 | Windows support | supported | unsupported |
 | Images | `./images` subpath | excluded; `ImageProcessor` protocol only |
 | Code Mode | `./codemode` subpath | excluded |
@@ -776,6 +809,7 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
+| Host callback arity | JavaScript ignores arguments a callback does not declare, so a one-argument `onReport` sees the error alone | `on_report` (and `safe_now`'s sink) declared with one parameter receives the error alone: the Harness inspects the callable's arity once, and passes `info` to a callback that declares it |
 | Definition constructors | identity functions; they check nothing | `define_*` constructors validate a required non-empty name (and a task's version) eagerly; `section` and the registry check section rules |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
 | Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | `context(conversation_id, context, at=...)`; `Conversation.context()` and `TaskRuntime.context()` accept the cutoff as a keyword mapping |
@@ -784,7 +818,7 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
 | Hook map extraction | `HooksOf<K>` conditionally extracts a task's hook map | `HooksOf` is an `Any` alias; Python cannot conditionally extract it from a generic task token, and `hook()` accepts the mapping directly |
 | ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
-| Version | `1.3.0` | `1.3.0` lockstep |
+| Version | `1.4.0` | `1.4.0` lockstep |
 
 ## Port additions
 
@@ -824,6 +858,10 @@ These are required by the chosen scope but are not upstream 1.3.0 exports.
 | OpenAI model adapter over Chat Completions | `pi_durable.providers.openai` | tested (`test_providers_openai.py`, `test_providers_extras.py`) |
 | Anthropic model adapter over Messages | `pi_durable.providers.anthropic` | tested (`test_providers_anthropic.py`, `test_providers_extras.py`) |
 
+| `ReportType`, `ReportReason` | union aliases narrowing `ReportInfo.type` and `.reason` | `pi_durable.harness.types` | used by `ReportInfo`; `test_harness_reports.py` exercises every member |
+| `Timers`, `host_timers`, `native_timer` | internal timer arming behind `HarnessOptions.set_timer` (upstream `hostTimers` / `nativeTimer`) | `pi_durable.timers` | `test_harness_sleep.py`, `test_session_document_retention.py` |
+| `blocked_subject`, `blocked_reason()` | what the task graph reads of a record to derive its blocked reason | `pi_durable.harness.scheduler` | `test_harness_blocked.py`, `test_harness_task_graph.py` |
+
 The adapter suites inject fake `AsyncOpenAI`- and `AsyncAnthropic`-shaped clients, so they need no
 credentials and no network. `test_providers_extras.py` runs in subprocesses that block both SDK
 modules, proving the core package and both adapter modules import without either extra, and that a
@@ -837,9 +875,10 @@ work unchanged.
 
 ## Parity audit
 
-The v1.3.0 parity audit is recorded in [`docs/parity-report.md`](./docs/parity-report.md): all 56
-in-scope upstream suites are translated, the six excluded suites are listed above, two live
-credential cases skip by design, and every remaining deviation is explicit.
+The v1.4.0 parity audit is recorded in [`docs/parity-report.md`](./docs/parity-report.md): all 61
+in-scope upstream suites are translated, the excluded suites are listed above (telemetry,
+`indexeddb-storage`, `test-workers/*`, and `codemode-checkpoints` among them), two live credential
+cases skip by design, and every remaining deviation is explicit.
 
 ## Milestones
 
@@ -850,7 +889,11 @@ credential cases skip by design, and every remaining deviation is explicit.
 - [x] 5. Harness: agent, registry, hooks, prompt, model, generation, tool rounds, usage, live.
 - [x] 6. `env`, coding tools, `tool-search`.
 - [x] 7. Events/view and task graph, compaction, extension reload, and the OpenAI/Anthropic adapters.
-- [ ] 8. Full translated suite green, docs, version `1.3.0`, release.
+- [x] 8. Full translated suite green, docs, version `1.3.0`, release.
+- [x] 9. v1.4.0 sync: durable sleeps, timers and wakeups, the crash-loop guard, typed reports,
+  host inputs as functions, `afterFailedRun`, per-model compaction settings, required
+  `checkpointWhen`, and the SQLite schema-version-2 migration.
+- [ ] 10. v1.4.0 release (separate ticket, as `Release 1.3.0` was).
 
 ## Updating this file
 

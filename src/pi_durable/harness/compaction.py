@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict, cast
 
 from ..context import Context
@@ -129,6 +130,34 @@ CompactionCheckpoint = SelectCheckpoint | SummarizeCheckpoint | RetryCheckpoint
 """Checkpoint shapes the compaction phases read and write."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Policy:
+    """The compaction policy resolved for one model."""
+
+    enabled: bool = True
+    reserve_tokens: int = 16_384
+    keep_recent_tokens: int = 20_000
+    background_tokens: int = 32_768
+
+
+def compaction_policy(settings: Any, model: ModelRef) -> _Policy:
+    """The compaction policy for ``model``: its ``model_overrides`` entry over the harness-wide one."""
+
+    policy = settings.compaction
+    overrides = policy.get("model_overrides") or {}
+    override = overrides.get(f"{model['provider']}/{model['modelId']}") or {}
+    return _Policy(
+        enabled=bool(override.get("enabled", policy.get("enabled", True))),
+        reserve_tokens=int(override.get("reserve_tokens", policy.get("reserve_tokens", 16_384))),
+        keep_recent_tokens=int(
+            override.get("keep_recent_tokens", policy.get("keep_recent_tokens", 20_000))
+        ),
+        background_tokens=int(
+            override.get("background_tokens", policy.get("background_tokens", 32_768))
+        ),
+    )
+
+
 async def _select_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     conversation_id = runtime.conversation_id
     agent = await runtime.agent(context)
@@ -138,9 +167,9 @@ async def _select_phase(task: TaskRecord, runtime: Any, context: Context) -> Non
     if ref is None or model is None:
         await fail_no_model(runtime, ref, context)
         return
-    policy = settings.compaction
+    policy = compaction_policy(settings, ref)
     view = await runtime.context(conversation_id, context)
-    cut = select_cut(view, int(policy.get("keep_recent_tokens", 0)))
+    cut = select_cut(view, policy.keep_recent_tokens)
     if cut is None:
         await complete(runtime, context)
         return
@@ -177,7 +206,7 @@ async def _select_phase(task: TaskRecord, runtime: Any, context: Context) -> Non
         "thinkingLevel": agent.thinking_level,
         "streamOptions": request_stream_options(settings.stream),
         "maxTokens": min(
-            int(0.8 * int(policy.get("reserve_tokens", 0))),
+            int(0.8 * policy.reserve_tokens),
             model.max_tokens if model.max_tokens > 0 else 2**31 - 1,
         ),
         "tail": max((entry["id"] for entry in view["entries"]), default=first_kept),
@@ -263,7 +292,8 @@ async def _summarize_phase(task: TaskRecord, runtime: Any, context: Context) -> 
             status = compaction_status(live, runtime.task_id)
             if status is not None:
                 status["retry"] = {"at": until, "error": str(message.get("errorMessage") or "")}
-            return {"status": "running", "checkpoint": {"phase": "retry", **request, "until": until}}
+            checkpoint = {"phase": "retry", **request, "until": until}
+            return {"status": "sleeping", "checkpoint": checkpoint, "until": until}
         text = summary_failure(message)
         fail_compaction_status(live, runtime.task_id, text)
         return {
@@ -275,10 +305,14 @@ async def _summarize_phase(task: TaskRecord, runtime: Any, context: Context) -> 
 
 
 async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """After the backoff's sleep; a run before ``until`` sleeps again (spec section 8.7)."""
+
     checkpoint = task_checkpoint(task)
     until = int(checkpoint["until"])
     request = {key: value for key, value in checkpoint.items() if key not in ("phase", "until")}
-    await runtime.sleep(until, context)
+    if until > runtime.now():
+        await runtime.sleep_until(until, checkpoint, context)
+        return
     attempt = int(request["attempt"]) + 1
 
     async def retry(tx: Transaction) -> dict[str, Any]:

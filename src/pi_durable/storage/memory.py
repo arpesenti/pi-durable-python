@@ -52,7 +52,7 @@ from ..types import (
 from .scan import next_cursor, scan_start
 
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
-_TASK_STATUSES = ("pending", "running", "waiting", "completing", "terminal")
+_TASK_STATUSES = ("pending", "running", "waiting", "sleeping", "completing", "terminal")
 _SUBMISSION_STATUSES = ("queued", "placed", "done", "unanswered")
 
 

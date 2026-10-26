@@ -118,6 +118,7 @@ async def test_selects_bases_only_for_nonempty_ordinary_batches_and_passes_the_p
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 0},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, publications = open_test_session()
@@ -453,6 +454,7 @@ async def test_migrates_read_only_once_per_cold_load_copies_the_result_and_write
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 2},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     calls: list[int] = []
@@ -471,6 +473,7 @@ async def test_migrates_read_only_once_per_cold_load_copies_the_result_and_write
             "scope": "session",
             "initial": lambda: {"count": 0, "labels": []},
             "migrate": migrate,
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -505,6 +508,7 @@ async def test_writes_the_required_base_on_the_first_transaction_then_writes_del
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 4},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     checkpoints: list[int] = []
@@ -586,6 +590,7 @@ async def test_rolls_migration_and_edits_back_then_coalesces_later_edits_into_on
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     migrations: list[int] = []
@@ -601,6 +606,7 @@ async def test_rolls_migration_and_edits_back_then_coalesces_later_edits_into_on
             "scope": "session",
             "initial": lambda: {"count": 0, "migrated": False},
             "migrate": migrate,
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, publications = open_test_session()
@@ -652,6 +658,7 @@ async def test_strict_checks_migration_results_and_remains_usable_after_rejectio
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Invalid = define_doc(
@@ -661,6 +668,7 @@ async def test_strict_checks_migration_results_and_remains_usable_after_rejectio
             "scope": "session",
             "initial": lambda: {},
             "migrate": lambda _value, _from_version: {"invalid": object()},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Other = define_doc(
@@ -669,6 +677,7 @@ async def test_strict_checks_migration_results_and_remains_usable_after_rejectio
             "version": 1,
             "scope": "session",
             "initial": lambda: {"ok": True},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -703,6 +712,7 @@ async def test_rejects_newer_versions_and_older_versions_without_migration() -> 
             "version": 2,
             "scope": "session",
             "initial": lambda: {"count": 2},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     V1 = define_doc(
@@ -711,6 +721,7 @@ async def test_rejects_newer_versions_and_older_versions_without_migration() -> 
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     V3WithoutMigration = define_doc(
@@ -719,6 +730,7 @@ async def test_rejects_newer_versions_and_older_versions_without_migration() -> 
             "version": 3,
             "scope": "session",
             "initial": lambda: {"count": 3},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -758,6 +770,7 @@ async def test_persists_a_required_migration_base_before_retirement_without_the_
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
 
@@ -803,6 +816,7 @@ async def test_leaves_unaccessed_older_documents_and_unavailable_definitions_unt
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     SecondV1 = define_doc(
@@ -811,6 +825,7 @@ async def test_leaves_unaccessed_older_documents_and_unavailable_definitions_unt
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 2},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     second_migrations: list[int] = []
@@ -821,6 +836,7 @@ async def test_leaves_unaccessed_older_documents_and_unavailable_definitions_unt
             "scope": "session",
             "initial": lambda: {"count": 0},
             "migrate": lambda value, _from_version: {"count": value["count"]},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     def migrate_second(value: Any, _from_version: int) -> Any:
@@ -834,6 +850,7 @@ async def test_leaves_unaccessed_older_documents_and_unavailable_definitions_unt
             "scope": "session",
             "initial": lambda: {"count": 0},
             "migrate": migrate_second,
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -868,6 +885,7 @@ HistoryV1 = define_doc(
         "history": "rewindable",
         "fork": "asOf",
         "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 HistoryFamily = define_doc_family(
@@ -879,6 +897,7 @@ HistoryFamily = define_doc_family(
         "history": "rewindable",
         "fork": "asOf",
         "initial": lambda seed: {"seed": seed, "count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 history_migrations: list[int] = []
@@ -898,6 +917,7 @@ HistoryV3 = define_doc(
         "fork": "asOf",
         "initial": lambda: {"count": 0, "version": 3},
         "migrate": _history_migrate,
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 
@@ -1007,6 +1027,7 @@ async def test_selects_the_incarnation_alive_at_the_entry_commit() -> None:
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _publications = open_test_session()
@@ -1060,6 +1081,7 @@ async def test_rejects_historical_reads_for_latest_only_documents() -> None:
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"count": 0},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     # The same logical address declared rewindable: the token cannot gain history the record
@@ -1072,6 +1094,7 @@ async def test_rejects_historical_reads_for_latest_only_documents() -> None:
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"count": 0},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _publications = open_test_session()
@@ -1098,6 +1121,7 @@ V1Doc = define_doc(
         "version": 1,
         "scope": "session",
         "initial": lambda: {"name": "first"},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 V2Doc = define_doc(
@@ -1107,6 +1131,7 @@ V2Doc = define_doc(
         "scope": "session",
         "initial": lambda: {"names": []},
         "migrate": lambda value, _from_version: {"names": [value["name"]]},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 

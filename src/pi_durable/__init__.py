@@ -43,6 +43,7 @@ from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequ
 from .harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_PROGRESS_POLICY,
+    DEFAULT_RESTART_LIMIT,
     DEFAULT_RETRY_POLICY,
     AgentDoc,
     add_tools,
@@ -89,6 +90,7 @@ from .harness.live import (
 )
 from .harness.provider import ProviderDoc, ProviderState
 from .harness.registry import create_registry
+from .harness.scheduler import BlockedReason
 from .harness.task_graph import TaskGraph, TaskGraphNode, TaskGraphState, TaskGraphWatch
 from .harness.tool import (
     NestedCallDoc,
@@ -99,6 +101,7 @@ from .harness.tool import (
     ToolTaskResult,
 )
 from .harness.types import (
+    AfterFailedRun,
     Agent,
     AgentChange,
     AgentState,
@@ -107,6 +110,7 @@ from .harness.types import (
     CompactionPolicy,
     CompactionReason,
     CompactionResult,
+    CompactionSettings,
     ContextView,
     Conversation,
     ConversationAbortOptions,
@@ -121,11 +125,13 @@ from .harness.types import (
     GenerationHooks,
     HarnessInspection,
     HarnessOptions,
+    HarnessSettings,
     HookApi,
     HookRegistration,
     HookResult,
     HookRunner,
     HooksOf,
+    HostCallback,
     InputEntry,
     InputSubmissionDraft,
     ModelRef,
@@ -137,6 +143,12 @@ from .harness.types import (
     Registry,
     RegistryReader,
     RegistrySnapshot,
+    ReportFrom,
+    ReportInfo,
+    ReportReason,
+    ReportTask,
+    ReportType,
+    SetTimer,
     Settings,
     SettledSubmissionRecord,
     SettledTask,
@@ -153,6 +165,7 @@ from .harness.types import (
     ToolHooks,
     ToolRegistration,
     UserInput,
+    Wake,
     Wrap,
 )
 from .harness.usage import UsageDoc, UsageState
@@ -163,19 +176,20 @@ from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
 from .types import DocumentReader, PhaseHandler, Session, SessionEnd, Tx
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = [
-    "__version__",
     "add_tools",
+    "AfterFailedRun",
     "Agent",
     "AgentChange",
+    "AgentDoc",
     "AgentEvent",
     "AgentEventStream",
-    "AgentDoc",
     "AgentState",
     "AnyTask",
     "AssistantEntry",
+    "BlockedReason",
     "CommonDocDefinition",
     "CompactionCheckpoint",
     "CompactionEntry",
@@ -185,6 +199,7 @@ __all__ = [
     "CompactionPolicy",
     "CompactionReason",
     "CompactionResult",
+    "CompactionSettings",
     "CompactionStatus",
     "CompactionTask",
     "configure",
@@ -205,6 +220,7 @@ __all__ = [
     "create_session",
     "DEFAULT_COMPACTION_POLICY",
     "DEFAULT_PROGRESS_POLICY",
+    "DEFAULT_RESTART_LIMIT",
     "DEFAULT_RETRY_POLICY",
     "define_doc",
     "define_doc_family",
@@ -236,6 +252,7 @@ __all__ = [
     "HookResult",
     "HookRunner",
     "HooksOf",
+    "HostCallback",
     "InboxDoc",
     "InboxItem",
     "InboxState",
@@ -265,6 +282,11 @@ __all__ = [
     "Registry",
     "RegistryReader",
     "RegistrySnapshot",
+    "ReportFrom",
+    "ReportInfo",
+    "ReportReason",
+    "ReportTask",
+    "ReportType",
     "ResetEntry",
     "RewindableConversationDocFamilyToken",
     "RewindableConversationDocToken",
@@ -275,10 +297,11 @@ __all__ = [
     "SessionEnd",
     "SessionFailed",
     "SessionImpl",
+    "SetTimer",
     "Settings",
     "SettledSubmissionRecord",
-    "SnapshotEvent",
     "SettledTask",
+    "SnapshotEvent",
     "StorageRequestError",
     "Submission",
     "SubmissionDraft",
@@ -286,12 +309,12 @@ __all__ = [
     "SystemEntry",
     "Task",
     "TaskDefinition",
+    "TaskDocFamilyToken",
+    "TaskDocToken",
     "TaskGraph",
     "TaskGraphNode",
     "TaskGraphState",
     "TaskGraphWatch",
-    "TaskDocFamilyToken",
-    "TaskDocToken",
     "TaskInspection",
     "TaskRuntime",
     "ToolControl",
@@ -314,8 +337,10 @@ __all__ = [
     "UsageState",
     "UserEntry",
     "UserInput",
-    "Wrap",
+    "__version__",
+    "Wake",
     "watch_events",
+    "Wrap",
     "wrap_section",
     "wrap_tool",
 ]

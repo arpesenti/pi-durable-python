@@ -53,7 +53,7 @@ def prompt_input(agent: Agent, shown: dict[str, str] | None = None) -> PromptInp
 
 
 def resolved_agent(registry: Any, state: dict[str, Any] | None = None) -> Agent:
-    def fail(error: BaseException) -> None:
+    def fail(error: BaseException, _extension: str) -> None:
         raise error
 
     return resolve_agent(state, registry.snapshot(), resolve_settings(None), fail)
@@ -166,14 +166,15 @@ async def test_renders_sections_in_order_with_tags_omissions_wrappers_and_failur
             }
         )
     )
-    reports: list[BaseException] = []
     shown = {"failing": "<failing>\nold\n</failing>", "cwd": "stale"}
     agent = resolved_agent(registry)
+    reported: list[tuple[BaseException, Any]] = []
+
     desired = await render_sections(
         agent.sections,
         prompt_input(agent, shown),
         shown,
-        reports.append,
+        lambda error, failed: reported.append((error, failed)),
         context,
     )
     assert list(desired.items()) == [
@@ -181,7 +182,8 @@ async def test_renders_sections_in_order_with_tags_omissions_wrappers_and_failur
         ("cwd", "<cwd>\n/repo (git)\n</cwd>"),
         ("failing", "<failing>\nold\n</failing>"),
     ]
-    assert [str(error) for error in reports] == ["render failed", "also failed"]
+    assert [str(error) for error, _section in reported] == ["render failed", "also failed"]
+    assert [failed.key for _error, failed in reported] == ["failing", "new-failing"]
 
 
 async def test_propagates_section_errors_after_cancellation() -> None:
@@ -192,7 +194,7 @@ async def test_propagates_section_errors_after_cancellation() -> None:
     agent = resolved_agent(create_registry())
     with pytest.raises(RuntimeError, match="cancelled"):
         await render_sections(
-            [failing], prompt_input(agent), {}, lambda _error: None, cancelled
+            [failing], prompt_input(agent), {}, lambda _error, _failed: None, cancelled
         )
 
 

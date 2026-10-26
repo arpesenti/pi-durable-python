@@ -44,6 +44,7 @@ async def test_copies_as_of_and_current_singleton_and_family_bases_while_leaving
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "as-initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Current = define_doc(
@@ -54,6 +55,7 @@ async def test_copies_as_of_and_current_singleton_and_family_bases_while_leaving
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"value": "current-initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Initial = define_doc(
@@ -64,6 +66,7 @@ async def test_copies_as_of_and_current_singleton_and_family_bases_while_leaving
             "history": "latest",
             "fork": "initial",
             "initial": lambda: {"value": "fresh"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     AsOfFamily = define_doc_family(
@@ -75,6 +78,7 @@ async def test_copies_as_of_and_current_singleton_and_family_bases_while_leaving
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda seed: {"value": seed},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     CurrentFamily = define_doc_family(
@@ -86,6 +90,7 @@ async def test_copies_as_of_and_current_singleton_and_family_bases_while_leaving
             "history": "latest",
             "fork": "current",
             "initial": lambda seed: {"value": seed},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, publications = open_test_session()
@@ -183,6 +188,7 @@ async def test_uses_final_document_state_from_the_fork_entry_commit_while_exclud
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _publications = open_test_session()
@@ -219,6 +225,7 @@ async def test_selects_the_entry_owning_ancestor_for_as_of_and_the_immediate_par
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Current = define_doc(
@@ -229,6 +236,7 @@ async def test_selects_the_entry_owning_ancestor_for_as_of_and_the_immediate_par
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"value": "initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _publications = open_test_session()
@@ -286,6 +294,7 @@ async def test_copies_the_stored_value_and_version_without_consulting_migration_
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     migrations: list[int] = []
@@ -304,6 +313,7 @@ async def test_copies_the_stored_value_and_version_without_consulting_migration_
             "fork": "asOf",
             "initial": lambda: {"count": 0, "migrated": False},
             "migrate": migrate,
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -349,6 +359,7 @@ async def test_coalesces_a_typed_migration_and_override_into_the_copied_creation
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"count": 2},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     checkpoints: list[int] = []
@@ -420,6 +431,7 @@ async def test_copies_the_incarnation_alive_at_the_fork_point_across_retirement_
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "initial"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _publications = open_test_session()
@@ -509,6 +521,7 @@ async def test_rejects_duplicate_as_of_and_current_selections_for_one_child_addr
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "as-of"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Current = define_doc(
@@ -519,6 +532,7 @@ async def test_rejects_duplicate_as_of_and_current_selections_for_one_child_addr
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"value": "current"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -564,6 +578,7 @@ async def test_rejects_current_and_as_of_source_writes_in_the_fork_transaction()
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"value": "committed"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     AsOf = define_doc(
@@ -574,6 +589,7 @@ async def test_rejects_current_and_as_of_source_writes_in_the_fork_transaction()
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "committed"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -628,6 +644,7 @@ async def test_rolls_every_copied_base_back_when_later_pre_admission_assembly_fa
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "copied"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     failing = {"value": True}
@@ -693,6 +710,7 @@ async def test_fails_the_session_on_a_rejected_fork_commit_which_leaves_no_effec
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "source"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -734,6 +752,7 @@ async def test_retires_a_copied_document_and_can_recreate_the_address_in_the_for
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"value": "fresh"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -771,6 +790,7 @@ async def test_copies_only_conversation_documents_leaving_session_and_task_docum
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"value": "conversation"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     SessionOnly = define_doc(
@@ -779,6 +799,7 @@ async def test_copies_only_conversation_documents_leaving_session_and_task_docum
             "version": 1,
             "scope": "session",
             "initial": lambda: {"value": "session"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     TaskOnly = define_doc(
@@ -787,6 +808,7 @@ async def test_copies_only_conversation_documents_leaving_session_and_task_docum
             "version": 1,
             "scope": "task",
             "initial": lambda: {"value": "task"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Work = define_task(
@@ -839,6 +861,7 @@ async def test_copies_every_family_member_across_storage_scan_pages() -> None:
             "history": "latest",
             "fork": "current",
             "initial": lambda seed: {"value": seed},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()

@@ -223,6 +223,49 @@ async def test_reports_blocked_reasons_without_migrating_or_running_them() -> No
     await opened["harness"].close(context)
 
 
+async def test_reports_a_sleep_until_its_time_and_a_parked_task_as_blocked() -> None:
+    clock = [1_000]
+
+    async def nap(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.sleep_until(clock[0] + 500, {"phase": "later"}, ctx)
+
+    async def later(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.commit(
+            lambda: {"status": "terminal", "outcome": {"status": "completed", "result": None}}, ctx
+        )
+
+    Nap = define_task(
+        {
+            "name": "test.inspect-nap",
+            "version": 1,
+            "initial": lambda _input: {"phase": "nap"},
+            "phases": {"nap": nap, "later": later},
+            "abort": lambda _task, _runtime, _context: None,
+        }
+    )
+    opened = await open_tasks(
+        MemoryStorage(), [Nap], {"now": lambda: clock[0], "settings": {"restart_limit": 1}}
+    )
+    harness = opened["harness"]
+    root = await harness.root(context)
+    id = await root.commit(
+        lambda tx: tx.create_task(Nap, None, {"ownership": {"kind": "conversation"}}), context
+    )
+    harness.resume()
+    states = await eventually_states(harness)
+    assert states[id] == {"kind": "sleeping", "until": 1_500}
+    await harness.close(context)
+
+
+async def eventually_states(harness: Any) -> dict[int, dict[str, Any]]:
+    for _turn in range(200):
+        states = await wait_states(harness)
+        if any(state["kind"] == "sleeping" for state in states.values()):
+            return states
+        await asyncio.sleep(0.01)
+    raise AssertionError("no task was reported sleeping")
+
+
 async def test_reports_a_held_outcome_as_completing_until_owned_work_drains() -> None:
     gate = deferred()
 

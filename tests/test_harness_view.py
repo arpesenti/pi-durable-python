@@ -416,6 +416,7 @@ async def test_publishes_one_frame_for_a_commit_that_appends_entries_and_edits_a
             "history": "latest",
             "fork": "initial",
             "initial": lambda: {"n": 0},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     recorded = await record(root)

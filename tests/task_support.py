@@ -146,10 +146,11 @@ async def open_tasks(
     options: Mapping[str, Any] | None = None,
     override_tasks: Sequence[Any] = (),
 ) -> dict[str, Any]:
-    """Open a Harness whose registry holds ``tasks``; failures passed to on_report are collected.
+    """Open a Harness whose registry holds ``tasks``; failures reach ``on_report``.
 
-    ``override_tasks`` replaces built-in definitions in the snapshot the Harness reads, so
-    submission suites can keep their own generation probe without installing a colliding task.
+    ``reports`` collects each error and ``infos`` its :class:`ReportInfo`. ``override_tasks``
+    replaces built-in definitions in the snapshot the Harness reads, so submission suites can keep
+    their own generation probe without installing a colliding task.
     """
 
     values = dict(options or {})
@@ -158,18 +159,32 @@ async def open_tasks(
         registry.install(define_extension({"name": "tasks", "tasks": list(tasks)}))
     reader = TaskOverrideReader(registry, override_tasks) if override_tasks else registry
     reports: list[BaseException] = []
+    infos: list[dict[str, Any]] = []
+
+    def on_report(error: BaseException, info: dict[str, Any] | None = None) -> None:
+        reports.append(error)
+        if info is not None:
+            infos.append(info)
+
     harness = await Harness.open(
         storage,
         {
             "models": values.get("models", {}),
             "registry": reader,
-            "on_report": reports.append,
+            "on_report": on_report,
             **({"now": values["now"]} if "now" in values else {}),
             **({"settings": values["settings"]} if "settings" in values else {}),
+            **({"on_wake": values["on_wake"]} if "on_wake" in values else {}),
+            **({"set_timer": values["set_timer"]} if "set_timer" in values else {}),
         },
         context,
     )
-    return {"harness": harness, "registry": registry, "reports": reports}
+    return {
+        "harness": harness,
+        "registry": registry,
+        "reports": reports,
+        "infos": infos,
+    }
 
 
 def counting_reader(registry: RegistryReader) -> tuple[RegistryReader, Callable[[], int]]:

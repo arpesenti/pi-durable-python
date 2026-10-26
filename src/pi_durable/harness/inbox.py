@@ -224,7 +224,9 @@ async def remove_inbox_item(tx: Transaction, conversation_id: ConversationId, id
             return
 
 
-async def withdraw_queued_inputs(tx: Transaction, conversation_id: ConversationId) -> None:
+async def withdraw_queued_inputs(
+    tx: Transaction, conversation_id: ConversationId, reason: str = "aborted"
+) -> None:
     """Withdraw every queued input of one conversation; queued writes stay for later placement."""
 
     items = (await tx.doc(InboxDoc, conversation_id))["items"]
@@ -232,7 +234,7 @@ async def withdraw_queued_inputs(tx: Transaction, conversation_id: ConversationI
         item = items[index]
         if item["mode"] == "write":
             continue
-        tx.settle_submission(cast(SubmissionId, item["id"]), {"status": "unanswered", "reason": "aborted"})
+        tx.settle_submission(cast(SubmissionId, item["id"]), {"status": "unanswered", "reason": reason})
         del items[index]
 
 

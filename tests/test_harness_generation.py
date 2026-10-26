@@ -385,8 +385,26 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
         raise RuntimeError("cancel failed")
 
     setup.faux.cancel_deferred = cancel_failed  # type: ignore[method-assign]
-    opened = await open_chat(MemoryStorage(), setup)
-    harness, root = opened["harness"], opened["root"]
+    infos: list[dict[str, Any]] = []
+
+    def on_report(error: BaseException, info: dict[str, Any] | None = None) -> None:
+        setup.reports.append(error)
+        infos.append(dict(info or {}))
+
+    harness = await Harness.open(
+        MemoryStorage(),
+        {
+            "models": setup.models,
+            "registry": setup.registry,
+            "settings": setup.settings,
+            "now": setup.now,
+            "on_report": on_report,
+        },
+        context,
+    )
+    root = await harness.root(
+        context, {"agent": {"model": {"provider": "faux", "modelId": "faux-1"}}}
+    )
     harness.resume()
     submission = await root.submit({"type": "input", "content": "hi"}, context)
     task_id = await run_task(harness, root)
@@ -395,6 +413,10 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
     assert (await submission.wait(context))["status"] == "unanswered"
     assert (await submission.wait(context))["reason"] == "aborted"
     assert any(str(error) == "cancel failed" for error in setup.reports)
+    # Cancelling a deferred response is a host callback, not the task's own failure.
+    failed = next(info for info in infos if info.get("callback") == "models")
+    assert failed["type"] == "host_error"
+    assert failed["task"]["kind"] == "pi.generation"
     assert await live(harness, root) == {}
     await harness.close(context)
 
@@ -631,6 +653,7 @@ async def test_renders_sections_that_read_conversation_documents_through_input_r
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"cwd": "/", "kind": "main"},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     setup = chat_setup()

@@ -137,7 +137,7 @@ async def test_register_storage_conformance_registers_one_case_per_suite() -> No
         StorageConformanceOptions(assertions=create_expect_assertions(expect), with_storage=with_storage)
     )
     assert [name for name, _, _ in recording.registered] == [case.name for case in cases]
-    assert len(recording.registered) == 24
+    assert len(recording.registered) == 25
     assert all(timeout is None for _, _, timeout in recording.registered)
 
     first = dict((name, test) for name, test, _ in recording.registered)[

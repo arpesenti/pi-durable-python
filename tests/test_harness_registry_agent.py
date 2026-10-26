@@ -16,6 +16,7 @@ from task_support import aborted_with, completed, deferred, open_tasks
 from pi_durable import CompactionTask, GenerationTask, MemoryStorage, ToolTask
 from pi_durable.harness.agent import (
     DEFAULT_COMPACTION_POLICY,
+    DEFAULT_RESTART_LIMIT,
     DEFAULT_RETRY_POLICY,
     AgentDoc,
     agent_hooks,
@@ -60,12 +61,15 @@ def resolve(
     state: dict[str, Any] | None,
     snapshot: Any,
     settings: dict[str, Any] | None = None,
-    reports: list[BaseException] | None = None,
+    reports: list[tuple[BaseException, str]] | None = None,
 ) -> Any:
-    """Resolve ``state`` against ``snapshot`` and ``settings``, collecting reports."""
+    """Resolve ``state`` against ``snapshot`` and ``settings``, collecting reports and the extension."""
 
     sink = reports if reports is not None else []
-    return resolve_agent(state, snapshot, resolve_settings(settings), sink.append)
+    def report(error: BaseException, name: str) -> None:
+        sink.append((error, name))
+
+    return resolve_agent(state, snapshot, resolve_settings(settings), report)
 
 
 def rendered_sections(agent: Any) -> list[tuple[str, str | None]]:
@@ -215,6 +219,16 @@ def test_resolves_settings_defaults_and_merges_object_fields() -> None:
     )
     assert merged.retry == {**DEFAULT_RETRY_POLICY, "max_retries": 1}
     assert merged.compaction == {**DEFAULT_COMPACTION_POLICY, "enabled": False}
+    # The 1.4.0 defaults: a failed run keeps its inbox, and a task parks after five restarts.
+    assert defaults.after_failed_run == "keep"
+    assert defaults.restart_limit == DEFAULT_RESTART_LIMIT == 5
+    assert resolve_settings({"after_failed_run": "withdraw"}).after_failed_run == "withdraw"
+    # A restart limit is a number of restarts, rounded down; `inf` never parks, anything else
+    # means the default.
+    assert resolve_settings({"restart_limit": 2.9}).restart_limit == 2
+    assert resolve_settings({"restart_limit": float("inf")}).restart_limit == float("inf")
+    assert resolve_settings({"restart_limit": 0}).restart_limit == DEFAULT_RESTART_LIMIT
+    assert resolve_settings({"restart_limit": None}).restart_limit == DEFAULT_RESTART_LIMIT
 
 
 # ── Agent resolution ────────────────────────────────────────────────────────
@@ -287,7 +301,7 @@ def test_replaces_same_name_tools_in_place_wraps_the_winner_then_applies_the_fil
     )
     for extension in (coding, venv, timing):
         registry.install(extension)
-    reports: list[BaseException] = []
+    reports: list[tuple[BaseException, str]] = []
     agent = resolve(None, registry.snapshot(), {}, reports)
     assert [(item.name, item.description) for item in agent.tools] == [
         ("read", "read tool"),
@@ -337,14 +351,14 @@ def test_drops_a_tool_or_section_whose_wrapper_throws_or_renames_it_and_reports(
     )
     registry.install(coding)
     registry.install(broken)
-    reports: list[BaseException] = []
+    reports: list[tuple[BaseException, str]] = []
     agent = resolve(None, registry.snapshot(), {}, reports)
     assert names(agent.tools) == ["bash"]
     assert [item.key for item in agent.sections] == ["preamble"]
-    assert [str(error) for error in reports] == [
-        "wrapper failed",
-        "Wrapper renamed edit to renamed",
-        "section wrapper failed",
+    assert [(str(error), extension) for error, extension in reports] == [
+        ("wrapper failed", "broken"),
+        ("Wrapper renamed edit to renamed", "broken"),
+        ("section wrapper failed", "broken"),
     ]
 
 
@@ -382,7 +396,7 @@ def test_orders_sections_by_extension_replaces_same_keys_in_place_and_renders_in
     )
     for extension in (coding, skills, override):
         registry.install(extension)
-    reports: list[BaseException] = []
+    reports: list[tuple[BaseException, str]] = []
     agent = resolve({"instructions": "Be terse."}, registry.snapshot(), {}, reports)
     assert rendered_sections(agent) == [
         ("preamble", "You review."),
@@ -410,10 +424,12 @@ def test_collects_hooks_of_selected_extensions_in_shape_order_and_applies_field_
         )
     )
     registry.install(define_extension({"name": "b", "hooks": [hook(tool_task, second)]}))
-    assert agent_hooks(resolve(None, registry.snapshot()), "pi.tool") == [first, second]
+    a = {"extension": "a", "handlers": first}
+    b = {"extension": "b", "handlers": second}
+    assert agent_hooks(resolve(None, registry.snapshot()), "pi.tool") == [a, b]
     assert agent_hooks(resolve({"extensions": ["b", "a"]}, registry.snapshot()), "pi.tool") == [
-        second,
-        first,
+        b,
+        a,
     ]
     assert agent_hooks(resolve({"extensions": ["b"]}, registry.snapshot()), "pi.generation") == []
 

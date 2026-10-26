@@ -1927,13 +1927,47 @@ async def test_resumes_a_retry_backoff_after_reopen() -> None:
     record = await chat.harness.get_task(id, context)
     assert record["state"]["checkpoint"]["phase"] == "retry"
     assert record["state"]["checkpoint"]["attempt"] == 1
+    # The backoff is a durable sleep until its deadline.
+    until = record["state"]["checkpoint"]["until"]
+    assert record["state"]["status"] == "sleeping"
+    assert record["state"]["until"] == until == now["value"] + 60_000
     await chat.harness.close(context)
+
+    # Earlier versions slept inside a running `retry` phase: reopened before its time, it sleeps again.
+    stored = await storage.reopen().task(id, context)
+    assert stored is not None
+    legacy = dict(stored)
+    legacy["state"] = {
+        "status": "running",
+        "checkpoint": {"phase": "retry", **{
+            key: value
+            for key, value in record["state"]["checkpoint"].items()
+            if key not in ("phase", "until")
+        }, "until": until},
+    }
+    await storage.reopen().commit([{"type": "task", "value": cast(Any, legacy)}], context)
+    chat = await _reopen(storage, chat.setup, chat.faux)
+    await eventually(
+        lambda: _sleeping_record(chat, id)
+    )
+    assert len(chat.faux.summary_requests) == 1
+    await chat.harness.close(context)
+
     now["value"] += 120_000
     chat = await _reopen(storage, chat.setup, chat.faux)
     chat.faux.summaries.append(summary())
     assert (await result(chat, id))["status"] == "completed"
+    # The failed attempt, then the retry once the sleep was due.
     assert len(chat.faux.summary_requests) == 2
     await chat.harness.close(context)
+
+
+def _sleeping_record(chat: Chat, id: Any) -> Any:
+    async def check() -> bool:
+        record = await chat.harness.get_task(id, context)
+        return record is not None and record["state"]["status"] == "sleeping"
+
+    return check()
 
 
 async def _retry_listed(chat: Chat) -> bool:
@@ -2651,4 +2685,59 @@ async def test_applies_edits_carried_by_an_older_head_marker_in_the_range() -> N
     await result(chat, await chat.root.compact(None, context))
     prompt = user_text(chat.faux.summary_requests[0]["messages"][1])
     assert "<conversation>\n[User]: H\n\n[User]: a\n</conversation>" in prompt
+    await chat.harness.close(context)
+
+
+# ─── Per-model compaction overrides (#10942) ──────────────────────────────
+
+
+async def test_applies_the_current_models_override_to_the_blocking_threshold() -> None:
+    for key in ("faux/faux-1", "faux/other"):
+        chat = await open_compaction(context_window=1_000)
+        await history(chat)
+        # Harness-wide: blocking only above the full window; the override for faux-1 blocks above 700.
+        chat.setup.settings["compaction"] = {
+            **BLOCKING,
+            "reserve_tokens": 0,
+            "model_overrides": {key: {"reserve_tokens": 300}},
+        }
+        chat.faux.summaries.append(summary())
+        await turn(chat, text("u4", 200), "a4")
+        assert len(chat.faux.summary_requests) == (1 if key == "faux/faux-1" else 0)
+        await chat.harness.close(context)
+
+
+async def test_applies_the_request_models_override_on_a_context_overflow() -> None:
+    chat = await open_compaction()
+    await history(chat)
+    chat.setup.settings["compaction"] = {
+        **MANUAL,
+        "model_overrides": {"faux/faux-1": {"enabled": True}},
+    }
+    chat.faux.summaries.append(summary())
+    chat.faux.agent.append(failure(OVERFLOW))
+    chat.faux.agent.append(answer("fits"))
+    submission = await chat.root.submit({"type": "input", "content": text("u4", 100)}, context)
+    assert (await submission.wait(context))["status"] == "done"
+    assert len(chat.faux.summary_requests) == 1
+    await chat.harness.close(context)
+
+
+async def test_applies_the_models_override_when_a_compaction_selects_and_sizes_its_summary() -> None:
+    chat = await open_compaction()
+    await history(chat)
+    chat.setup.settings["compaction"] = {
+        **MANUAL,
+        "keep_recent_tokens": 100_000,
+        "model_overrides": {"faux/faux-1": {"keep_recent_tokens": 150, "reserve_tokens": 500}},
+    }
+    chat.faux.summaries.append(summary())
+    assert (await result(chat, await chat.root.compact(None, context)))["status"] == "completed"
+    # 0.8 * 500 from the override, below the model's 900.
+    assert chat.faux.summary_requests[0]["options"]["maxTokens"] == 400
+    messages = (await chat.root.context(context))["messages"]
+    assert [user_text(message) for message in messages[1:]] == [
+        text("u3", 100),
+        text("a3", 100),
+    ]
     await chat.harness.close(context)

@@ -208,16 +208,25 @@ async def test_resumes_an_interrupted_retry_backoff_with_its_attempt() -> None:
     assert record is not None
     until = record["state"]["checkpoint"]["until"]
     assert until == clock["now"] + 60_000
+    # The backoff is a durable sleep: no invocation, and a wake for its deadline.
+    assert record["state"] == {
+        "status": "sleeping",
+        "checkpoint": {"phase": "retry", "attempt": 1, "until": until},
+        "until": until,
+    }
     await harness.close(context)
+
+    recovered = await open_again(storage, setup)
+    harness, root = recovered["harness"], recovered["root"]
+    await eventually(lambda: not harness.wake()["active"])
+    assert harness.wake() == {"active": False, "at": until}
+    # An early wake retries nothing.
+    harness.resume()
+    await asyncio.sleep(0.02)
+    assert setup.faux.call_count == 1
 
     clock["now"] = until
     setup.faux.set_responses([assistant_message("after the wait")])
-    recovered = await open_again(storage, setup)
-    harness, root = recovered["harness"], recovered["root"]
-    record = await generation_record(harness, root.id)
-    assert record is not None
-    assert record["state"]["checkpoint"]["phase"] == "retry"
-    assert record["state"]["checkpoint"]["attempt"] == 1
     harness.resume()
     settled = await cast(Any, await harness.submission(submission.id, context)).wait(context)
     assert settled["status"] == "done"
@@ -254,7 +263,15 @@ async def test_resumes_an_interrupted_deferred_poll() -> None:
     assert polled is not None
     handle = polled["state"]["checkpoint"]["handle"]
     poll_at = polled["state"]["checkpoint"]["pollAt"]
+    # The poll is a durable sleep until it is due.
+    assert polled["state"]["status"] == "sleeping"
+    assert polled["state"]["until"] == poll_at
     await harness.close(context)
+
+    recovered = await open_again(storage, setup)
+    harness, root = recovered["harness"], recovered["root"]
+    await eventually(lambda: not harness.wake()["active"])
+    assert harness.wake() == {"active": False, "at": poll_at}
 
     clock["now"] = poll_at
     setup.faux.deferred["pendingFetches"] = 0
@@ -301,4 +318,103 @@ async def test_does_not_repeat_a_generation_that_finished_before_the_restart() -
     assert task is not None and task["state"]["status"] == "terminal"
     inspection = await harness.inspect(context)
     assert inspection["tasks"] == []
+    await harness.close(context)
+
+
+async def test_sleeps_again_for_a_retry_stored_as_a_running_phase_by_an_earlier_version() -> None:
+    storage = ControlledStorage()
+    clock = {"now": 1_000}
+    setup = chat_setup()
+    setup.now = lambda: clock["now"]
+    setup.settings["retry"] = {"enabled": True, "max_retries": 2, "base_delay_ms": 60_000}
+    setup.faux.set_responses(
+        [
+            assistant_message((), stop_reason="error", error_message="503 Service Unavailable"),
+            assistant_message("recovered"),
+        ]
+    )
+    opened = await open_chat(storage, setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    submission = await root.submit({"type": "input", "content": "hi"}, context)
+
+    async def sleeping() -> bool:
+        record = await generation_record(harness, root.id)
+        return record is not None and record["state"]["status"] == "sleeping"
+
+    await eventually(sleeping)
+    record = await generation_record(harness, root.id)
+    assert record is not None
+    task_id = record["id"]
+    assert setup.faux.call_count == 1
+    await harness.close(context)
+
+    # Earlier versions slept inside a running `retry` phase, with no `until` in the state.
+    stored = await storage.reopen().task(task_id, context)
+    assert stored is not None
+    legacy = dict(stored)
+    legacy["state"] = {
+        "status": "running",
+        "checkpoint": {"phase": "retry", "attempt": 1, "until": 61_000},
+    }
+    await storage.reopen().commit([{"type": "task", "value": cast(Any, legacy)}], context)
+    setup.faux.set_responses([assistant_message("recovered")])
+
+    recovered = await open_again(storage, setup)
+    harness, root = recovered["harness"], recovered["root"]
+    harness.resume()
+    await eventually(sleeping)
+    record = await generation_record(harness, root.id)
+    assert record is not None
+    assert record["state"]["status"] == "sleeping"
+    assert record["state"]["until"] == 61_000
+    # Queuing the queued response reset the counter; a run before the deadline makes no request.
+    assert setup.faux.call_count == 0
+    clock["now"] = 61_000
+    harness.resume()
+    settled = await cast(Any, await harness.submission(submission.id, context)).wait(context)
+    assert settled["status"] == "done"
+    assert setup.faux.call_count == 1
+    await harness.close(context)
+
+
+async def test_fails_no_model_once_the_poll_is_due_after_reopen_without_the_model() -> None:
+    storage = ControlledStorage()
+    clock = {"now": 1_000}
+    setup = chat_setup({"deferred": {"pendingFetches": 1, "pollAfterMs": 60_000}})
+    setup.now = lambda: clock["now"]
+    setup.settings["stream"] = {"deferred": True}
+    setup.faux.set_responses([assistant_message("deferred answer")])
+    opened = await open_chat(storage, setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    submission = await root.submit({"type": "input", "content": "hi"}, context)
+
+    async def polling() -> bool:
+        record = await generation_record(harness, root.id)
+        return record is not None and record["state"]["checkpoint"]["phase"] == "poll"
+
+    await eventually(polling)
+    record = await generation_record(harness, root.id)
+    assert record is not None
+    poll_at = record["state"]["checkpoint"]["pollAt"]
+    await harness.close(context)
+
+    # The poll sleeps until it is due; the model is resolved then, not at once.
+    empty = chat_setup({"models": [{"provider": "faux", "id": "other-model"}]})
+    empty.now = lambda: clock["now"]
+    empty.settings["stream"] = {"deferred": True}
+    recovered = await open_chat(storage.reopen(), empty)
+    harness, root = recovered["harness"], recovered["root"]
+    harness.resume()
+    await flush()
+    still = await harness.submission(submission.id, context)
+    assert still is not None
+    assert (await still.status(context))["status"] == "placed"
+
+    clock["now"] = poll_at
+    harness.resume()
+    settled = await cast(Any, await harness.submission(submission.id, context)).wait(context)
+    assert settled["status"] == "unanswered"
+    assert settled["reason"] == "no_model"
     await harness.close(context)

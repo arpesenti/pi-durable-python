@@ -43,6 +43,8 @@ class DocDefinition:
     history: Literal["latest", "rewindable"] | None = None
     fork: Literal["asOf", "current", "initial"] | None = None
     migrate: Callable[[JsonObject, int], JsonObject] | None = None
+    #: Required policy: whether this change is stored as a complete base (spec §3.5). The builder
+    #: rejects a definition without one, so it is never ``None`` on a definition a caller holds.
     checkpoint_when: Callable[[JsonObject, list[Op], CheckpointInfo], bool] | None = None
 
     def __getitem__(self, key: str) -> Any:
@@ -155,8 +157,15 @@ def _build_definition(values: Mapping[str, Any], *, family: bool) -> DocDefiniti
     migrate = values.get("migrate")
     if migrate is not None and not callable(migrate):
         raise TypeError(f"Document {kind} migrate must be callable")
+    # Required on every definition, with no default: a definition that keeps only the required bases
+    # writes `lambda value, ops, info: False` (spec §3.5).
+    if "checkpoint_when" not in values:
+        raise TypeError(
+            f"Document {kind} requires a checkpoint_when(value, ops, info) predicate; "
+            "use a predicate that returns False to keep only the required bases"
+        )
     checkpoint_when = values.get("checkpoint_when")
-    if checkpoint_when is not None and not callable(checkpoint_when):
+    if not callable(checkpoint_when):
         raise TypeError(f"Document {kind} checkpoint_when must be callable")
     definition = DocDefinition(
         kind=kind,

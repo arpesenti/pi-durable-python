@@ -80,7 +80,9 @@ class ToolControl(TypedDict, total=False):
     """What a tool result asks the tool round to do."""
 
     addTools: list[str]
-    terminate: Literal[True]
+    terminate: bool
+    """End the run without another model request; only ``True`` does, ``False`` is a no-op."""
+
     handoff: str
 
 
@@ -145,6 +147,10 @@ class ToolExecutionApi(Protocol):
     output_window: Mapping[str, Any] | None
 
     def agent(self, context: Context) -> Awaitable[Agent]: ...
+
+    def now(self) -> int:
+        """The Harness clock, for times a rerun after a restart compares against."""
+        ...
 
     def output(self, chunk: str | bytes, skipped: Mapping[str, Any] | None = None) -> None: ...
 
@@ -360,6 +366,121 @@ class CompactionPolicy(TypedDict, total=False):
     background_tokens: int
 
 
+class CompactionSettings(CompactionPolicy, total=False):
+    """Harness-wide compaction settings with per-model overrides.
+
+    ``model_overrides`` is keyed by exact ``"provider/modelId"``; each field it sets replaces the
+    harness-wide one for that model, so small- and large-window models can share a harness.
+    """
+
+    model_overrides: Mapping[str, CompactionPolicy]
+
+
+AfterFailedRun = Literal["keep", "continue", "withdraw"]
+"""What a failed run does with the inputs queued behind it (spec §6)."""
+
+
+# ── Reports, timers, and wakeups ────────────────────────────────────────────
+
+
+class ReportTask(TypedDict):
+    """The task a report is about."""
+
+    id: TaskId
+    kind: str
+    """The task's registered name."""
+
+    conversationId: ConversationId
+
+
+HostCallback = Literal["now", "settings", "registry", "env", "models", "setTimer", "onWake"]
+"""A host callback, by its ``HarnessOptions`` name."""
+
+
+def host_error(callback: HostCallback) -> ReportInfo:
+    """The report info of a host callback that threw."""
+
+    return {"type": "host_error", "callback": callback}
+
+
+LISTENER: ReportInfo = {"type": "listener_error"}
+"""The report info of a listener, which never fails what ran it."""
+
+
+DEFAULT_RESTART_LIMIT = 5
+"""Default ``settings.restart_limit``: restarts in a row before a task is parked."""
+
+DEFAULT_AFTER_FAILED_RUN: AfterFailedRun = "keep"
+"""Default ``settings.after_failed_run``: a failed run leaves its queued inputs queued."""
+
+
+ReportType = Literal[
+    "session_failed",
+    "task_faulted",
+    "task_parked",
+    "migration_failed",
+    "task_outdated",
+    "task_error",
+    "extension_error",
+    "host_error",
+    "listener_error",
+]
+"""What a report to ``on_report`` is about (spec §10.1)."""
+
+
+ReportReason = Literal["threw", "restart_limit", "missing_task", "incompatible_task"]
+"""Why a task faulted (``threw``, ``restart_limit``) or kept an outdated definition."""
+
+
+class ReportInfo(TypedDict):
+    """What a report to ``HarnessOptions.on_report`` is about.
+
+    ``type`` says what happened. A task report carries ``task`` (its ID, kind, and conversation);
+    ``extension`` names the extension whose code failed, when known. ``reason`` explains a
+    ``task_faulted`` or ``task_outdated`` report, ``callback`` names the failing host callback, and
+    ``conversationId`` a wrapper failure outside a task.
+    """
+
+    type: ReportType
+    task: NotRequired[ReportTask]
+    extension: NotRequired[str]
+    reason: NotRequired[ReportReason]
+    callback: NotRequired[HostCallback]
+    conversationId: NotRequired[ConversationId]
+
+
+class ReportFrom(TypedDict, total=False):
+    """Whose code a task's ``runtime.report()`` is about when not the task's own."""
+
+    type: Literal["extension", "host"]
+    extension: str
+    callback: HostCallback
+
+
+class Wake(TypedDict):
+    """When the Session next needs a running process (spec §5.6)."""
+
+    active: bool
+    """Some task can run now or is running, or a reconcile pass has not landed yet."""
+
+    at: NotRequired[int]
+    """The earliest sleep not yet due, when there is one."""
+
+
+class SetTimer(Protocol):
+    """A host timer, as ``HarnessOptions.set_timer`` (spec §5.6).
+
+    Calls ``callback`` once, about ``delay_ms`` from now, and returns a function that disarms it.
+    ``background`` timers only free memory, and a host may decline one by returning ``None``; the
+    others pace or resume work, and one the host throws on or declines is armed with the default
+    timer instead. A timer should not fire early; callers check their clock again when it fires.
+    """
+
+    def __call__(
+        self, callback: Callable[[], None], delay_ms: float, *, background: bool = False
+    ) -> Callable[[], None] | None: ...
+
+
 CompactionReason = Literal["manual", "threshold", "overflow"]
 """What started a compaction task."""
 
@@ -436,13 +557,15 @@ class HarnessSettings(TypedDict, total=False):
     extensions: Sequence[Extension]
     stream: ConversationStreamOptions
     retry: ConversationRetryPolicy
-    compaction: CompactionPolicy
+    compaction: CompactionSettings
     progress: ProgressPolicy
     tool_execution: Literal["parallel", "sequential"]
     steering_mode: QueueMode
     follow_up_mode: QueueMode
     context_retention_ms: int
     document_retention_ms: int | float
+    after_failed_run: AfterFailedRun
+    restart_limit: int | float
 
 
 @dataclass(slots=True)
@@ -459,6 +582,8 @@ class Settings:
     follow_up_mode: Literal["all", "one-at-a-time"] = "one-at-a-time"
     context_retention_ms: int = 600_000
     document_retention_ms: int | float = 600_000
+    after_failed_run: AfterFailedRun = DEFAULT_AFTER_FAILED_RUN
+    restart_limit: int | float = DEFAULT_RESTART_LIMIT
 
 
 # ── Task runtime and inspection ─────────────────────────────────────────────
@@ -534,9 +659,17 @@ class TaskRuntime(Protocol):
 
     def now(self) -> int: ...
 
-    def report(self, error: BaseException) -> None: ...
+    def report(self, error: BaseException, from_: ReportFrom | None = None) -> None:
+        """A ``task_error``, or with ``from_`` an ``extension_error`` or ``host_error``."""
+        ...
 
-    async def sleep(self, until: int, context: Context) -> None: ...
+    def set_timer(self, callback: Callable[[], None], delay_ms: float) -> Callable[[], None]:
+        """A non-durable timer for pacing work inside a phase; the invocation's end disarms it."""
+        ...
+
+    async def sleep_until(self, until: int, checkpoint: Any, context: Context) -> None:
+        """Commit ``{status: "sleeping", until, checkpoint}`` and resolve once it is stored."""
+        ...
 
     async def watch_doc(self, token: Any, *args: Any) -> Any: ...
 
@@ -691,17 +824,28 @@ class HarnessOptions(TypedDict, total=False):
     """Options of ``Harness.open()``."""
 
     models: Any
+    """The model catalog, or a zero-argument function returning the current one, called at each use."""
+
     registry: RegistryReader
     settings: Any
+    """Run settings, or a zero-argument function returning the current ones, read at each use."""
+
     env: Callable[..., Any]
     conversation_created: Callable[..., Any]
     now: Callable[[], int]
-    on_report: Callable[[BaseException], Any]
+    set_timer: SetTimer
+    """Arms every timer of the Session and Harness; default an asyncio timer."""
+
+    on_wake: Callable[[Wake], Any]
+    """Replaces the timer for sleeping tasks; a host arms its own wakeup and calls ``resume()``."""
+
+    on_report: Callable[..., Any]
 
 
 T = TypeVar("T")
 
 __all__ = [
+    "AfterFailedRun",
     "Agent",
     "AgentChange",
     "AgentState",
@@ -711,6 +855,7 @@ __all__ = [
     "CompactionPolicy",
     "CompactionReason",
     "CompactionResult",
+    "CompactionSettings",
     "ContextView",
     "Conversation",
     "ConversationAbortOptions",
@@ -722,6 +867,8 @@ __all__ = [
     "ConversationRetryPolicy",
     "ConversationStreamOptions",
     "DocFamilyToken",
+    "DEFAULT_AFTER_FAILED_RUN",
+    "DEFAULT_RESTART_LIMIT",
     "DocToken",
     "EnvTarget",
     "Extension",
@@ -730,6 +877,8 @@ __all__ = [
     "HarnessOptions",
     "HarnessSettings",
     "HookApi",
+    "host_error",
+    "HostCallback",
     "HookRegistration",
     "HookResult",
     "HookRunner",
@@ -743,12 +892,18 @@ __all__ = [
     "PromptSection",
     "QueueMode",
     "Registry",
+    "ReportFrom",
+    "ReportInfo",
+    "ReportReason",
+    "ReportTask",
+    "ReportType",
     "RegistryReader",
     "RegistrySnapshot",
     "RewindableConversationDocFamilyToken",
     "RewindableConversationDocToken",
     "SessionDocFamilyToken",
     "SessionDocToken",
+    "SetTimer",
     "Settings",
     "SettledSubmissionRecord",
     "SettledTask",
@@ -768,5 +923,6 @@ __all__ = [
     "ToolHooks",
     "ToolRegistration",
     "UserInput",
+    "Wake",
     "Wrap",
 ]

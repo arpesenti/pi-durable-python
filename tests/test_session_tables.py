@@ -48,6 +48,7 @@ ProgressDoc = define_doc(
         "version": 1,
         "scope": "task",
         "initial": lambda: {"lines": []},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 StepDoc = define_doc_family(
@@ -56,6 +57,7 @@ StepDoc = define_doc_family(
         "version": 1,
         "scope": "task",
         "initial": lambda _seed: {"lines": []},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 NotesDoc = define_doc(
@@ -66,6 +68,7 @@ NotesDoc = define_doc(
         "history": "rewindable",
         "fork": "asOf",
         "initial": lambda: {"text": ""},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 

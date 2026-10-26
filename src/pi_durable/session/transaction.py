@@ -833,12 +833,11 @@ class Transaction:
                 and change is not None
                 and change.loaded is not None
                 and change.definition is not None
-                and change.definition.checkpoint_when is not None
             ):
                 info = {"deltasSinceBase": change.loaded.deltas_since_base}
-                if change.definition.checkpoint_when(
-                    cast(JsonObject, change.value), change.ops, info
-                ):
+                predicate = change.definition.checkpoint_when
+                assert predicate is not None, "every definition supplies checkpoint_when"
+                if predicate(cast(JsonObject, change.value), change.ops, info):
                     plan.content = cast(
                         StorageWrite,
                         {

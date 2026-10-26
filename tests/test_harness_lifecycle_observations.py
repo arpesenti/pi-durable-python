@@ -22,6 +22,7 @@ Notes = define_doc(
         "version": 1,
         "scope": "session",
         "initial": lambda: {"text": ""},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 

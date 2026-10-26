@@ -103,6 +103,7 @@ __all__ = [
     "TaskQuery",
     "TaskRecord",
     "TaskState",
+    "TaskStateSleeping",
     "Tx",
     "TypedEntry",
     "TypedEntryDraft",
@@ -487,6 +488,15 @@ class TaskStateWaiting(TypedDict, Generic[S]):
     outcome: NotRequired[Never]
 
 
+class TaskStateSleeping(TypedDict, Generic[S]):
+    """Parked without an invocation until the Harness clock reaches ``until``."""
+
+    status: Literal["sleeping"]
+    checkpoint: S
+    until: int
+    outcome: NotRequired[Never]
+
+
 class TaskStateCompleting(TypedDict, Generic[S]):
     status: Literal["completing"]
     outcome: TaskOutcome
@@ -503,10 +513,16 @@ TaskState: TypeAlias = (
     TaskStatePending[Any]
     | TaskStateRunning[Any]
     | TaskStateWaiting[Any]
+    | TaskStateSleeping[Any]
     | TaskStateCompleting[Any]
     | TaskStateTerminal[Any]
 )
-NextTaskState: TypeAlias = TaskStateRunning[Any] | TaskStateWaiting[Any] | TaskStateTerminal[Any]
+NextTaskState: TypeAlias = (
+    TaskStateRunning[Any]
+    | TaskStateWaiting[Any]
+    | TaskStateSleeping[Any]
+    | TaskStateTerminal[Any]
+)
 
 
 class TaskRecordBase(TypedDict):
@@ -522,10 +538,17 @@ class TaskRecordBase(TypedDict):
     abandonOnRestart: NotRequired[Literal[True]]
     startedAt: NotRequired[int]
     endedAt: NotRequired[int]
+    restarts: NotRequired[int]
+    """Crash cut-offs in a row without progress since; a close does not count (spec §5.4)."""
 
 
 class LiveTaskRecord(TaskRecordBase):
-    state: TaskStatePending[Any] | TaskStateRunning[Any] | TaskStateWaiting[Any]
+    state: (
+        TaskStatePending[Any]
+        | TaskStateRunning[Any]
+        | TaskStateWaiting[Any]
+        | TaskStateSleeping[Any]
+    )
     memos: NotRequired[dict[str, JsonValue]]
 
 
@@ -895,7 +918,9 @@ class EntryQuery(TypedDict):
 class TaskQuery(TypedDict):
     conversationId: NotRequired[ConversationId]
     kind: NotRequired[str]
-    status: NotRequired[Literal["pending", "running", "waiting", "completing", "terminal"]]
+    status: NotRequired[
+        Literal["pending", "running", "waiting", "sleeping", "completing", "terminal"]
+    ]
     abortRequested: NotRequired[bool]
     background: NotRequired[bool]
     order: NotRequired[ScanOrder]

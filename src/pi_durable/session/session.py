@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypedDict, cast
@@ -21,9 +21,10 @@ from ..documents import (
 )
 from ..errors import SessionFailed, StorageRequestError, is_failure
 from ..harness.context import read_context
-from ..harness.types import ContextView
+from ..harness.types import LISTENER, ContextView, ReportInfo, SetTimer, host_error
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
 from ..json import JsonObject
+from ..timers import host_timers
 from ..types import (
     CommitChange,
     CommitPublication,
@@ -60,9 +61,6 @@ from .transaction import LoadedDocument, Transaction, TransactionScope
 #: Default document retention: ten minutes, as for kept contexts.
 _DEFAULT_DOCUMENT_RETENTION_MS = 600_000
 
-#: Longest delay a loop timer accepts; a longer retention waits in several steps.
-_MAX_TIMER_DELAY_MS = 2_147_483_647
-
 _default_document_retention: int | float = _DEFAULT_DOCUMENT_RETENTION_MS
 
 
@@ -85,20 +83,12 @@ def document_retention(ms: int | float | None) -> int | float:
     return _default_document_retention
 
 
-def _schedule_document_timer(
-    delay_ms: float, run: Callable[[], None]
-) -> asyncio.TimerHandle | None:
-    """Schedule one eviction that never keeps the process alive.
-
-    An asyncio timer cannot keep a process alive once its loop ends, so every Python loop can
-    keep one. ``None`` means this loop cannot, and then only commits evict (spec §4).
-    """
-
-    return asyncio.get_running_loop().call_later(delay_ms / 1000.0, run)
-
-
 def create_session(storage: Storage, options: dict[str, Any] | None = None, **kwargs: Any) -> SessionImpl:
-    """Open one Session kernel over a storage backend."""
+    """Open one Session kernel over a storage backend.
+
+    ``set_timer`` arms the background timer that evicts idle documents; the default is an asyncio
+    timer (spec §5.6).
+    """
 
     values = dict(options or {})
     values.update(kwargs)
@@ -110,6 +100,7 @@ def create_session(storage: Storage, options: dict[str, Any] | None = None, **kw
         storage,
         now if callable(now) else _now_ms,
         retention,
+        values.get("set_timer", values.get("setTimer")),
     )
 
 
@@ -144,10 +135,10 @@ class _WatchAttachment:
 
 @dataclass(slots=True)
 class _DocumentSweep:
-    """The pending eviction: a timer for the oldest idle document, or a line job at once."""
+    """The pending eviction: a background timer for the oldest idle document, or a line job."""
 
     at: int | float
-    timer: asyncio.TimerHandle | None = None
+    disarm: Callable[[], None] | None = None
 
 
 class DocumentCacheSizes(TypedDict):
@@ -228,6 +219,7 @@ class SessionImpl:
         storage: Storage,
         now: Callable[[], int] | None = None,
         document_retention_ms: int | float | Callable[[], int | float | None] | None = None,
+        set_timer: SetTimer | None = None,
     ) -> None:
         self._documents: dict[str, LoadedDocument] = {}
         # Cached documents with no observer attached, by address, oldest use first.
@@ -270,6 +262,10 @@ class SessionImpl:
         self._document_retention_ms = retention
         self._storage = GuardedStorage(storage, self)
         self._host = _SessionHost(self)
+        self._timers = host_timers(
+            set_timer,
+            lambda error: self.report(error, host_error("setTimer")),
+        )
 
     # ── Lifecycle and commits ───────────────────────────────────────────────
 
@@ -314,7 +310,7 @@ class SessionImpl:
         except RuntimeError:
             return
         loop.create_task(self._close_after_failure())
-        self.report(error)
+        self.report(error, {"type": "session_failed"})
 
     async def _close_after_failure(self) -> None:
         try:
@@ -322,8 +318,11 @@ class SessionImpl:
         except Exception:
             pass
 
-    def report(self, error: BaseException) -> None:
-        """A plain Session has no external report sink."""
+    def report(self, error: BaseException, info: ReportInfo | None = None) -> None:
+        """Internal: the Session's failure and listener errors, which never fail what ran them.
+
+        ``info`` defaults to a listener. A plain Session has no external report sink.
+        """
 
     async def commit(
         self,
@@ -481,7 +480,7 @@ class SessionImpl:
                     error = close_error
                     if self._failure is None:
                         self._failure = close_error
-                        self.report(close_error)
+                        self.report(close_error, {"type": "session_failed"})
                     raise
         except BaseException as caught:
             error = caught
@@ -583,7 +582,10 @@ class SessionImpl:
         for listener in list(self._internal_listeners):
             contained(partial(listener, publication, context), self.fail)
         for listener in list(self._commit_listeners):
-            contained(partial(listener, publication, context), self.report)
+            contained(
+                partial(listener, publication, context),
+                lambda error: self.report(error, LISTENER),
+            )
 
     # ── Document cache ─────────────────────────────────────────────────────
 
@@ -858,7 +860,7 @@ class SessionImpl:
         if self._closing is not None or not self._idle_documents:
             return
         # A synchronous observer method (`stop()`, `dispose()`) may run without a loop: then only
-        # the next commit evicts, as where timers cannot be unreferenced.
+        # the next commit evicts, as where the host declines background timers.
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -866,8 +868,8 @@ class SessionImpl:
         at = next(iter(self._idle_documents.values())) + self._document_retention_ms()
         if self._document_sweep is not None and self._document_sweep.at <= at:
             return
-        if self._document_sweep is not None and self._document_sweep.timer is not None:
-            self._document_sweep.timer.cancel()
+        if self._document_sweep is not None and self._document_sweep.disarm is not None:
+            self._document_sweep.disarm()
         sweep = _DocumentSweep(at=at)
         delay = at - self._clock()
 
@@ -884,18 +886,19 @@ class SessionImpl:
         if self._document_timers_unavailable:
             self._document_sweep = None
             return
-        timer = _schedule_document_timer(min(delay, _MAX_TIMER_DELAY_MS), run)
-        if timer is None:
+        # A timer that fires early sweeps nothing and arms the next one.
+        disarm = self._timers.background(run, delay)
+        if disarm is None:
             self._document_timers_unavailable = True
             self._document_sweep = None
             return
-        sweep.timer = timer
+        sweep.disarm = disarm
 
     def _cancel_document_sweep(self) -> None:
         sweep = self._document_sweep
         self._document_sweep = None
-        if sweep is not None and sweep.timer is not None:
-            sweep.timer.cancel()
+        if sweep is not None and sweep.disarm is not None:
+            sweep.disarm()
 
     def _queue_sweep_job(self, sweep: _DocumentSweep) -> None:
         try:
@@ -935,6 +938,23 @@ class SessionImpl:
 
     async def before_close(self) -> None:
         """Run after close seals admission and before the line closes Storage; a Harness joins tasks here."""
+
+    async def write_at_close(self, writes: Callable[[], Sequence[StorageWrite]]) -> None:
+        """Internal, for ``before_close()``: on the line, after every commit admitted before the
+        seal has settled, write what ``writes()`` returns straight to Storage.
+
+        Nothing is published, since the Session is closing; a failed Session writes nothing.
+        """
+
+        async def job() -> None:
+            if self._failure is not None:
+                return
+            batch = list(writes())
+            if batch:
+                await self._storage.commit(batch, without_abort_signal(BACKGROUND_CONTEXT))
+
+        async with self._line:
+            await job()
 
     # ── Internal ───────────────────────────────────────────────────────────
 

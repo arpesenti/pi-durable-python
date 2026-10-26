@@ -183,6 +183,12 @@ async def call_hook(handler: Callable[..., Any], *args: Any) -> Any:
     return result
 
 
+def optional_extension(extension: str | None) -> dict[str, Any]:
+    """``{"extension": name}`` when the extension is known, else nothing to spread."""
+
+    return {} if extension is None else {"extension": extension}
+
+
 def request_stream_options(stream: Mapping[str, Any]) -> JsonObject:
     """Map Python-facing stream settings to the camelCase provider request shape."""
 
@@ -196,6 +202,7 @@ __all__ = [
     "call_with_args",
     "cancellation_error",
     "closed_error",
+    "optional_extension",
     "rejected",
     "request_stream_options",
     "resolved",

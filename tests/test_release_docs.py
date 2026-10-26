@@ -74,6 +74,15 @@ def extra_rows() -> dict[str, str]:
     return rows
 
 
+def vendored_version() -> str:
+    """The upstream version docs/upstream/README.md pins."""
+
+    text = read(ROOT / "docs" / "upstream" / "README.md")
+    match = re.search(r"^-\s+Version:\s*`([^`]+)`\s*$", text, re.MULTILINE)
+    assert match is not None, "docs/upstream/README.md must record the vendored upstream version"
+    return match.group(1)
+
+
 def requirements(name: str) -> list[str]:
     """Distribution names of one extra's requirements, without version specifiers."""
 
@@ -158,10 +167,22 @@ def test_readme_states_the_version_policy() -> None:
 )
 def test_living_docs_do_not_pin_the_baseline(path: Path) -> None:
     text = read(path)
-    for anchor in ("v1.3.0", "71023ae"):
+    for anchor in ("v1.3.0", "71023ae", "v1.4.0", "4a08025"):
         assert anchor not in text, (
             f"{path.name} pins the {anchor} baseline; the tag and commit belong in PARITY.md and "
             "docs/upstream/README.md, not in docs that outlive the release"
+        )
+
+
+@pytest.mark.parametrize(
+    "path", LIVING_DOCS, ids=[str(path.relative_to(ROOT)) for path in LIVING_DOCS]
+)
+def test_living_docs_link_the_vendored_specification(path: Path) -> None:
+    version = vendored_version()
+    text = read(path)
+    for match in re.finditer(r"spec-(\d+\.\d+\.\d+)\.md", text):
+        assert match.group(1) == version, (
+            f"{path.name} links spec-{match.group(1)}.md, but the vendored baseline is {version}"
         )
 
 

@@ -29,7 +29,7 @@ from ..json import JsonValue, copy_json
 from ..session.transaction import Transaction
 from ..tasks import define_task
 from ..types import EntryDraft, MessageRecord, TaskRecord
-from .agent import DEFAULT_PROGRESS_POLICY
+from .agent import DEFAULT_PROGRESS_POLICY, tool_extension
 from .live import (
     TOOL_TASK_KIND,
     LiveDoc,
@@ -45,6 +45,7 @@ from .output import (
     OutputBuffer,
     OutputLimits,
     Progress,
+    ProgressClock,
     bound_output,
     overlap,
     utf8_byte_length,
@@ -59,7 +60,7 @@ from .types import (
     ToolRegistration,
 )
 from .usage import record_usage
-from .util import assign_json, call_hook
+from .util import assign_json, call_hook, optional_extension
 from .validation import (
     ToolArgumentError,
     structured_output_error,
@@ -106,6 +107,8 @@ NestedCallDoc = define_doc_family(
         "scope": "task",
         "family": True,
         "initial": lambda _seed: {},
+        # The document retires with its task.
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 """The nested calls of a tool call, a task-scoped family of the calling task keyed by the call's key.
@@ -537,7 +540,6 @@ class ToolExecutionApiImpl:
         self.conversation_id = runtime.conversation_id
         self.call_id = call.get("id", "")
         self.registry = runtime.registry
-        self.models = runtime.models
         self.env: Any = None
         limits = reported.limits
         self.output_window: Mapping[str, Any] | None = (
@@ -554,6 +556,17 @@ class ToolExecutionApiImpl:
             if limits.retain == "tail"
             else None
         )
+
+    @property
+    def models(self) -> Any:
+        """The current ``HarnessOptions.models``, read at each access."""
+
+        return self._runtime.models
+
+    def now(self) -> int:
+        """The Harness clock, for times a rerun after a restart compares against."""
+
+        return cast(int, self._runtime.now())
 
     async def agent(self, context: Context) -> Any:
         return await self._runtime.agent(context)
@@ -797,7 +810,37 @@ def publish_progress(
     interval = runtime.settings.progress.get(
         "output_interval_ms", DEFAULT_PROGRESS_POLICY["output_interval_ms"]
     )
-    return Progress(write, on_error, int(interval))
+    return Progress(write, on_error, int(interval), progress_clock(runtime))
+
+
+class _ProgressClock:
+    """A :class:`ProgressClock` over the Harness clock and the invocation's timers.
+
+    After the invocation ends nothing more commits, and the clock answers with the last time it read.
+    """
+
+    __slots__ = ("_last", "_runtime")
+
+    def __init__(self, runtime: Any) -> None:
+        self._runtime = runtime
+        self._last = 0.0
+
+    def now(self) -> float:
+        try:
+            self._last = float(self._runtime.now())
+        except BaseException:
+            # The invocation ended.
+            pass
+        return self._last
+
+    def set_timer(self, callback: Callable[[], None], delay_ms: float) -> Callable[[], None]:
+        return cast(Callable[[], None], self._runtime.set_timer(callback, delay_ms))
+
+
+def progress_clock(runtime: Any) -> ProgressClock:
+    """The Harness clock and timers for progress pacing."""
+
+    return _ProgressClock(runtime)
 
 
 async def final_result(
@@ -852,7 +895,14 @@ async def final_result(
             harness.append(tool_diagnostic("invalid_structured_output", broken))
         else:
             # The model never sees structured output, so its call stands; the host learns of the break.
-            runtime.report(ValueError(broken))
+            extension: str | None = None
+            try:
+                agent = await runtime.agent(context)
+                extension = tool_extension(agent, tool.name)
+            except BaseException:
+                # Only names the extension: a failed resolution leaves the report without the name.
+                extension = None
+            runtime.report(ValueError(broken), {"type": "extension", **optional_extension(extension)})
     # Programs get the tool's own value: without a schema, its output. The model reads only ``output``,
     # so model-issued calls skip both.
     if input["kind"] == "nested" and tool.structured_output_schema is None:

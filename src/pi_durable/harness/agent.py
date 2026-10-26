@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from ..documents import define_doc
 from ..session.transaction import Transaction
 from ..types import ConversationId, ConversationRecord
 from .types import (
+    DEFAULT_AFTER_FAILED_RUN,
+    DEFAULT_RESTART_LIMIT,
     Agent,
     Extension,
     PromptSection,
@@ -40,6 +42,19 @@ DEFAULT_PROGRESS_POLICY: dict[str, Any] = {
 
 DEFAULT_CONTEXT_RETENTION_MS = 600_000
 
+
+def restart_limit(limit: Any) -> int | float:
+    """A restart limit as given when it is a number of restarts, ``1`` or more, rounded down.
+
+    ``math.inf`` never parks a task; anything else means the default.
+    """
+
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+        return DEFAULT_RESTART_LIMIT
+    if limit != limit or limit < 1:  # NaN, or fewer than one restart
+        return DEFAULT_RESTART_LIMIT
+    return limit if limit == float("inf") else int(limit)
+
 AgentDoc = define_doc(
     {
         "kind": "pi.agent",
@@ -67,10 +82,10 @@ def resolve_settings(settings: Any) -> Settings:
     merged_retry.update(_field(settings, "retry", {}) or {})
     merged_compaction = dict(DEFAULT_COMPACTION_POLICY)
     merged_compaction.update(_field(settings, "compaction", {}) or {})
-    partial = _field(settings, "progress", {}) or {}
+    progress_partial = _field(settings, "progress", {}) or {}
     progress = dict(DEFAULT_PROGRESS_POLICY)
     for key in progress:
-        value = _field(partial, key)
+        value = _field(progress_partial, key)
         if value is not None:
             progress[key] = value
     return Settings(
@@ -85,7 +100,10 @@ def resolve_settings(settings: Any) -> Settings:
         context_retention_ms=_field(
             settings, "context_retention_ms", DEFAULT_CONTEXT_RETENTION_MS
         ),
-        document_retention_ms=_field(settings, "document_retention_ms", 600_000),    )
+        document_retention_ms=_field(settings, "document_retention_ms", 600_000),
+        after_failed_run=_field(settings, "after_failed_run", DEFAULT_AFTER_FAILED_RUN),
+        restart_limit=restart_limit(_field(settings, "restart_limit")),
+    )
 
 
 async def add_tools(tx: Transaction, conversation_id: ConversationId, added: list[str]) -> None:
@@ -175,21 +193,61 @@ async def create_agent(tx: Transaction, conversation: ConversationRecord) -> Non
     state.update(cast(Mapping[str, Any], owner_state))
 
 
-def agent_hooks(agent: Agent, task_name: str) -> list[Mapping[str, Any]]:
-    """Handlers of the selected extensions' hooks for a task name, in extension order."""
+def agent_hooks(agent: Agent, task_name: str) -> list[dict[str, Any]]:
+    """Handlers of the selected extensions' hooks for a task name, with the extension, in order."""
 
     return [
-        hook.handlers for extension in agent.extensions for hook in extension.hooks if hook.task == task_name
+        {"extension": extension.name, "handlers": hook.handlers}
+        for extension in agent.extensions
+        for hook in extension.hooks
+        if hook.task == task_name
     ]
+
+
+def last_extension(
+    extensions: Sequence[Extension], matches: Callable[[Extension], bool]
+) -> str | None:
+    """The last of ``extensions`` that ``matches``, by name: the code that runs last wins."""
+
+    found: str | None = None
+    for extension in extensions:
+        if matches(extension):
+            found = extension.name
+    return found
+
+
+def section_extension(agent: Agent, key: str) -> str | None:
+    """The extension whose code a section runs: the last selected one that provides or wraps it."""
+
+    def matches(extension: Extension) -> bool:
+        return any(section.key == key for section in extension.sections) or any(
+            wrap.section == key for wrap in extension.wraps
+        )
+
+    return last_extension(agent.extensions, matches)
+
+
+def tool_extension(agent: Agent, name: str) -> str | None:
+    """The extension whose code a tool runs: the last selected one that provides or wraps it."""
+
+    def matches(extension: Extension) -> bool:
+        return any(tool.name == name for tool in extension.tools) or any(
+            wrap.tool == name for wrap in extension.wraps
+        )
+
+    return last_extension(agent.extensions, matches)
 
 
 def resolve_agent(
     state: Mapping[str, Any] | None,
     snapshot: RegistrySnapshot,
     settings: Settings,
-    report: Callable[[BaseException], None],
+    report: Callable[[BaseException, str], None],
 ) -> Agent:
-    """Resolve an agent from its stored state, a registry snapshot, and resolved settings."""
+    """Resolve an agent from its stored state, a registry snapshot, and resolved settings.
+
+    ``report`` gets a wrapper's failure with the name of the wrapper's extension.
+    """
 
     stored = dict(state or {})
     extensions = _select_extensions(stored.get("extensions"), snapshot, settings)
@@ -204,10 +262,11 @@ def resolve_agent(
             sections[section.key] = section
     for extension in extensions:
         for wrap in extension.wraps:
+            wrap_report = _wrap_report(report, extension.name)
             if wrap.tool is not None and wrap.wrap is not None:
-                _apply_wrap(composed, wrap.tool, wrap.wrap, lambda tool: tool.name, report)
+                _apply_wrap(composed, wrap.tool, wrap.wrap, lambda tool: tool.name, wrap_report)
             elif wrap.section is not None and wrap.wrap is not None:
-                _apply_wrap(sections, wrap.section, wrap.wrap, lambda section: section.key, report)
+                _apply_wrap(sections, wrap.section, wrap.wrap, lambda section: section.key, wrap_report)
 
     enabled = _filter_tools(list(composed.values()), stored.get("tools"))
     model_callable = [tool for tool in enabled if tool.callers is None or "model" in tool.callers]
@@ -236,12 +295,21 @@ def resolve_agent(
     )
 
 
+def _wrap_report(report: Callable[[BaseException, str], None], name: str) -> Callable[[BaseException], None]:
+    """A wrapper's failure, tagged with the name of the wrapper's extension."""
+
+    def bounded(error: BaseException) -> None:
+        report(error, name)
+
+    return bounded
+
+
 def _apply_wrap(
     items: dict[str, Any],
     target: str,
     wrap: Callable[..., Any],
     name_of: Callable[[Any], str],
-    report: Callable[[BaseException], None],
+    report: Callable[..., None],
 ) -> None:
     item = items.get(target)
     if item is None:
@@ -333,12 +401,17 @@ __all__ = [
     "DEFAULT_COMPACTION_POLICY",
     "DEFAULT_CONTEXT_RETENTION_MS",
     "DEFAULT_PROGRESS_POLICY",
+    "DEFAULT_RESTART_LIMIT",
     "DEFAULT_RETRY_POLICY",
     "INSTRUCTIONS_KEY",
     "add_tools",
     "agent_hooks",
     "configure",
     "create_agent",
+    "last_extension",
     "resolve_agent",
     "resolve_settings",
+    "restart_limit",
+    "section_extension",
+    "tool_extension",
 ]

@@ -38,6 +38,7 @@ CounterDoc = define_doc(
         "history": "latest",
         "fork": "initial",
         "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 RewindableDoc = define_doc(
@@ -48,6 +49,7 @@ RewindableDoc = define_doc(
         "history": "rewindable",
         "fork": "asOf",
         "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 #: A third-party conversation family: one member per event.
@@ -59,6 +61,7 @@ EventDoc = define_doc_family(
         "history": "latest",
         "fork": "initial",
         "initial": lambda seq: {"seq": seq},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 SessionCounterDoc = define_doc(
@@ -67,6 +70,7 @@ SessionCounterDoc = define_doc(
         "version": 1,
         "scope": "session",
         "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 
@@ -101,12 +105,16 @@ async def noop_commit(_tx: Any) -> None:
     return None
 
 
-def open_session(retention_ms: Any) -> tuple[ControlledStorage, SessionImpl, Clock]:
+def open_session(
+    retention_ms: Any, set_timer: Any = None
+) -> tuple[ControlledStorage, SessionImpl, Clock]:
     """A Session with a controllable clock and retention."""
 
     clock = Clock()
     storage = ControlledStorage()
-    session = SessionImpl(cast(Storage, storage), lambda: clock.now, lambda: retention_ms)
+    session = SessionImpl(
+        cast(Storage, storage), lambda: clock.now, lambda: retention_ms, set_timer
+    )
     return storage, session, clock
 
 
@@ -437,6 +445,7 @@ async def test_migrates_a_document_again_after_its_eviction() -> None:
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 1},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     migrations = 0
@@ -453,6 +462,7 @@ async def test_migrates_a_document_again_after_its_eviction() -> None:
             "scope": "session",
             "initial": lambda: {"count": 0, "migrated": True},
             "migrate": migrate,
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _clock = open_session(0)
@@ -492,19 +502,17 @@ async def test_treats_a_retention_that_is_not_a_number_of_milliseconds_as_the_de
         set_default_document_retention(_DEFAULT_FOR_RUN)
 
 
-async def test_keeps_no_timer_where_timers_cannot_be_unreferenced_and_evicts_on_commits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_keeps_no_timer_where_the_host_declines_background_timers_and_evicts_on_commits() -> None:
     attempts = 0
 
-    def no_timer(_delay_ms: float, _run: Any) -> None:
+    def declining(_callback: Any, _delay_ms: float, *, background: bool = False) -> Any:
         nonlocal attempts
-        attempts += 1
+        if background:
+            attempts += 1
         return None
 
-    # Where a loop cannot schedule an unreferenced timer, only commits evict (spec §4).
-    monkeypatch.setattr(session_module, "_schedule_document_timer", no_timer)
-    _storage, session, clock = open_session(1_000)
+    # Where the host declines background timers, only commits evict (spec §4).
+    _storage, session, clock = open_session(1_000, declining)
     conversation_id = await create_conversation(session)
     await bump(session, conversation_id)
     await bump(session, conversation_id)
@@ -523,6 +531,7 @@ async def test_keeps_a_reloaded_newer_version_cached_while_an_older_observer_is_
             "version": 1,
             "scope": "session",
             "initial": lambda: {"count": 3},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     V2 = define_doc(
@@ -532,6 +541,7 @@ async def test_keeps_a_reloaded_newer_version_cached_while_an_older_observer_is_
             "scope": "session",
             "initial": lambda: {"count": 0, "v2": True},
             "migrate": lambda value, _from_version: {"count": value["count"], "v2": True},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     _storage, session, _clock = open_session(0)

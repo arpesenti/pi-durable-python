@@ -33,7 +33,10 @@ def initial() -> dict[str, int]:
 
 
 SessionDoc = define_doc(
-    {"kind": "t.session", "version": 1, "scope": "session", "initial": initial}
+    {
+        "kind": "t.session", "version": 1, "scope": "session", "initial": initial,
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    }
 )
 LatestDoc = define_doc(
     {
@@ -43,6 +46,7 @@ LatestDoc = define_doc(
         "history": "latest",
         "fork": "current",
         "initial": initial,
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 RewindableDoc = define_doc(
@@ -53,9 +57,18 @@ RewindableDoc = define_doc(
         "history": "rewindable",
         "fork": "asOf",
         "initial": initial,
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
-TaskDoc = define_doc({"kind": "t.task", "version": 1, "scope": "task", "initial": initial})
+TaskDoc = define_doc(
+    {
+        "kind": "t.task",
+        "version": 1,
+        "scope": "task",
+        "initial": initial,
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    }
+)
 SessionFamily = define_doc_family(
     {
         "kind": "t.session-family",
@@ -63,6 +76,7 @@ SessionFamily = define_doc_family(
         "family": True,
         "scope": "session",
         "initial": lambda seed: {"value": seed},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 ConversationFamily = define_doc_family(
@@ -74,6 +88,7 @@ ConversationFamily = define_doc_family(
         "history": "rewindable",
         "fork": "initial",
         "initial": lambda seed: {"value": seed},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 TaskFamily = define_doc_family(
@@ -83,6 +98,7 @@ TaskFamily = define_doc_family(
         "family": True,
         "scope": "task",
         "initial": lambda seed: {"value": seed},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 
@@ -97,13 +113,54 @@ WorkTask = define_task(
 )
 
 
+def test_requires_an_explicit_checkpoint_predicate() -> None:
+    with pytest.raises(TypeError, match="requires a checkpoint_when"):
+        define_doc({"kind": "t.no-checkpoint", "version": 1, "scope": "session", "initial": initial})
+    with pytest.raises(TypeError, match="requires a checkpoint_when"):
+        define_doc_family(
+            {"kind": "t.no-checkpoint-family", "version": 1, "scope": "session", "initial": initial}
+        )
+    # There is no default: a definition that keeps only the required bases says so.
+    keep_bases_only = define_doc(
+        {
+            "kind": "t.bases-only",
+            "version": 1,
+            "scope": "session",
+            "initial": initial,
+            "checkpoint_when": lambda _value, _ops, _info: False,
+        }
+    )
+    predicate = keep_bases_only.definition.checkpoint_when
+    assert predicate is not None
+    assert predicate({}, [], {"deltasSinceBase": 0}) is False
+
+
 def test_validates_persisted_version_semantics() -> None:
     with pytest.raises(TypeError, match="positive integer"):
-        define_doc({"kind": "k", "version": 0, "scope": "session", "initial": initial})
+        define_doc(
+            {
+                "kind": "k",
+                "version": 0,
+                "scope": "session",
+                "initial": initial,
+                "checkpoint_when": lambda _value, _ops, _info: False,
+            }
+        )
     with pytest.raises(TypeError, match="positive integer"):
-        define_doc({"kind": "k", "version": 1.5, "scope": "session", "initial": initial})
+        define_doc(
+            {
+                "kind": "k",
+                "version": 1.5,
+                "scope": "session",
+                "initial": initial,
+                "checkpoint_when": lambda _value, _ops, _info: False,
+            }
+        )
     assert define_doc(
-        {"kind": "", "version": 1, "scope": "session", "initial": initial}
+        {
+            "kind": "", "version": 1, "scope": "session", "initial": initial,
+            "checkpoint_when": lambda _value, _ops, _info: False,
+        }
     ).definition.kind == ""
     assert SessionDoc.definition.kind == "t.session"
 

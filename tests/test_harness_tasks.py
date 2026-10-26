@@ -212,6 +212,7 @@ async def test_memos_children_and_task_document_retirement() -> None:
             "version": 1,
             "scope": "task",
             "initial": lambda: {"lines": []},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Answer: Any = define_entry("answer")
@@ -546,6 +547,7 @@ async def test_rejects_runtime_operations_after_the_invocation_ends() -> None:
             "version": 1,
             "scope": "session",
             "initial": lambda: {"text": ""},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     captured: list[Any] = []
@@ -584,7 +586,7 @@ async def test_rejects_runtime_operations_after_the_invocation_ends() -> None:
         runtime.commit(lambda: {}, context),
         runtime.memo("x", context),
         runtime.memo("x", 1, context),
-        runtime.sleep(0, context),
+        runtime.sleep_until(0, {"phase": "run"}, context),
         runtime.watch_doc(Notes, context),
         runtime.agent(handler_context[0]),
     ):
@@ -607,6 +609,7 @@ async def test_reads_documents_and_context_through_the_runtime() -> None:
             "history": "rewindable",
             "fork": "asOf",
             "initial": lambda: {"text": ""},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     captured: list[Any] = []
@@ -685,68 +688,6 @@ async def test_orders_runtime_commits_against_the_step() -> None:
     with pytest.raises(Exception, match="invocation has ended|is terminal"):
         await after[0]
     await opened["harness"].close(context)
-
-
-async def test_sleeps_until_the_harness_clock_reaches_the_deadline() -> None:
-    clock = [1_000]
-    woke = deferred()
-
-    async def run(task: Any, runtime: Any, ctx: Any) -> None:
-        await runtime.sleep(900, ctx)
-        await runtime.sleep(1_005, ctx)
-        woke.resolve()
-        await runtime.commit(lambda: completed(None), ctx)
-
-    Sleeper = one_step("test.sleeper", run)
-    opened = await open_root([Sleeper], {"now": lambda: clock[0]})
-    id = await start(opened["root"], Sleeper)
-    opened["harness"].resume()
-    await asyncio.sleep(0.03)
-    assert await settled(woke.promise) is False
-    clock[0] = 1_005
-    await opened["harness"].wait_for_task(id, context)
-    await opened["harness"].close(context)
-
-
-async def test_rejects_sleep_when_signalled_or_its_own_context_is_cancelled() -> None:
-    results: list[str] = []
-    sleeping = deferred()
-
-    async def signalled(task: Any, runtime: Any, ctx: Any) -> None:
-        sleeping.resolve()
-        try:
-            await runtime.sleep(_now_ms() + 60_000, ctx)
-        except BaseException as error:
-            results.append(f"signalled:{type(error).__name__}")
-            raise
-
-    async def cancelled(task: Any, runtime: Any, ctx: Any) -> None:
-        controller = AbortController()
-        scope = with_signal(controller.signal)
-        waiting = asyncio.ensure_future(runtime.sleep(_now_ms() + 60_000, scope))
-        controller.abort(RuntimeError("stop sleeping"))
-        results.append(f"cancelled:{type(await _capture(waiting)).__name__}")
-        await runtime.commit(lambda: completed(None), ctx)
-
-    Signalled = one_step("test.sleep-signalled", signalled)
-    Cancelled = one_step("test.sleep-cancelled", cancelled)
-    opened = await open_root([Signalled, Cancelled])
-    signal_id = await start(opened["root"], Signalled)
-    cancel_id = await start(opened["root"], Cancelled)
-    opened["harness"].resume()
-    await opened["harness"].wait_for_task(cancel_id, context)
-    await sleeping.promise
-    await opened["harness"].abort_task(signal_id, context)
-    outcome = (await opened["harness"].wait_for_task(signal_id, context))["state"]["outcome"]
-    assert outcome == {"status": "aborted", "reason": "test"}
-    assert results == ["cancelled:RuntimeError", "signalled:AbortError"]
-    await opened["harness"].close(context)
-
-
-def _now_ms() -> int:
-    import time
-
-    return int(time.time() * 1000)
 
 
 @pytest.mark.parametrize("recovery", [False])
@@ -1356,7 +1297,20 @@ async def test_close_stops_without_outcomes_and_starts_no_fresh_phase_or_abort()
     proceed.resolve()
     await closing
     assert await aborting == "marked"
-    assert len(storage.commits) == commits
+    # No outcome: close writes only the stopped task back as pending, so a reopen counts no restart.
+    assert len(storage.commits) == commits + 1
+    last = [write for write in storage.commits[-1] if write["type"] == "task"]
+    assert last == [
+        {
+            "type": "task",
+            "value": {
+                **last[0]["value"],
+                "abortRequested": True,
+                "state": {"status": "pending", "checkpoint": {"phase": "two"}},
+            },
+        }
+    ]
+    assert "restarts" not in last[0]["value"]
     assert phases == ["one"]
     assert state["abort_ran"] is False
     assert record["abortRequested"] is True
@@ -1372,6 +1326,7 @@ async def test_close_seals_admission_before_signalling_handlers_and_stops_watche
             "version": 1,
             "scope": "session",
             "initial": lambda: {"text": ""},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     reached = deferred()
@@ -1435,7 +1390,12 @@ async def test_writes_no_fault_when_close_seals_before_the_failed_phase_step() -
         for write in writes
         if write["type"] == "task" and write["value"]["id"] == id
     ]
-    assert [write["value"]["state"]["status"] for write in task_writes] == ["pending", "running"]
+    # Created, reserved, and written back as pending by close: no fault.
+    assert [write["value"]["state"]["status"] for write in task_writes] == [
+        "pending",
+        "running",
+        "pending",
+    ]
 
 
 async def test_starts_no_abort_handler_whose_reservation_settles_while_closing() -> None:
@@ -1459,10 +1419,15 @@ async def test_starts_no_abort_handler_whose_reservation_settles_while_closing()
     held.release()
     await closing
     assert state["ran"] is False
-    writes = [write for write in storage.commits[-1] if write["type"] == "task"]
-    assert writes[0]["value"]["id"] == id
-    assert writes[0]["value"]["abortRequested"] is True
-    assert writes[0]["value"]["state"]["status"] == "running"
+    # The reservation landed; close wrote the task back as pending.
+    reserved = [write for write in storage.commits[-2] if write["type"] == "task"]
+    assert reserved[0]["value"]["id"] == id
+    assert reserved[0]["value"]["abortRequested"] is True
+    assert reserved[0]["value"]["state"]["status"] == "running"
+    written = [write for write in storage.commits[-1] if write["type"] == "task"]
+    assert written[0]["value"]["id"] == id
+    assert written[0]["value"]["abortRequested"] is True
+    assert written[0]["value"]["state"]["status"] == "pending"
 
 
 async def test_rejects_a_runtime_commit_queued_on_the_line_when_close_sealed() -> None:
@@ -1500,7 +1465,12 @@ async def test_rejects_a_runtime_commit_queued_on_the_line_when_close_sealed() -
         for write in writes
         if write["type"] == "task" and write["value"]["id"] == id
     ]
-    assert len(task_writes) == 2
+    # Created, reserved, and written back as pending by close; the queued outcome never landed.
+    assert [write["value"]["state"]["status"] for write in task_writes] == [
+        "pending",
+        "running",
+        "pending",
+    ]
 
 
 async def test_starts_no_next_phase_when_close_seals_during_a_continuing_step() -> None:
@@ -1565,6 +1535,10 @@ async def test_joins_a_reservation_that_settles_while_closing_without_starting_i
     held.release()
     await closing
     assert state["ran"] is False
-    writes = [write for write in storage.commits[-1] if write["type"] == "task"]
-    assert writes[0]["value"]["id"] == id
-    assert writes[0]["value"]["state"]["status"] == "running"
+    # The reservation landed; close wrote the task back as pending.
+    reserved = [write for write in storage.commits[-2] if write["type"] == "task"]
+    assert reserved[0]["value"]["id"] == id
+    assert reserved[0]["value"]["state"]["status"] == "running"
+    written = [write for write in storage.commits[-1] if write["type"] == "task"]
+    assert written[0]["value"]["id"] == id
+    assert written[0]["value"]["state"]["status"] == "pending"

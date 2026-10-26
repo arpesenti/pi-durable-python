@@ -66,7 +66,10 @@ from pi_durable.context import BACKGROUND_CONTEXT
 
 # Define once: the kind, version, scope, and initial value migrate and materialize the document.
 CounterDoc = define_doc(
-    {"kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0}}
+    {
+        "kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    },
 )
 
 
@@ -202,7 +205,7 @@ executed by `tests/test_release_docs.py`.
 
 The [usage guide](./docs/usage.md) walks through documents, tasks, the Harness, providers, storage
 backends, and extensions with runnable examples. The normative details are in the
-[vendored specification](./docs/upstream/spec-1.3.0.md); the parity matrix is
+[vendored specification](./docs/upstream/spec-1.4.0.md); the parity matrix is
 [`PARITY.md`](./PARITY.md), and the [audit report](./docs/parity-report.md) lists the translated
 suites and the remaining explicit deviations.
 

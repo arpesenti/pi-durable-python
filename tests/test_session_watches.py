@@ -39,6 +39,7 @@ StateDoc = define_doc(
         "version": 1,
         "scope": "session",
         "initial": lambda: {"value": 0, "items": ["a", "b"], "retained": {"label": "stable"}},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 
@@ -516,7 +517,10 @@ async def test_settles_listener_failure_on_only_the_affected_watch() -> None:
 
 async def test_hydrates_migration_without_writing_and_observes_the_later_exact_edit() -> None:
     Old = define_doc(
-        {"kind": "watch.migration", "version": 1, "scope": "session", "initial": lambda: {"value": 3}}
+        {
+            "kind": "watch.migration", "version": 1, "scope": "session", "initial": lambda: {"value": 3},
+            "checkpoint_when": lambda _value, _ops, _info: False,
+        }
     )
     Current = define_doc(
         {
@@ -525,6 +529,7 @@ async def test_hydrates_migration_without_writing_and_observes_the_later_exact_e
             "scope": "session",
             "initial": lambda: {"value": 0, "migrated": False},
             "migrate": lambda value, _from_version: {"value": value["value"], "migrated": True},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()

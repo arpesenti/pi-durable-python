@@ -66,7 +66,7 @@ async def render_sections(
     sections: Sequence[PromptSection],
     input: PromptInput,
     shown: Mapping[str, str],
-    report: Callable[[BaseException], None],
+    report: Callable[[BaseException, PromptSection], None],
     context: Context,
 ) -> dict[str, str]:
     """Render the agent's sections in order.
@@ -86,7 +86,7 @@ async def render_sections(
             signal = context.abort_signal
             if signal is not None and signal.aborted:
                 raise
-            report(error)
+            report(error, section)
             kept = shown.get(section.key)
             if kept is not None:
                 desired[section.key] = kept

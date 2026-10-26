@@ -836,6 +836,27 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         expect(await scan("completing")).to_equal([])
         expect(await scan("terminal")).to_equal([terminal])
 
+    async def stores_and_scans_sleeping_tasks_by_status(storage: Storage) -> None:
+        root_id = await _create_root(storage)
+        sleeping_id = await storage.mint_id()
+        sleeping = {
+            **_pending_task(sleeping_id, root_id, "next"),
+            "state": {"status": "sleeping", "checkpoint": {"phase": "next"}, "until": 61_000},
+            "memos": {"kept": True},
+        }
+        await storage.commit([{"type": "task", "value": sleeping}], context)
+        expect(await storage.task(sleeping_id, context)).to_equal(sleeping)
+
+        async def scan(status: str) -> list[Any]:
+            page = await storage.scan_tasks({"status": status}, 10, None, context)
+            return list(page["items"])
+
+        expect(await scan("sleeping")).to_equal([sleeping])
+        running = {**sleeping, "state": {"status": "running", "checkpoint": {"phase": "next"}}}
+        await storage.commit([{"type": "task", "value": running}], context)
+        expect(await scan("sleeping")).to_equal([])
+        expect(await scan("running")).to_equal([running])
+
     async def indexes_request_ids(storage: Storage) -> None:
         root_id = await _create_root(storage)
         second_conversation_id = await storage.mint_id()
@@ -1949,6 +1970,11 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             options,
             "stores owners and scans waiting and completing tasks by status",
             stores_owners_and_scans_statuses,
+        ),
+        _create_case(
+            options,
+            "stores and scans sleeping tasks by status",
+            stores_and_scans_sleeping_tasks_by_status,
         ),
         _create_case(
             options,

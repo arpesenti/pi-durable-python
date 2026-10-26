@@ -676,6 +676,42 @@ async def test_applies_add_tools_and_terminates_only_when_every_result_of_the_ro
     await first["harness"].close(context)
 
 
+async def test_reads_the_harness_clock_through_api_now() -> None:
+    setup = chat_setup()
+    setup.now = lambda: 1_234
+    seen: list[int] = []
+
+    def clock(_args: Any, api: Any, _context: Any) -> Any:
+        seen.append(api.now())
+        return {"output": []}
+
+    add_tool(setup.registry, tool("clock", clock))
+    ran = await run(
+        setup,
+        [calls(["clock", {}, "c1"]), DONE],
+        lambda _harness, root: root.configure({"tools": ["clock"]}, context),
+    )
+    assert ran["status"] == "done"
+    # The tool sees the same clock the scheduler stamps task times with, not the wall clock.
+    assert seen == [1_234]
+    await ran["harness"].close(context)
+
+
+async def test_does_not_terminate_on_terminate_false() -> None:
+    # #10858
+    setup = chat_setup()
+    keep = tool("keep", lambda *_args: {"output": [], "control": {"terminate": False}})
+    add_tool(setup.registry, keep)
+    ran = await run(
+        setup,
+        [calls(["keep", {}, "c1"]), DONE],
+        lambda _harness, root: root.configure({"tools": [keep]}, context),
+    )
+    assert ran["status"] == "done"
+    assert ran["entries"][-1]["kind"] == "pi.assistant"
+    await ran["harness"].close(context)
+
+
 async def test_builds_the_environment_per_call_and_runs_commits_memos_and_child_tasks() -> None:
     setup = chat_setup()
     child = define_task(

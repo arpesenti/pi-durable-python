@@ -14,7 +14,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from ..delta import overlap_strings
 
@@ -339,6 +339,29 @@ def _now_ms() -> float:
     return time.monotonic() * 1000.0
 
 
+class ProgressClock(Protocol):
+    """Where progress pacing reads its time and arms its timer.
+
+    A ``ToolExecutionApi`` progress commit runs on the Harness clock through the host's
+    ``set_timer``; without one, :class:`Progress` uses a monotonic clock and an asyncio timer.
+    """
+
+    def now(self) -> float: ...
+
+    def set_timer(self, callback: Callable[[], None], delay_ms: float) -> Callable[[], None]: ...
+
+
+class _LoopClock:
+    """The default clock: a monotonic millisecond clock and an asyncio timer."""
+
+    def now(self) -> float:
+        return _now_ms()
+
+    def set_timer(self, callback: Callable[[], None], delay_ms: float) -> Callable[[], None]:
+        handle = asyncio.get_running_loop().call_later(max(0.0, delay_ms) / 1000.0, callback)
+        return handle.cancel
+
+
 class Progress:
     """Adaptive progress commits: the first change after an idle period commits at once; each commit
     then delays the next by at least ``min_interval_ms`` and by its written size at 100 KiB/s.
@@ -351,12 +374,14 @@ class Progress:
         write: Callable[[], Any],
         on_error: Callable[[BaseException], None],
         min_interval_ms: int,
+        clock: ProgressClock | None = None,
     ) -> None:
         self._write = write
         self._on_error = on_error
         self._min_interval_ms = max(0, min_interval_ms)
+        self._clock: ProgressClock = clock if clock is not None else _LoopClock()
         self._waiters: list[asyncio.Future[None]] = []
-        self._timer: asyncio.TimerHandle | None = None
+        self._timer: Callable[[], None] | None = None
         self._in_flight: asyncio.Future[None] | None = None
         self._next_at = 0.0
         self._dirty = False
@@ -381,7 +406,7 @@ class Progress:
 
         self._stopped = True
         if self._timer is not None:
-            self._timer.cancel()
+            self._timer()
             self._timer = None
         if self._in_flight is not None:
             await self._in_flight
@@ -392,12 +417,11 @@ class Progress:
     def _schedule(self) -> None:
         if self._stopped or self._timer is not None or self._in_flight is not None:
             return
-        wait = self._next_at - _now_ms()
+        wait = self._next_at - self._clock.now()
         if wait <= 0:
             self._flush()
         else:
-            loop = asyncio.get_running_loop()
-            self._timer = loop.call_later(wait / 1000.0, self._fire)
+            self._timer = self._clock.set_timer(self._fire, wait)
 
     def _fire(self) -> None:
         self._timer = None
@@ -409,7 +433,7 @@ class Progress:
         self._dirty = False
         waiters = self._waiters
         self._waiters = []
-        started = _now_ms()
+        started = self._clock.now()
         # Called synchronously, so a writer captures what changed before the commit is awaited.
         try:
             produced = self._write()
@@ -460,6 +484,7 @@ __all__ = [
     "OutputSkip",
     "OutputSlice",
     "Progress",
+    "ProgressClock",
     "bound_output",
     "overlap",
     "sanitize_output",

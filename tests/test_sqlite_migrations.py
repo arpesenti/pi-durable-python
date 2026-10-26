@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from pi_durable.context import BACKGROUND_CONTEXT
-from pi_durable.ids import ROOT_CONVERSATION_ID, EntryId
+from pi_durable.ids import ROOT_CONVERSATION_ID, EntryId, TaskId
 from pi_durable.storage.sqlite import (
     CURRENT_SQLITE_SCHEMA_VERSION,
     SQLITE_MIGRATIONS,
@@ -192,3 +192,104 @@ async def test_rolls_a_failed_migration_back_and_preserves_stored_data_for_a_suc
         ) == {"next_id": "3", "next_seq": 2}
     finally:
         await database.close()
+
+
+async def test_migrates_a_version_1_database_to_the_sleeping_task_status() -> None:
+    path = _database_path()
+    database = await open_posix_sqlite_database(path)
+    try:
+        # A 1.3.0 database: schema version 1 only.
+        await apply_sqlite_migrations(database, SQLITE_MIGRATIONS[:1])
+        assert await database.get("SELECT version FROM durable_schema WHERE singleton = 1") == {
+            "version": 1
+        }
+        legacy = {
+            "id": 7,
+            "conversationId": 1,
+            "kind": "test.legacy",
+            "version": 1,
+            "input": None,
+            "background": False,
+            "abortRequested": False,
+            "state": {"status": "pending", "checkpoint": {"phase": "run"}},
+        }
+        await database.run(
+            "INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            7,
+            1,
+            "test.legacy",
+            "pending",
+            0,
+            0,
+            json.dumps(legacy),
+        )
+        # Version 1 cannot store a sleeping task: its CHECK lists the 1.3.0 statuses only.
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.run(
+                "INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                8,
+                1,
+                "test.sleepy",
+                "sleeping",
+                0,
+                0,
+                json.dumps({**legacy, "id": 8}),
+            )
+
+        await apply_sqlite_migrations(database)
+        assert await database.get("SELECT version FROM durable_schema WHERE singleton = 1") == {
+            "version": 2
+        }
+        # The rebuild kept the stored record and its indexes.
+        stored = await database.get("SELECT record, status FROM tasks WHERE id = 7")
+        assert stored is not None
+        assert stored["status"] == "pending"
+        assert json.loads(stored["record"]) == legacy
+        assert await database.get(
+            "SELECT count(*) AS count FROM sqlite_schema "
+            "WHERE type = 'index' AND name IN ('tasks_by_status', 'tasks_by_conversation', "
+            "'tasks_by_kind', 'tasks_by_abort_requested', 'tasks_by_background')"
+        ) == {"count": 5}
+        # The rebuilt table took the old one's name; no temporary table is left behind.
+        assert await database.get(
+            "SELECT count(*) AS count FROM sqlite_schema WHERE name = 'tasks_v2'"
+        ) == {"count": 0}
+        # The migrated table admits the new status, and still refuses an unknown one.
+        for task_id, status in ((8, "sleeping"), (9, "waiting")):
+            await database.run(
+                "INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                task_id,
+                1,
+                "test.current",
+                status,
+                0,
+                0,
+                json.dumps({**legacy, "id": task_id}),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await database.run(
+                "INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                10,
+                1,
+                "test.current",
+                "unknown",
+                0,
+                0,
+                json.dumps({**legacy, "id": 10}),
+            )
+    finally:
+        await database.close()
+
+    # A 1.4.0 storage reads and writes the migrated database, sleeping tasks included.
+    storage = await open_posix_sqlite_storage(path)
+    try:
+        sleeping = await storage.task(TaskId(8), context)
+        assert sleeping is not None
+        page = await storage.scan_tasks({"status": "sleeping"}, 10, None, context)
+        assert [record["id"] for record in page["items"]] == [8]
+    finally:
+        await storage.close(context)

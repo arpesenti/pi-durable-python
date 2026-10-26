@@ -5,7 +5,7 @@ the testing helpers. Snippets marked with an `<!-- example -->` marker run in th
 (`tests/test_release_docs.py`); the rest are shaped like the code but need credentials, an SDK, or a
 deployment decision.
 
-The normative description is the [vendored specification](./upstream/spec-1.3.0.md). This guide
+The normative description is the [vendored specification](./upstream/spec-1.4.0.md). This guide
 shows the Python spelling of it; [`PARITY.md`](../PARITY.md) is the export-by-export contract and
 [`upstream/README.md`](./upstream/README.md) records the upstream baseline it pins.
 
@@ -27,8 +27,9 @@ from pi_durable import MemoryStorage, create_session
 session = create_session(MemoryStorage())
 ```
 
-`create_session()` also accepts `now` (the clock, in milliseconds) and `document_retention_ms` (how
-long an unobserved document stays cached, default ten minutes).
+`create_session()` also accepts `now` (the clock, in milliseconds), `document_retention_ms` (how
+long an unobserved document stays cached, default ten minutes), and `set_timer` (the host timer the
+cache eviction is armed through; see [Timers and wakeups](#timers-and-wakeups)).
 
 ### Documents
 
@@ -59,12 +60,18 @@ from pi_durable.context import BACKGROUND_CONTEXT
 
 # One session-wide counter.
 CounterDoc = define_doc(
-    {"kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0}}
+    {
+        "kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    },
 )
 
 # One document per key; the seed only reaches initial() when the member is created.
 HitDoc = define_doc_family(
-    {"kind": "demo.hit", "version": 1, "scope": "session", "initial": lambda seed: {"hits": 0}}
+    {
+        "kind": "demo.hit", "version": 1, "scope": "session", "initial": lambda seed: {"hits": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    },
 )
 
 
@@ -101,7 +108,10 @@ from pi_durable import MemoryStorage, create_session, define_doc
 from pi_durable.context import BACKGROUND_CONTEXT
 
 CounterDoc = define_doc(
-    {"kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0}}
+    {
+        "kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    },
 )
 
 
@@ -256,6 +266,35 @@ Details worth knowing:
   and `harness.abort_task()` are the scheduling surface a task sees.
 - **Hooks.** A definition may carry `hooks` for `beforeTask`/`afterTask` style observation; see the
   specification's section 5.
+- **Sleeping.** A phase never waits for time in memory. Commit
+  `{"status": "sleeping", "checkpoint": {...}, "until": <epoch ms>}`, or call
+  `runtime.sleep_until(until, checkpoint, context)`, which commits exactly that: the task holds no
+  invocation until the Harness clock reaches `until`, then resumes at `checkpoint`. `until` is a
+  finite number, `0` or more, and an abort handler cannot sleep. Work that must follow the wait
+  belongs in the next phase, with what it needs in the checkpoint:
+
+  ```python
+  async def work(task, runtime, context):
+      a = await step_a()
+      await runtime.sleep_until(runtime.now() + 10 * 60_000, {"phase": "afterSleep", "a": a}, context)
+
+  async def after_sleep(task, runtime, context):
+      b = await step_b(task["state"]["checkpoint"]["a"])
+      await runtime.commit(lambda: {"status": "running", "checkpoint": {"phase": "next", "b": b}}, context)
+  ```
+
+- **Pacing timers.** `runtime.set_timer(callback, delay_ms)` arms a non-durable host timer for work
+  inside a phase, such as a throttled progress commit; the invocation's end disarms it, and calling
+  it after the end arms nothing.
+- **Restarts and parking.** Open counts a task a crash, eviction, or reset cut off in
+  `TaskRecord.restarts` and writes it back as `pending` with the count one higher. A state the task
+  commits itself that differs from its current one is progress and clears the count; a close is not
+  a crash, so the tasks it stops come back `pending` uncounted. At `settings.restart_limit` (default
+  `5`, `math.inf` never parks) the task is **parked**: `inspect()` and the task graph show
+  `{"kind": "blocked", "reason": "restart_limit"}`, it is reported once as `task_parked`, it is not
+  active in `harness.wake()`, and `harness.retry_task(id, context)` runs it again. An abort mark
+  starts the count over and still runs a parked task's abort handler; an abort handler cut off that
+  many times ends the task `faulted` with detail `{"reason": "restart_limit"}`.
 
 ## The Harness
 
@@ -273,10 +312,55 @@ harness = await Harness.open(
 )
 ```
 
-`HarnessOptions` accepts `models`, `registry`, `settings`, `env`, `conversation_created`, `now`, and
-`on_report`. `on_report` receives failures that do not fail the calling operation. A Harness starts
-paused; `resume()` (or the first submission) enables scheduling, and `close(context)` seals admission
-and joins the handlers.
+`HarnessOptions` accepts `models`, `registry`, `settings`, `env`, `conversation_created`, `now`,
+`set_timer`, `on_wake`, and `on_report`. `models` and `settings` take a value or a zero-argument
+function resolved at each use, so a host can replace its model catalog or run settings without
+reopening the Harness; `api.models` in tools and hooks reads the current value at each access. A
+Harness starts paused; `resume()` (or the first submission) enables scheduling, and `close(context)`
+seals admission and joins the handlers.
+
+`on_report(error, info)` receives failures that do not fail the calling operation, plus the error
+that fails the Session. `info` is a `ReportInfo` whose `type` says what happened:
+
+| `type` | Meaning |
+| --- | --- |
+| `session_failed` | The error failed the Session, which closes. |
+| `task_faulted` | A task ended `faulted`: a phase threw (`reason: "threw"`), or its abort handler was cut off (`reason: "restart_limit"`). |
+| `task_parked` | The restart limit parked a task. |
+| `migration_failed` | A task's migration threw; the task is blocked. |
+| `task_outdated` | A running task keeps its old definition, which is missing (`missing_task`) or cannot take it (`incompatible_task`). |
+| `task_error` | A task's own `runtime.report()`, or a failure in running it. |
+| `extension_error` | A hook, section, wrapper, or a tool's invalid structured output, with the extension's name. |
+| `host_error` | A host callback threw: `now`, `settings`, `registry`, `env`, `models`, `set_timer`, or `on_wake`. |
+| `listener_error` | A commit, close, watch, view, or document listener threw. |
+
+Every task report carries `task` (its ID, kind, and conversation), and `extension` when known. A
+one-argument callback still works: the Harness inspects its arity.
+
+### Timers and wakeups
+
+Every timer of the Session and Harness is armed through `HarnessOptions.set_timer`, which takes
+`(callback, delay_ms, *, background=False)` and returns a disarm callable or `None`. Background
+timers only free memory (document eviction and kept contexts) and may be declined; a foreground
+timer paces or resumes work, and one the host throws on or declines is armed with the default timer
+instead, with the first failure reported as `host_error`. The default is an asyncio timer.
+
+```python
+def set_timer(callback, delay_ms, *, background=False):
+    handle = loop.call_later(delay_ms / 1000, callback)
+    return handle.cancel
+```
+
+`harness.wake()` says when the Session next needs a process: `{"active": True}` while some task can
+run or is running, and `{"active": False, "at": <epoch ms>}` with the earliest sleep not yet due.
+Without `on_wake`, the Harness keeps a foreground timer for that sleep. With `on_wake`, it arms no
+timer for sleeps: it calls `on_wake(wake)` after open and whenever the value changes, and the host
+arms its own wakeup, such as a Durable Object alarm, and calls `resume()` when it fires. `resume()`
+also makes due sleeps runnable, which is how a wakeup resumes them.
+
+A parked task, a `completing` task, and a wait on a live task do not count as active; the work they
+wait for does. A task no definition can take is not active either: only a registry change, or
+`retry_task()` for a parked task, can let it run, and either offers `on_wake` the new value.
 
 ### Conversations
 
@@ -347,6 +431,11 @@ settled = await admitted.wait(context)  # {'status': 'done' | 'unanswered', ...}
   `harness.submission(id, context)` reads one; `harness.abort_submission()` withdraws one.
 - `settled["entry"]` names the placed entry and `settled["answer"]` the assistant entry that
   answered it. The answer is an entry, not a return value.
+- `settings.after_failed_run` decides what a run that fails with `model_error` or `no_model` does
+  with the inputs queued behind it: `keep` (the default) leaves them queued until the next input or
+  queued write, `continue` starts the next run with them, and `withdraw` settles them `unanswered`
+  with reason `run_failed`, keeping queued writes. A run whose task is aborted, faults, or is
+  orphaned keeps its inbox in every mode.
 
 ### The agent
 
@@ -373,7 +462,10 @@ unset fields follow the Harness settings and the installed extensions.
 
 Compaction replaces an old prefix of the model context with a summary entry. It runs automatically
 above the thresholds in `settings.compaction` (`reserve_tokens`, `keep_recent_tokens`,
-`background_tokens`), or on demand:
+`background_tokens`), or on demand. `settings.compaction.model_overrides` sets those thresholds per
+model, keyed by exact `"provider/modelId"`, so one harness can serve small- and large-window models:
+the threshold check, overflow recovery, and the compaction task each resolve the policy for the
+model they act for.
 
 ```python
 task_id = await conversation.compact("Keep the decisions, drop the exploration.", context)
@@ -535,7 +627,10 @@ from pi_durable.storage.sqlite import SqliteStorage
 from pi_durable.storage.sqlite.posix import open_posix_sqlite_database
 
 CounterDoc = define_doc(
-    {"kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0}}
+    {
+        "kind": "demo.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    },
 )
 
 
@@ -628,5 +723,5 @@ The adapter suites in `tests/` do exactly that.
 - [`../PARITY.md`](../PARITY.md) — every export, its Python target, and its tests.
 - [`../docs/parity-report.md`](./parity-report.md) — the translated suites and the deviations that
   remain.
-- [the vendored specification](./upstream/spec-1.3.0.md) — the normative specification.
+- [the vendored specification](./upstream/spec-1.4.0.md) — the normative specification.
 - [`../GLOSSARY.md`](../GLOSSARY.md) — the vocabulary this guide uses.

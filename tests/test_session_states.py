@@ -22,6 +22,7 @@ StateDoc = define_doc(
         "version": 1,
         "scope": "session",
         "initial": lambda: {"value": 0, "retained": {"label": "stable"}},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 FamilyDoc = define_doc_family(
@@ -30,6 +31,7 @@ FamilyDoc = define_doc_family(
         "version": 1,
         "scope": "session",
         "initial": lambda seed: {"value": len(seed)},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 
@@ -177,6 +179,7 @@ async def test_cold_loads_a_definition_free_fork_copy() -> None:
             "history": "latest",
             "fork": "current",
             "initial": lambda: {"value": 0},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()
@@ -211,6 +214,7 @@ async def test_hydrates_a_migrated_tracker_without_writing_and_skips_an_equal_ba
             "version": 1,
             "scope": "session",
             "initial": lambda: {"value": 3},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     Current = define_doc(
@@ -220,6 +224,7 @@ async def test_hydrates_a_migrated_tracker_without_writing_and_skips_an_equal_ba
             "scope": "session",
             "initial": lambda: {"value": 0, "migrated": False},
             "migrate": lambda value, _from_version: {"value": value["value"], "migrated": True},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     storage, session, _publications = open_test_session()

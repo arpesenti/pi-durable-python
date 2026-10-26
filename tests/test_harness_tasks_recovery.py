@@ -602,6 +602,7 @@ async def test_settles_an_aborted_blocked_task_as_orphaned_and_retires_its_docum
             "version": 1,
             "scope": "task",
             "initial": lambda: {"n": 0},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     opened = await open_tasks(MemoryStorage(), [])
@@ -842,7 +843,9 @@ async def test_hands_over_to_a_newer_version_whose_migration_fails_and_stays_blo
         handover_task("broken", 2, log, {"migrate": broken}),
     )
     gate.resolve()
-    await eventually(lambda: len(opened["reports"]) == 1)
+    await eventually(lambda: len(opened["infos"]) == 1)
+    assert opened["infos"][0]["type"] == "migration_failed"
+    assert opened["infos"][0]["task"]["id"] == opened["id"]
     await flush()
     record = await opened["harness"].get_task(opened["id"], context)
     assert record is not None
@@ -865,9 +868,11 @@ async def test_keeps_running_under_the_old_definition_when_the_replacement_canno
     gate_b.resolve()
     await opened["harness"].wait_for_task(opened["id"], context)
     assert log == ["old:a start", "old:a end", "old:b start", "old:b end", "old:c"]
-    assert [getattr(report, "cause", None) for report in opened["reports"]] == [
-        "missing_task",
-        "incompatible_task",
+    assert [
+        (info["type"], info["reason"], info["task"]["id"]) for info in opened["infos"]
+    ] == [
+        ("task_outdated", "missing_task", opened["id"]),
+        ("task_outdated", "incompatible_task", opened["id"]),
     ]
     await opened["harness"].close(context)
 

@@ -38,6 +38,7 @@ LiveDoc = define_doc(
         "history": "latest",
         "fork": "initial",
         "initial": live_initial,
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 RewindableLiveDoc = define_doc(
@@ -48,6 +49,7 @@ RewindableLiveDoc = define_doc(
         "history": "rewindable",
         "fork": "asOf",
         "initial": lambda: {"items": [], "nested": {"count": 0}, "other": {"label": "x"}},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 LiveDocV2 = define_doc(
@@ -58,13 +60,20 @@ LiveDocV2 = define_doc(
         "history": "latest",
         "fork": "initial",
         "initial": lambda: {"items": [], "nested": {"count": 0}, "other": {"label": "x"}},
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 CounterDoc = define_doc(
-    {"kind": "test.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0}}
+    {
+        "kind": "test.counter", "version": 1, "scope": "session", "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    }
 )
 TaskScopedDoc = define_doc(
-    {"kind": "test.task-scoped", "version": 1, "scope": "task", "initial": lambda: {"count": 0}}
+    {
+        "kind": "test.task-scoped", "version": 1, "scope": "task", "initial": lambda: {"count": 0},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+    }
 )
 
 seeds: list[str] = []
@@ -82,6 +91,7 @@ MemberDoc = define_doc_family(
         "family": True,
         "scope": "session",
         "initial": member_initial,
+        "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
 
@@ -411,6 +421,7 @@ async def test_rejects_non_json_initializer_values_and_draft_placements_before_a
             "version": 1,
             "scope": "session",
             "initial": lambda: {"at": object()},
+            "checkpoint_when": lambda _value, _ops, _info: False,
         }
     )
     with pytest.raises(TypeError, match="strict JSON"):
@@ -683,7 +694,10 @@ async def test_does_not_initialize_or_mint_for_an_absent_acquisition_after_settl
         return {"count": 0}
 
     LateDoc = define_doc(
-        {"kind": "test.late", "version": 1, "scope": "session", "initial": initial}
+        {
+            "kind": "test.late", "version": 1, "scope": "session", "initial": initial,
+            "checkpoint_when": lambda _value, _ops, _info: False,
+        }
     )
     gate = storage.hold_find_document()
     mints = storage.mint_count
