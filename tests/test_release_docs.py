@@ -162,15 +162,22 @@ def test_readme_states_the_version_policy() -> None:
     )
 
 
+#: A released baseline is a tag, a commit, or both; the vendored spec's file name is allowed.
+BASELINE_TAG = re.compile(r"\bv\d+\.\d+\.\d+\b")
+#: A commit sha: 7-40 hex characters with at least one digit, so ordinary words do not match.
+BASELINE_COMMIT = re.compile(r"\b(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b")
+
+
 @pytest.mark.parametrize(
     "path", LIVING_DOCS, ids=[str(path.relative_to(ROOT)) for path in LIVING_DOCS]
 )
 def test_living_docs_do_not_pin_the_baseline(path: Path) -> None:
     text = read(path)
-    for anchor in ("v1.3.0", "71023ae", "v1.4.0", "4a08025"):
-        assert anchor not in text, (
-            f"{path.name} pins the {anchor} baseline; the tag and commit belong in PARITY.md and "
-            "docs/upstream/README.md, not in docs that outlive the release"
+    for pattern, found in ((BASELINE_TAG, "tag"), (BASELINE_COMMIT, "commit")):
+        matches = pattern.findall(text)
+        assert matches == [], (
+            f"{path.name} pins the {found} {', '.join(matches)}; the tag and commit belong in "
+            "PARITY.md and docs/upstream/README.md, not in docs that outlive the release"
         )
 
 
