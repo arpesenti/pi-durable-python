@@ -91,9 +91,12 @@ git tag -a "v$version" -m "pi-durable-python $version (parity with @earendil-wor
 git push origin main
 git push origin "v$version"
 
-python -m twine upload dist/*           # reads ~/.pypirc
-# or: uv publish --token "$UV_PUBLISH_TOKEN" dist/*   (uv does not read ~/.pypirc)
+python -m twine upload dist/*.whl dist/*.tar.gz           # reads ~/.pypirc
+# or: uv publish --token "$UV_PUBLISH_TOKEN" dist/*.whl dist/*.tar.gz   (uv does not read ~/.pypirc)
 ```
+
+Name the distributions rather than `dist/*`: `uv build` writes a `dist/.gitignore`, which neither
+uploader accepts, and naming them keeps a stray file from reaching the index.
 
 Publish only artifacts built from the tagged commit. The version is immutable once PyPI accepts it;
 a mistake can be yanked, not deleted.
