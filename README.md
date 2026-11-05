@@ -205,7 +205,7 @@ executed by `tests/test_release_docs.py`.
 
 The [usage guide](./docs/usage.md) walks through documents, tasks, the Harness, providers, storage
 backends, and extensions with runnable examples. The normative details are in the
-[vendored specification](./docs/upstream/spec-1.4.0.md); the parity matrix is
+[vendored specification](./docs/upstream/spec-1.5.0.md); the parity matrix is
 [`PARITY.md`](./PARITY.md), and the [audit report](./docs/parity-report.md) lists the translated
 suites and the remaining explicit deviations.
 
@@ -222,7 +222,8 @@ suites and the remaining explicit deviations.
 - **Stable surface.** The modules in the table above, the names exported from them, and the
   specification sections they implement. `AgentEventStream` is experimental, as upstream says.
 - **Excluded.** Code Mode, the image implementation (the `ImageProcessor` protocol remains),
-  Cloudflare adapters, PowerShell, Windows support, and the benchmark helpers. [`PARITY.md`](./PARITY.md)
+  Cloudflare adapters, PowerShell, Windows support, the benchmark helpers, and the attached-host
+  storage subpath, which needs a Chord host this port does not have. [`PARITY.md`](./PARITY.md)
   marks every exclusion.
 
 ## Development

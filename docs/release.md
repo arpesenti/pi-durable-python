@@ -2,7 +2,9 @@
 
 The port releases in lockstep with upstream: `pi-durable-python` X.Y.Z translates
 `@earendil-works/pi-durable` X.Y.Z. Syncing a new upstream release is a version bump, not a routine
-merge — vendor the release's specification, port the delta, then publish under the new number.
+merge — vendor the release's specification
+([`docs/upstream/spec-1.5.0.md`](./upstream/spec-1.5.0.md)) and its group-commit document, port the
+delta, then publish under the new number.
 
 ## Before the release commit
 

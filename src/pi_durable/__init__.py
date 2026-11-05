@@ -176,7 +176,7 @@ from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
 from .types import DocumentReader, PhaseHandler, Session, SessionEnd, Tx
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "add_tools",

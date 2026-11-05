@@ -1,18 +1,27 @@
 # Parity Matrix
 
-**Baseline:** `@earendil-works/pi-durable` **v1.4.0**, tag `v1.4.0`, commit
-`4a080252f06caf63a525d7873c5d94d3c23887e0`.
+**Baseline:** `@earendil-works/pi-durable` **v1.5.0**, tag `v1.5.0`, commit
+`f9a26365568127461c47a07a37dcb42c140a3ac5`.
 
-**Normative reference:** [`docs/upstream/spec-1.4.0.md`](./docs/upstream/spec-1.4.0.md).
+**Normative reference:** [`docs/upstream/spec-1.5.0.md`](./docs/upstream/spec-1.5.0.md), with
+[`docs/upstream/group-commit-1.5.0.md`](./docs/upstream/group-commit-1.5.0.md) for the group-commit
+contract behind section 4.
 
-**Decision records:** [`docs/adr/0001-parity-baseline-and-boundary.md`](./docs/adr/0001-parity-baseline-and-boundary.md)
-and [`docs/adr/0002-upstream-1-4-0-scope.md`](./docs/adr/0002-upstream-1-4-0-scope.md).
+**Decision records:** [`docs/adr/0001-parity-baseline-and-boundary.md`](./docs/adr/0001-parity-baseline-and-boundary.md),
+[`docs/adr/0002-upstream-1-4-0-scope.md`](./docs/adr/0002-upstream-1-4-0-scope.md), and
+[`docs/adr/0003-upstream-1-5-0-scope.md`](./docs/adr/0003-upstream-1-5-0-scope.md).
 
 **Audit report:** [`docs/parity-report.md`](./docs/parity-report.md).
 
 This file is the parity contract. Every public export and spec section gets a row. A row may
 not be marked `tested` until the Python implementation exists, its translated test exists, and CI
 is green.
+
+Under a re-baseline, a row whose section the new text changed or added goes back to `planned`: the
+code and suite that satisfied it at the previous baseline do not yet speak this one. The ticket
+that ports the section moves the row, and is named in the row's parenthetical. A row still
+`tested` describes a section this baseline's text left alone — plus the two rows under the 9.4 and
+9.5 keys, which await the retirement and re-key #46 holds.
 
 ## Status legend
 
@@ -26,14 +35,18 @@ is green.
 
 ## Scope
 
-- **Root:** the v1.4.0 root export (`src/index.ts`).
+- **Root:** the v1.5.0 root export (`src/index.ts`).
 - **Subpaths:** `env`, `tools`, `tool-search`, `testing`, and the storage backends.
 - **Providers:** OpenAI and Anthropic adapters as optional extras.
 - **Excluded:** Code Mode, the image implementation (`ImageProcessor` protocol remains),
-  Cloudflare adapters, IndexedDB and `test-workers`, telemetry, pi-ai client identity,
-  PowerShell, Windows support, and benchmark helpers.
-- **Storage:** the v1.4.0 backends are ported faithfully, including the SQLite schema-version-2
-  rebuild. Cross-language storage interoperability is incidental, not a supported contract.
+  Cloudflare adapters, IndexedDB and `test-workers`, telemetry and its host-callback member,
+  pi-ai client identity, any pi-schema builder analogue (tool parameters stay plain JSON Schema),
+  the attached-host storage subpath, PowerShell, Windows support, and benchmark helpers. ADR 0002
+  records the 1.4.0 exclusions and ADR 0003 the 1.5.0 ones.
+- **Storage:** the v1.5.0 backends are ported faithfully. `commit()` stores a group of commit
+  batches in one call, each batch its own atomic commit with its own sequence; the SQLite schema
+  version does not move from the previous baseline. Cross-language storage interoperability is
+  incidental, not a supported contract.
 
 ## Root exports
 
@@ -61,7 +74,9 @@ is green.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `ConversationBusy` | value | `ConversationBusy` | test_errors.py | tested |
+| `ConversationIdle` | value | `ConversationIdle` | — | planned (1.5.0: an input with `when_idle="reject"` against an idle conversation writes nothing; #50) |
 | `ReadAfterWrite` | value | `ReadAfterWrite` | test_errors.py | tested |
+| `ReadOnlySession` | value | `ReadOnlySession` | — | planned (1.5.0: `HarnessOptions.read_only` opens a viewer of a session another process drives; #50) |
 | `SessionFailed` | value | `SessionFailed` | test_errors.py | tested |
 | `StorageRequestError` | value | `StorageRequestError` | test_errors.py | tested |
 
@@ -93,6 +108,7 @@ is green.
 | `defineExtension` | value | `define_extension` | test_harness_tasks.py, test_harness_lifecycle.py | tested |
 | `defineTool` | value | `define_tool` | test_harness_tasks.py | tested |
 | `hook` | value | `hook` | test_harness_tasks.py | tested |
+| `runEndTask` | value | `run_end_task` | — | planned (1.5.0: types a task an `afterRun` hook asks the generation to run; #48) |
 | `section` | value | `section` | test_harness_registry_agent.py | tested |
 | `wrapSection` | value | `wrap_section` | test_harness_registry_agent.py | tested |
 | `wrapTool` | value | `wrap_tool` | test_harness_registry_agent.py | tested |
@@ -143,9 +159,12 @@ is green.
 | `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py | tested |
 | `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py, test_harness_events.py | tested (live status and its event stream) |
 | `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py, test_harness_events.py | tested (live status and the late-joiner snapshot) |
+| `LiveRun` | type | `LiveRun` | — | planned (1.5.0 `pi.live.run`: `turns`, `first`, and `afterRun`; #36, #48) |
 | `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
 | `NestedToolSummary` | type | `NestedToolSummary` | test_harness_nested_tools.py | tested |
+| `RunFailure` | type | `RunFailure` | — | planned (1.5.0: why the newest run ended without an answer, kept until a run starts; #48) |
+| `RunFailureReason` | type | `RunFailureReason` | — | planned (1.5.0 adds `interrupted`, `restart_limit`, `nothing_to_answer`, and `turn_limit`; #48) |
 | `ToolSlot` | type | `ToolSlot` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_deltas.py | tested |
 
 ### `./harness/provider.ts` → `pi_durable.harness.provider`
@@ -160,6 +179,12 @@ is green.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `createRegistry` | value | `create_registry` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_registry_agent.py | tested |
+
+### `./harness/registry-reader.ts` → `pi_durable.harness.registry_reader`
+
+| Upstream | Kind | Python target | Tests | Status |
+| --- | --- | --- | --- | --- |
+| `registryReader` | value | `registry_reader` | — | planned (1.5.0: a `RegistryReader` over a host-composed registry value; upstream's Chord v2 registry value is here the host's own snapshot-bearing value, the same Chord boundary ADR 0003 draws for `./storage/store`. No ticket owns it yet) |
 
 ### `./harness/scheduler.ts` → `pi_durable.harness.scheduler`
 
@@ -181,6 +206,16 @@ is green.
 | `TaskGraphNode` | type | `TaskGraphNode` | test_harness_task_graph.py | tested |
 | `TaskGraphState` | type | `TaskGraphState` | test_harness_task_graph.py | tested |
 | `TaskGraphWatch` | type | `TaskGraphWatch` | test_harness_task_graph.py | tested |
+
+### `./harness/transcript.ts` → `pi_durable.harness.transcript`
+
+| Upstream | Kind | Python target | Tests | Status |
+| --- | --- | --- | --- | --- |
+| `ConversationTranscript` | value | `ConversationTranscript` | — | planned (1.5.0: keeps a client's whole transcript over a windowed conversation view, with `load_earlier`, `fill_gap`, and `resume`; #45) |
+| `ConversationTranscriptOptions` | type | `ConversationTranscriptOptions` | — | planned (1.5.0: the loader and limits a transcript pages through; #45) |
+| `EntryLoader` | type | `EntryLoader` | — | planned (1.5.0: the `Conversation.entries()`-shaped query a transcript loads through; #45) |
+| `TranscriptItem` | type | `TranscriptItem` | — | planned (1.5.0: an entry, a `gap`, or the `earlier` marker; #45) |
+| `TranscriptView` | type | `TranscriptView` | — | planned (1.5.0: a conversation view plus its `items`; #45) |
 
 ### `./harness/tool.ts` → `pi_durable.harness.tool`
 
@@ -243,6 +278,8 @@ is green.
 | `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
 | `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
 | `RegistrySnapshot` | type | `RegistrySnapshot` | test_harness_tasks.py, test_harness_registry_agent.py | tested |
+| `RunEndTask` | type | `RunEndTask` | — | planned (1.5.0: a task and typed input built by `run_end_task`; #48) |
+| `RunSummary` | type | `RunSummary` | — | planned (1.5.0: how a run ended, for `after_run`: `reason`, `first`, `answer`, `last`; #48) |
 | `SetTimer` | type | `SetTimer` | test_harness_sleep.py | tested |
 | `Settings` | type | `Settings` | test_harness_tasks.py, test_harness_registry_agent.py, test_harness_failed_run_inbox.py | tested |
 | `SettledSubmissionRecord` | type | `SettledSubmissionRecord` | test_harness_submissions.py | tested |
@@ -273,7 +310,8 @@ is green.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `ConversationView` | type | `ConversationView` | test_harness_view.py | tested |
+| `ConversationView` | type | `ConversationView` | test_harness_view.py | tested (the 1.4.0 active-transcript shape; the windowed view is #45) |
+| `ConversationWindow` | type | `ConversationWindow` | — | planned (1.5.0: `from`, `min` default 50, `max` default `2 * min`, validated per watch and per observer; #45) |
 
 ### `./session/session.ts` → `pi_durable.session.session`
 
@@ -301,7 +339,12 @@ is green.
 | `ROOT_CONVERSATION_ID` | value | `ROOT_CONVERSATION_ID` | test_ids.py | tested |
 | `CheckpointInfo` | type | `CheckpointInfo` | test_types.py | tested |
 | `CommitChange` | type | `CommitChange` | test_types.py | tested |
-| `CommitPublication` | type | `CommitPublication` | test_types.py | tested |
+| `CommitObservation` | type | `CommitObservation` | — | planned (1.5.0: the idempotent `detach()` of an attached commit observer; #44) |
+| `CommitObserver` | type | `CommitObserver` | — | planned (1.5.0: `advance(publication, context)` / `end(end)` replaces the `subscribe_commits()` listener; #44) |
+| `CommitOptions` | type | `CommitOptions` | — | planned (1.5.0: the `persistence` mark one commit takes; #47) |
+| `CommitPersistence` | type | `CommitPersistence` | — | planned (1.5.0: `{kind: "immediate"}` or `{kind: "deferred", within_ms?}`; #47) |
+| `CommitPublication` | type | `CommitPublication` | test_types.py | tested (1.5.0 keeps the shape and narrows when it is published; #42) |
+| `CommitResult` | type | `CommitResult` | — | planned (1.5.0: `{stored, refused?}` — what one `Storage.commit()` call stored; #38) |
 | `CommonDocDefinition` | type | `CommonDocDefinition` | test_session_definitions.py | tested |
 | `ContextEdit` | type | `ContextEdit` | test_types.py | tested |
 | `ConversationDocFamilyToken` | type | `ConversationDocFamilyToken` | test_session_definitions.py | tested |
@@ -339,9 +382,13 @@ is green.
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
+| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes; #35, #43) |
 | `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
+| `Observation` | type | `Observation` | — | planned (1.5.0: an attached `Observer` — its value at attachment and its `detach()`; #44) |
+| `Observer` | type | `Observer` | — | planned (1.5.0: the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph; #44) |
 | `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
 | `PhaseHandler` | type | `PhaseHandler` | test_types.py | tested |
+| `Report` | type | `Report` | — | planned (1.5.0: `on_report` takes one of these — the `ReportInfo` fields tagged by `kind`, plus the `error`; #34) |
 | `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | test_session_definitions.py | tested |
 | `RewindableConversationDocToken` | type | `RewindableConversationDocToken` | test_session_definitions.py | tested |
 | `RewindableConversationSemantics` | type | `RewindableConversationSemantics` | test_types.py | tested |
@@ -377,6 +424,7 @@ is green.
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
+| `WatchCall` | type | `WatchCall` | — | planned (1.5.0: Chord's tagged listener call — `{kind: "value", value, ops, retired}`; #35, #43) |
 | `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 | `WatchHandle` | type | `WatchHandle` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 
@@ -408,7 +456,8 @@ Execution environment protocol and helpers.
 | `TextLineReader` | type | `TextLineReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `BinaryReader` | type | `BinaryReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `WatchTarget` | type | `WatchTarget` | test_env_conformance.py, test_env_posix.py | tested |
-| `WatchChange` | type | `WatchChange` | test_env_conformance.py, test_env_posix.py | tested |
+| `WatchChange` | type | `WatchChange` | test_env_conformance.py, test_env_posix.py | tested (the 1.4.0 untagged shape; #35 retires the name) |
+| `FileChange` | type | `FileChange` | — | planned (1.5.0: what `FileSystem.watch()` changes are renamed to, tagged by `kind`: `paths`, `overflow`, `failed`; #35) |
 | `FileWatcher` | type | `FileWatcher` | test_env_conformance.py, test_env_posix.py | tested |
 | `LineScan` | type | `LineScan` | test_env_line_scan.py, test_env_conformance.py | tested |
 | `DirReader` | type | `DirReader` | test_env_posix.py, test_env_conformance.py | tested |
@@ -507,6 +556,7 @@ Conformance helpers; benchmarks are excluded.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `createExpectAssertions` | value | `create_expect_assertions` | test_testing_conformance.py | tested |
+| `commitWrites` | value | `commit_writes` | — | planned (1.5.0: the sanctioned way to seed a storage with one batch — resolves with its sequence, raises the refusal; #38, #41) |
 | `createEnvConformance` | value | `create_env_conformance` | test_env_conformance.py | tested |
 | `registerEnvConformance` | value | `register_env_conformance` | test_env_conformance.py | tested |
 | `registerStorageConformance` | value | `register_storage_conformance` | test_testing_conformance.py | tested |
@@ -583,6 +633,7 @@ SQLite backend and migrations.
 | `./storage/sqlite/node` | Node SQLite driver; Python opens the stdlib-backed `PosixSqliteDatabase` facade and passes it to `SqliteStorage.open()`. |
 | `./storage/sqlite/cloudflare` | Cloudflare-only adapter. |
 | `./storage/indexeddb` | Browser storage backend; out of scope like the Cloudflare adapters. |
+| `./storage/store` | The attached-host storage subpath added at 1.5.0: `StoreStorage` keeps a Session's records as declared tables of a Chord v2 store and publishes each commit inside the batch of the host the store serves. This port has no Chord host to attach to — Chord is an internal implementation detail here (ADR 0003). The optional `publishing()` scope it exists to serve is still ported, on the `Storage` protocol (ADR 0003). |
 | `./harness/telemetry` | Host observability tied to `@earendil-works/pi-telemetry`, with no normative spec section; see ADR 0002. |
 | `test-workers/*` | Browser and Cloudflare Workers suites; out of scope with the adapters they exercise. |
 
@@ -590,56 +641,57 @@ SQLite backend and migrations.
 
 | Section | Status |
 | --- | --- |
-| 1 Terms and invariants | tested (atomic commits, durable publication, revoked drafts, and failure rules across test_session_*, test_harness_storage_failure.py, and test_harness_context_ranges.py) |
-| 2 Core records | tested |
-| 2.1 Entries and context | tested |
-| 2.2 Public Harness surface | tested (runs, recovery, conversations, inspection, usage, provider, compaction, root lazy creation, the view/watch/task-graph surfaces, and the spec usage examples in test_spec_usage.py; OpenAI and Anthropic provider streaming in test_providers_openai.py and test_providers_anthropic.py) |
+| 1 Terms and invariants | planned (1.5.0: a stored commit publishes once Storage made it durable, in line order, even when the call later rejects; the line runs one commit callback at a time while their storage overlaps; a deferred commit reaches watches before Storage; #42, #47) |
+| 2 Core records | planned (1.5.0 retags the unions this section carries and adds the `continue` submission record, `RunFailure`, and `RunSummary`; #33, #48, #50) |
+| 2.1 Entries and context | planned (the conversation view is a window over the visible entries with head markers in place; `Conversation.context()` derives the model transcript; #45) |
+| 2.2 Public Harness surface | planned (one `Report` on `on_report`, the `observe_*` seams replacing the state getters and the commit subscription, `ConversationTranscript`, `read_only`, `max_turns`, `when_idle`, and `submit(tx, draft)`; #34, #44, #45, #46, #50) |
 | 3 Documents | tested (definitions, records, access, ownership, bases, versions, and forks across test_session_*; the audit report lists the section-to-suite mapping) |
 | 3.1 Definitions | tested (`checkpoint_when` is required on every definition; test_session_definitions.py) |
 | 3.2 Records and lifetimes | tested |
-| 3.3 Access and creation | tested (the Harness creation conveniences and `conversationCreated` hook in test_harness_conversations.py; explicit creation, historical access, and document creation in test_session_documents.py, test_session_states.py, test_session_tables.py, and test_session_checkpoints_migrations.py) |
-| 3.4 Mutation ownership | tested |
-| 3.5 Bases and checkpoints | tested (no default predicate: a definition that keeps only required bases returns `False`, in test_session_checkpoints_migrations.py) |
-| 3.6 Versions and migrations | tested |
-| 3.7 Forks | tested |
-| 4 Transactions and storage ownership | tested |
+| 3.3 Access and creation | planned (the Chord state getters are gone and observer attachment and windowed conversation watches replace them; #44, #45) |
+| 3.4 Mutation ownership | planned (the admission, pending-batch, receipt and publication states of group commit, and what a held deferred commit does and does not show; #42, #47) |
+| 3.5 Bases and checkpoints | planned (a held deferred commit runs its predicate once against the stored count and stores its base with the held operations; #47) |
+| 3.6 Versions and migrations | planned (`documentState()` leaves the access-driven migration list; `pi.live` reaches version 3 with #36) |
+| 3.7 Forks | planned (fork metadata hydrates watches and mounted views only; the document-state path is gone; #44) |
+| 4 Transactions and storage ownership | planned (group commit: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound, and outcomes in line order — see the vendored group-commit document; #42) |
+| 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
 | 5 Tasks | tested |
-| 5.1 Definition | tested |
+| 5.1 Definition | planned (`TaskRuntime.entries()`, the `options` a commit takes, and the `kind`-tagged `ReportFrom`; #33, #47, #50) |
 | 5.2 Effect sandwich | tested |
 | 5.3 Terminal tasks | tested |
-| 5.4 Scheduler, abort, and ownership | tested (the crash-loop guard, parking, `retry_task()`, and the graph's derived blocked reason in test_harness_blocked.py; close writes stopped tasks back as `pending`) |
-| 5.5 Structured concurrency | tested |
-| 5.6 Sleeping, timers, and wakeups | tested (durable sleeps, `wake()`, `on_wake`, `set_timer`, invocation timers, and timer disarm in test_harness_sleep.py) |
-| 6 Submissions and inbox | tested (`after_failed_run` keep/continue/withdraw in test_harness_failed_run_inbox.py) |
+| 5.4 Scheduler, abort, and ownership | planned (a task cut off `restart_limit` times in a row ends instead of parking, with the per-task-kind outcome and `task_interrupted`, and the scheduler decides in recorded regions; #48, #49) |
+| 5.5 Structured concurrency | planned (the tasks an `afterRun` hook asks for are generation children, so Stop and idle waits include them; #48) |
+| 5.6 Sleeping, timers, and wakeups | planned (`on_wake` runs in a microtask the line never waits for, and the foreground timer now also arms a deferred commit's deadline; #47) |
+| 6 Submissions and inbox | planned (continue submissions, `when_idle="reject"` with `ConversationIdle`, `submit(tx, draft)` inside a commit, and the answer-resolves-while-busy rule; #48, #50) |
 | 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
-| 7.1 Extensions, registry, and agent resolution | tested (built-in tasks) |
-| 7.2 Hooks | tested (`beforeRequest`, `afterResponse`, `onYield`, `beforeTool`, `afterTool`, and `afterTools`) |
-| 7.3 Tools | tested (model-issued and nested calls, hooks, output bounds, replay, structured output, and the coding tools) |
+| 7.1 Extensions, registry, and agent resolution | planned (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup; #36) |
+| 7.2 Hooks | planned (`afterTool` on every result the tool task writes, `beforeProviderRequest`, `afterRun` with `RunSummary` and `RunEndTask`, and `HookApi.entry()`/`entries()`; #36, #48) |
+| 7.3 Tools | planned (parameters as plain JSON Schema closed by default with pi-schema's validator wording, `unoffered` slots, deferred tool progress, and `ConversationHandle.submit(tx, ...)`; #36, #47, #50, #51) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
-| 8 Built-in tasks | tested (generation, compaction, and tool) |
-| 8.1 Built-in entries | tested (`pi.user`, `pi.assistant`, `pi.system`, `pi.tool-result`, `pi.reset`, and `pi.compaction`) |
-| 8.2 Live document | tested (run, generation, tool and nested slots, the complete-base rule, compaction status, and compaction failure) |
-| 8.3 Generation | tested (prepare, request, retry, poll, defer, abort, streaming partials, classification, tool rounds, threshold and overflow compaction, and reopen recovery in test_harness_generation_recovery.py and test_harness_compaction.py) |
-| 8.4 Tool | tested (model-issued and nested calls) |
-| 8.5 Tool rounds | tested |
+| 8 Built-in tasks | planned (generation and tool progress commit deferred, so a crash loses the throttle window plus what was not stored yet; #47) |
+| 8.1 Built-in entries | planned (the `pi.tool-result` producer list follows the aborted-round and `unoffered` results; #36) |
+| 8.2 Live document | planned (`pi.live` version 3: `run.turns`, `run.first`, `run.afterRun`, `runFailure`, `trigger` on compaction status, and `unoffered` slots; #36, #48) |
+| 8.3 Generation | planned (the `finish` and `drain` phases, the interrupted-attempt charge under the retry policy, `nothing_to_answer`, `unoffered` calls, and deferred partials; #36, #47, #48) |
+| 8.4 Tool | planned (`pi.tool` version 3, an `unoffered` call resolving `tool_unavailable`, and the `afterTool` chain over every result the task writes with its bounds; #36, #49) |
+| 8.5 Tool rounds | planned (a handoff continues the run, a `terminate` round hands to `finish`, and `max_turns` ends the round `turn_limit`; #48) |
 | 8.6 Usage | tested |
-| 8.7 Compaction | tested (range selection, serialization, manual/background/blocking starts, retry backoff, placement, abort, failure, recovery, and event ordering in test_harness_compaction.py) |
+| 8.7 Compaction | planned (`trigger` names what started it, the restart-cutoff failure, and the interrupted request's charge; #36, #48, #49) |
 | 9 Document observation and Chord | tested |
-| 9.1 Document state | tested |
-| 9.2 `watchDoc` | tested |
-| 9.3 Conversation view | tested |
-| 9.4 Agent events (experimental) | tested |
-| 9.5 Task graph view | tested |
-| 10 Storage contract | tested |
-| 10.1 Failures | tested (the failure latch, SessionFailed, listener containment, unformattable values, clock fallback, and watch termination in test_harness_storage_failure.py; the typed `ReportInfo` of every report in test_harness_reports.py) |
+| 9.1 Watches | planned (Chord's `WatchHandle`, `WatchCall`, and `WatchEnd`: `value`/`start`/`stop`/`closed`, the `kind`-tagged end including `aborted`, and the observer's `advance`/`end`; #35, #43, #44. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
+| 9.2 `watchDoc` | planned (one change object per listener, coalesced deliveries with folded operations, the 10,000-operation root replacement, and a watch that follows its address through a retirement; #43) |
+| 9.3 Conversation view | planned (a per-watch, per-observer entry window with `before`, `ConversationWindow` bounds, and `ConversationTranscript`; everything a renderer draws is state here; #45, #46) |
+| 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
+| 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |
+| 10 Storage contract | planned (`commit(batches, receive, context)` with per-batch checks and receipts, the optional `publishing()` scope, and the narrowed `mint_id()` monotonicity; #38, #39, #40, #41) |
+| 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged watch and observer ends; #35, #42, #44) |
 | 11 Backends | tested |
-| 11.1 Memory | tested |
-| 11.2 SQLite | tested (schema version 2 rebuilds the task table to admit `sleeping`; the 1.3.0-to-1.4.0 upgrade and the newer-version refusal in test_sqlite_migrations.py) |
-| 11.3 JSONL | tested |
-| 12 API footguns | tested (every bullet mapped to a translated test in docs/parity-report.md) |
-| 13 Non-goals | n/a |
+| 11.1 Memory | tested (the batched call for the memory backend is #39) |
+| 11.2 SQLite | planned (one SQL transaction per call, every batch checked before it writes; #40) |
+| 11.3 JSONL | planned (every batch's sidecars appended, then all its markers in one `main.jsonl` write; #40) |
+| 12 API footguns | planned (admission inside a commit, hooks in abort handlers, busy-after-the-answer, after-run task traps, buffered watches, and the folded-operations bound; #42, #47, #48, #50) |
+| 13 Non-goals | n/a (1.5.0 narrows the visible-undurable bullet to admit deferred commits; reviewed with #42 and #47) |
 
 The upstream document-retention suite has two Harness-level cases: one follows a Harness settings
 change at its next use, and one compares agent event streams with documents evicted. Both are
@@ -782,6 +834,9 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | PowerShell tool | exported | excluded |
 | Host timers | `HarnessOptions.setTimer` defaults to `setTimeout`, background timers unreferenced, and declines background timers in Cloudflare Workers | `Timers` in `pi_durable.timers` arms the same foreground/background split through a Python `set_timer(callback, delay_ms, *, background=False)`; the default is an asyncio timer, which cannot keep a process alive, and `None` declines one. `Sleeping` tasks store deadlines on the Harness clock in both |
 | Telemetry | `HarnessOptions.telemetry` and `DURABLE_TELEMETRY_SCHEMA` | excluded; see ADR 0002 |
+| Telemetry host callback | `HostCallback` carries `"telemetry"` for an adapter that threw while a commit was published | excluded with telemetry: the port's exhaustive host-callback set has no `telemetry` member (ADR 0003) |
+| pi-schema builders | `obj()`, `num()`, and `Static<T>` type a tool's `parameters` and `structuredOutputSchema` | excluded; parameters stay plain JSON Schema dicts validated by the `schema` extra, so there is no builder DSL to port and no static type to produce (ADR 0003) |
+| Attached-host storage | `StoreStorage` on Chord v2's store (`./storage/store`) | excluded; no Chord host to attach to (ADR 0003). The optional `publishing()` scope is ported on the `Storage` protocol |
 | pi-ai client identity | `HarnessOptions.identity` and `DEFAULT_HARNESS_IDENTITY` on every model request | excluded; the provider adapters keep their own attribution headers (ADR 0002) |
 | IndexedDB and `test-workers` | `IndexedDbStorage` and the Workers suites | excluded with the browser and Cloudflare backends (ADR 0002) |
 | Windows support | supported | unsupported |
@@ -818,11 +873,11 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
 | Hook map extraction | `HooksOf<K>` conditionally extracts a task's hook map | `HooksOf` is an `Any` alias; Python cannot conditionally extract it from a generic task token, and `hook()` accepts the mapping directly |
 | ID allocation | `mintId<I>()` returns a branded generic | `mint_id()` returns `int`; `id_from_number` applies the brand |
-| Version | `1.4.0` | `1.4.0` lockstep |
+| Version | `1.5.0` | `1.5.0` lockstep |
 
 ## Port additions
 
-These are required by the chosen scope but are not upstream 1.3.0 exports.
+These are required by the chosen scope but are not upstream 1.5.0 exports.
 
 | Addition | Module | Status |
 | --- | --- | --- |
@@ -878,7 +933,11 @@ work unchanged.
 The v1.4.0 parity audit is recorded in [`docs/parity-report.md`](./docs/parity-report.md): all 61
 in-scope upstream suites are translated, the excluded suites are listed above (telemetry,
 `indexeddb-storage`, `test-workers/*`, and `codemode-checkpoints` among them), two live credential
-cases skip by design, and every remaining deviation is explicit.
+cases skip by design, and every remaining deviation is explicit. It is that baseline's record: the
+v1.5.0 audit is written beside it, not over it, when this sync's suites are green, and it names the
+suites this baseline adds (`group-commit`, `deferred-commit`, `deferred-progress`, `observers`,
+`transcript`, `run-failure`, `turn-limit`, `after-run`, `continue`, `submit-in-commit`,
+`idle-scope`, and `restart-failure` among them) and every upstream case left untranslated.
 
 ## Milestones
 
@@ -894,6 +953,11 @@ cases skip by design, and every remaining deviation is explicit.
   host inputs as functions, `afterFailedRun`, per-model compaction settings, required
   `checkpointWhen`, and the SQLite schema-version-2 migration.
 - [x] 10. v1.4.0 release (separate ticket, as `Release 1.3.0` was).
+- [ ] 11. v1.5.0 sync: group commit and deferred commits, observers and coalesced watches, the
+  windowed conversation view and `ConversationTranscript`, run failures and the restart cutoff,
+  continue submissions, run-end tasks and turn limits, JSON Schema tools, `pi.live` version 3, and
+  the deleted single-write commit form, state getters, commit subscription, and agent event stream.
+- [ ] 12. v1.5.0 release (separate ticket, as `Release 1.3.0` and the 1.4.0 release were).
 
 ## Updating this file
 

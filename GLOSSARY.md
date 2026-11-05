@@ -2,7 +2,9 @@
 
 A Python port of `@earendil-works/pi-durable`: durable conversations, tasks, and documents on
 `asyncio`, held to the upstream semantics and persisted record shapes. The package version follows
-the upstream release it translates; `PARITY.md` pins the current baseline.
+the upstream release it translates; `PARITY.md` pins the current baseline, and the
+[vendored specification](./docs/upstream/spec-1.5.0.md) is the normative reference every term here
+describes.
 
 ## Python support
 
