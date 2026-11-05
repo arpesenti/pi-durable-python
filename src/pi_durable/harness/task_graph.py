@@ -139,12 +139,12 @@ class TaskGraphView:
         return await self._attach(_state_observer, context)
 
     async def watch(self, context: Context) -> CommittedWatch:
-        """A serialized exact-frame watch of the graph; cancelling ``context`` stops it."""
+        """A serialized exact-frame watch of the graph; aborting ``context`` ends it ``aborted``."""
 
         observer = await self._attach(_watch_observer, context)
         signal = context.abort_signal
         if signal is not None and signal.aborted:
-            observer.cancel()
+            observer.abort_acquisition()
             raise cancellation_error(signal)
         if signal is not None:
             observer.observe_cancellation(signal)

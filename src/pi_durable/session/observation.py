@@ -2,8 +2,11 @@
 
 A watch is bound to one committed revision or view mount. It queues every committed change while
 its listener runs, so callbacks never overlap, and collapses more than
-``MAX_PENDING_WATCH_FRAMES`` pending frames into one root replacement. Retirement and close end
-the watch with the v1.3.0 reason. A state publishes every later revision in order through its
+``MAX_PENDING_WATCH_FRAMES`` pending frames into one root replacement. A watch ends five ways, and
+only those: ``stopped`` by its own ``stop()``, ``aborted`` by the acquisition context's abort signal,
+``ended`` or ``failed`` by its Session, and ``listener_error`` by the error its listener raised. A
+retirement is a change, not an end, so a watch whose document retired keeps its last value until it
+is stopped or the Session ends. A state publishes every later revision in order through its
 listeners and keeps its last value at close.
 """
 
@@ -264,7 +267,12 @@ class CommittedWatch:
             self._schedule()
 
     def stop(self) -> asyncio.Future[WatchEnd]:
-        """Idempotently stop future callbacks and return this watch's terminal result."""
+        """Idempotently stop future callbacks and return this watch's terminal result.
+
+        This is the host's cancel entry point, and the one the shipped build carries
+        (``chord/src/watch.ts:46-55``): it settles ``{"kind": "stopped"}``. The ``aborted`` end is
+        separate — only :meth:`abort_acquisition`, the acquisition context's abort signal, emits it.
+        """
 
         self._terminate({"kind": "stopped"})
         return self._terminal
@@ -275,20 +283,26 @@ class CommittedWatch:
         if self._end is not None:
             return
         self._cancellation_signal = signal
-        self._cancellation_remove = signal.add_listener(self.cancel)
+        self._cancellation_remove = signal.add_listener(self.abort_acquisition)
         if signal.aborted:
-            self.cancel()
+            self.abort_acquisition()
 
-    def cancel(self) -> None:
-        self._terminate({"kind": "cancelled"})
+    def abort_acquisition(self) -> None:
+        """End ``aborted``: the context the watch was acquired with was aborted.
+
+        Distinct from :meth:`stop` by upstream's own typing (``chord/src/watch.ts:16-19``): the
+        changelog calls this end ``cancelled``, the shipped build calls it ``aborted``.
+        """
+
+        self._terminate({"kind": "aborted"})
 
     def close_session(self, failure: BaseException | None = None) -> None:
-        """End with ``session_closed``, or with ``session_failed`` and the error on failure."""
+        """End with ``ended``, or with ``failed`` and the error that failed the Session."""
 
         if failure is None:
-            self._terminate({"kind": "session_closed"})
+            self._terminate({"kind": "ended"})
         else:
-            self._terminate({"kind": "session_failed", "error": failure})
+            self._terminate({"kind": "failed", "error": failure})
 
     def advance(self, change: DocumentCommitChangeInput, context: Context) -> None:
         """Queue the committed document change, skipping one this observer already holds."""
@@ -305,7 +319,11 @@ class CommittedWatch:
         self.advance_frame(None if settled["kind"] == "retire" else settled["value"], ops, context)
 
     def advance_frame(self, value: Any, ops: list[Op], context: Context) -> None:
-        """Queue one exact committed frame for a view, graph, or event stream."""
+        """Queue one exact committed frame for a view, graph, or event stream.
+
+        A retirement is a frame like any other, not an end: it is the last one this watch is given
+        for a retired address, and the watch stays open until :meth:`stop` or the Session's own end.
+        """
 
         if self._end is not None or self._retired:
             return
@@ -352,7 +370,8 @@ class CommittedWatch:
                         self._terminate({"kind": "listener_error", "error": error})
                     break
                 if value is None:
-                    self._terminate({"kind": "retired"})
+                    # The retirement was the last frame: nothing further is queued for a retired
+                    # address, and the watch itself stays open (#35).
                     break
         finally:
             self._running = False

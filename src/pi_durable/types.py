@@ -127,18 +127,22 @@ JsonValueT_co = TypeVar("JsonValueT_co", covariant=True)
 # Upstream 1.5.0 moves six tagged unions onto the tag key ``kind``. This is the expand half of
 # expand–migrate–contract: every reader of these unions takes either spelling, every writer emits
 # only ``kind``, and #37 deletes the retired spelling again. Each pair lives beside its union, and
-# ``to_*`` is the reader that takes either spelling and returns the one the port emits.
+# ``to_*`` is the reader that takes either spelling and returns the one the port emits. #35 migrates
+# the two pairs that move more than the key: it words ``WatchEnd`` with the ends the shipped build
+# carries, and renames the environment's file-change union to the name upstream gives it.
 #
 #   union                 retired spelling                              current spelling
-#   ``WatchEnd``          ``reason``                                    ``kind`` — spec-1.5.0.md:5397
+#   ``WatchEnd``          ``reason``, worded ``cancelled``/             ``kind`` — spec-1.5.0.md:5397
+#                       ``session_closed``/``session_failed``/``retired``
 #   ``SessionEnd``        ``reason``                                    ``kind`` — spec-1.5.0.md:1378
 #   ``ReportInfo``        ``type``                                      ``kind`` — spec-1.5.0.md:680
 #   ``ReportFrom``        ``type``                                      ``kind`` — upstream src/types.ts:207
 #   ``DocumentCommitChange``  no tag: a retirement was ``value: null``  ``kind: "change" | "retire"``
 #                                                                         beside the ``type`` that stays
 #                                                                         — spec-1.5.0.md:1391
-#   ``WatchChange``       no tag: which keys are present                ``kind: "paths" | "overflow"
-#   (``env``)                                                                  | "failed"`` — upstream
+#   ``FileChange``        no tag, under the name ``WatchChange``:       ``kind: "paths" | "overflow"
+#   (``env``)            which keys are present                              | "failed"``, and the name
+#                                                                            ``FileChange`` — upstream
 #                                                                            src/env/index.ts:127
 #
 # 1.5.0 leaves the tag key of these alone, read at the lines named, so nothing here accepts a
@@ -936,7 +940,13 @@ class CommitPublication(TypedDict):
 
 
 class WatchEnded(TypedDict):
-    kind: Literal["stopped", "cancelled", "session_closed", "retired"]
+    """A watch that ended without an error.
+
+    ``stopped`` is ``stop()``'s own terminal result, ``aborted`` is the acquisition context's abort
+    signal, and ``ended`` is the Session ending beneath the watch (:class:`SessionEnd`).
+    """
+
+    kind: Literal["stopped", "aborted", "ended"]
 
 
 class WatchListenerErrorEnd(TypedDict):
@@ -944,17 +954,26 @@ class WatchListenerErrorEnd(TypedDict):
     error: BaseException
 
 
-class WatchSessionFailedEnd(TypedDict):
-    kind: Literal["session_failed"]
+class WatchFailedEnd(TypedDict):
+    kind: Literal["failed"]
     error: object
 
 
-WatchEnd: TypeAlias = WatchEnded | WatchListenerErrorEnd | WatchSessionFailedEnd
-"""Terminal result of one document watch, tagged by ``kind`` (spec §9.1)."""
+WatchEnd: TypeAlias = WatchEnded | WatchListenerErrorEnd | WatchFailedEnd
+"""Terminal result of one document watch, tagged by ``kind`` (spec-1.5.0.md:5397-5401).
+
+The words are the ones the shipped build carries, not the ones the 1.5.0 changelog claims:
+``chord/src/watch.ts:16-19`` declares ``stopped``, ``aborted``, ``ended``, ``listener_error`` and
+``failed``, and ``chord/src/watch.ts:46-55`` makes ``stop()`` the idempotent entry point that yields
+``stopped`` while ``aborted`` comes from the acquisition context's abort signal. There is no
+``cancelled`` end, and the 1.4.0 ``session_closed``, ``session_failed`` and ``retired`` ends are
+gone: a watch whose document retires stays open until it is stopped or the Session ends.
+"""
 
 
 class WatchEndLegacy(TypedDict, total=False):
-    """The pre-1.5.0 spelling of a watch end, tagged by ``reason``; #37 deletes it.
+    """The pre-1.5.0 spelling of a watch end, tagged by ``reason`` and worded with the ends 1.5.0
+    renamed or removed; #37 deletes it.
 
     ``error`` is the payload of ``listener_error`` and ``session_failed`` only; an end with another
     tag settles without it, as :func:`to_watch_end` shows.
@@ -969,15 +988,32 @@ class WatchEndLegacy(TypedDict, total=False):
 WatchEndInput: TypeAlias = WatchEnd | WatchEndLegacy
 """Either spelling of a watch end: a caller may hand the port the retired ``reason`` one."""
 
+#: What each 1.4.0 end word reads as now: the changelog's ``cancelled`` is the shipped build's
+#: ``aborted``, and the Session's own end is the ``ended``/``failed`` pair (:class:`SessionEnd`).
+#: The 1.4.0 ``retired`` end is absent on purpose: there is no end to read it as.
+_WATCH_END_WORDS: dict[str, str] = {
+    "stopped": "stopped",
+    "cancelled": "aborted",
+    "session_closed": "ended",
+    "listener_error": "listener_error",
+    "session_failed": "failed",
+}
+
 
 def to_watch_end(end: WatchEndInput) -> WatchEnd:
-    """The ``kind`` spelling of a watch end, whichever spelling it arrived in (#33, #37)."""
+    """The ``kind`` spelling of a watch end, whichever spelling it arrived in (#33, #35, #37).
+
+    The retired words arrive with the retired tag key, so both move together; the 1.4.0 ``retired``
+    end has no successor to read it as, because a retirement is a change now and not an end.
+    """
 
     if "reason" not in end:
         return end
     retired = cast(WatchEndLegacy, end)
-    tag = retired["reason"]
-    if tag in ("listener_error", "session_failed"):
+    tag = _WATCH_END_WORDS.get(retired["reason"])
+    if tag is None:
+        raise ValueError("A retired document has no watch end to read: a retirement is a change")
+    if tag in ("listener_error", "failed"):
         return cast(WatchEnd, {"kind": tag, "error": retired.get("error")})
     return cast(WatchEnd, {"kind": tag})
 
@@ -1000,7 +1036,12 @@ class WatchHandle(Protocol, Generic[JsonValueT_co]):
         ...
 
     def stop(self) -> asyncio.Future[WatchEnd]:
-        """Idempotently stop future callbacks and return this watch's terminal result."""
+        """Idempotently stop future callbacks and return this watch's terminal result.
+
+        The sole cancel entry point the shipped build has (``chord/src/watch.ts:46-55``): it yields
+        ``{"kind": "stopped"}``, never the ``aborted`` end the acquisition context's abort emits.
+        """
+
         ...
 
 
@@ -1354,7 +1395,9 @@ class SessionEndFailed(TypedDict):
 
 
 SessionEnd: TypeAlias = SessionEndClosed | SessionEndFailed
-"""Terminal result of one Session, tagged by ``kind`` (spec §4)."""
+"""Terminal result of one Session, tagged by ``kind`` (spec-1.5.0.md:1378, upstream
+``src/types.ts:1172``). A watch of a document, view, or graph mirrors it: ``ended`` for a Session
+that closed and ``failed`` for one that failed (spec-1.5.0.md:5397)."""
 
 
 class SessionEndLegacy(TypedDict, total=False):

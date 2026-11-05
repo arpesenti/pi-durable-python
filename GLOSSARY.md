@@ -63,6 +63,18 @@ The `pi.compaction` entry a compaction places: the wrapped summary text as a use
 `head` naming the cut and `data.reason` naming what started the compaction.
 _Avoid_: checkpoint, digest
 
+**Watch**:
+One serialized observation of a committed value, held by a `WatchHandle`: `value`, `start`, `stop`,
+and `closed`. A watch is stopped, never closed, and a retirement is a change it is given rather than
+an end, so a watch whose document retired lives until it is stopped or its Session ends.
+_Avoid_: subscription, event stream, listener
+
+**Watch end**:
+Why a watch stopped, tagged by `kind`: `stopped` from `stop()`, `aborted` from the acquisition
+context's abort signal, `ended` or `failed` from its Session, and `listener_error` from the error its
+own listener raised. There is no `cancelled` end, and there is no retirement end.
+_Avoid_: close reason, cancellation, terminal state
+
 **Conversation view**:
 A fixed structural mount of one conversation's active entries and built-in documents.
 It advances only from committed publications and keeps at most one mount per conversation.

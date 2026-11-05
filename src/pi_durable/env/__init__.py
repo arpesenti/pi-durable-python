@@ -178,72 +178,82 @@ class WatchTarget(dict[str, Any]):
     """A file or directory to watch."""
 
 
-# 1.5.0 tags what ``FileSystem.watch()`` reports by ``kind`` (upstream ``src/env/index.ts:127``);
-# before it, the three shapes were told apart by which keys they carried. The port emits only the
-# ``kind`` spelling and reads either, until #37 deletes the retired one. The ledger of what this
-# release retags, and of the unions it leaves alone, is at the top of ``types.py``.
+# 1.5.0 tags what ``FileSystem.watch()`` reports by ``kind`` and renames the union to ``FileChange``
+# (upstream ``src/env/index.ts:127``); before it, the three shapes carried no tag and were told
+# apart by which keys they had, under the name ``WatchChange``. The port emits only the ``kind``
+# spelling and reads either, until #37 deletes the retired one, and it leaves ``WatchChange`` free
+# for what a watch listener is handed. The ledger of what this release retags, and of the unions it
+# leaves alone, is at the top of ``types.py``.
 
 
-class WatchPaths(dict[str, Any]):
+class FileChangePaths(dict[str, Any]):
     kind: Literal["paths"]
     paths: list[str]
 
 
-class WatchOverflow(dict[str, Any]):
+class FileChangeOverflow(dict[str, Any]):
     kind: Literal["overflow"]
 
 
-class WatchError(dict[str, Any]):
+class FileChangeFailed(dict[str, Any]):
     kind: Literal["failed"]
     error: FileError
 
 
-WatchChange: TypeAlias = WatchPaths | WatchOverflow | WatchError
+FileChange: TypeAlias = FileChangePaths | FileChangeOverflow | FileChangeFailed
+"""What changed below a watched path, tagged by ``kind`` (upstream ``src/env/index.ts:127``)."""
 
 
-class WatchPathsLegacy(dict[str, Any]):
+class FileChangePathsLegacy(dict[str, Any]):
     """The pre-1.5.0 ``paths`` change: no tag, only the paths themselves; #37 deletes it."""
 
     paths: list[str]
 
 
-class WatchOverflowLegacy(dict[str, Any]):
+class FileChangeOverflowLegacy(dict[str, Any]):
     """The pre-1.5.0 ``overflow`` change: ``overflow: true`` was the whole change; #37 deletes it."""
 
     overflow: Literal[True]
 
 
-class WatchErrorLegacy(dict[str, Any]):
+class FileChangeFailedLegacy(dict[str, Any]):
     """The pre-1.5.0 ``failed`` change: the error alone was the change; #37 deletes it."""
 
     error: FileError
 
 
-WatchChangeLegacy: TypeAlias = WatchPathsLegacy | WatchOverflowLegacy | WatchErrorLegacy
+FileChangeLegacy: TypeAlias = FileChangePathsLegacy | FileChangeOverflowLegacy | FileChangeFailedLegacy
 
-WatchChangeInput: TypeAlias = WatchChange | WatchChangeLegacy
+FileChangeInput: TypeAlias = FileChange | FileChangeLegacy
 """Either spelling of a file change a caller may hand the port."""
 
 
-def to_file_change(change: WatchChangeInput) -> WatchChange:
-    """The ``kind`` spelling of a file change, whichever spelling it arrived in (#33, #37).
+def to_file_change(change: FileChangeInput) -> FileChange:
+    """The ``kind`` spelling of a file change, whichever spelling it arrived in (#33, #35, #37).
 
     The retired shapes are told apart exactly as 1.4.0 told them apart: by the keys they carry.
     """
 
     if "kind" in change:
-        return cast(WatchChange, change)
+        return cast(FileChange, change)
     if "overflow" in change:
-        return WatchOverflow(kind="overflow")
+        return FileChangeOverflow(kind="overflow")
     if "error" in change:
-        return WatchError(kind="failed", error=change["error"])
-    return WatchPaths(kind="paths", paths=list(change["paths"]))
+        return FileChangeFailed(kind="failed", error=change["error"])
+    return FileChangePaths(kind="paths", paths=list(change["paths"]))
 
 
 class FileWatcher(Protocol):
     mode: Literal["native", "polling"]
 
-    async def close(self, context: Context) -> None: ...
+    async def stop(self, context: Context) -> None:
+        """Stop watching; no change call starts after this resolves. Idempotent.
+
+        1.5.0 stops a watcher rather than closing it (upstream ``src/env/index.ts:140``), so the
+        word ``close`` stays what readers and directory readers do to a handle.
+        """
+
+        ...
 
 
 class DirPage(dict[str, Any]):
@@ -381,7 +391,7 @@ class FileSystem(Protocol):
     async def watch(
         self,
         targets: Sequence[WatchTarget],
-        on_change: Callable[[WatchChange], None],
+        on_change: Callable[[FileChange], None],
         context: Context,
     ) -> Result[FileWatcher, FileError]: ...
 
@@ -418,6 +428,10 @@ __all__ = [
     "ExecutionEnv",
     "ExecutionError",
     "ExecutionErrorCode",
+    "FileChange",
+    "FileChangeFailed",
+    "FileChangeOverflow",
+    "FileChangePaths",
     "FileError",
     "FileErrorCode",
     "FileInfo",
@@ -441,10 +455,6 @@ __all__ = [
     "StreamDecoder",
     "TextLine",
     "TextLineReader",
-    "WatchChange",
-    "WatchError",
-    "WatchOverflow",
-    "WatchPaths",
     "WatchTarget",
     "err",
     "get_or_throw",

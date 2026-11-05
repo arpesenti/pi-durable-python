@@ -382,7 +382,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
-| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes; #35, #43) |
+| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes; #43) |
 | `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Observation` | type | `Observation` | — | planned (1.5.0: an attached `Observer` — its value at attachment and its `detach()`; #44) |
 | `Observer` | type | `Observer` | — | planned (1.5.0: the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph; #44) |
@@ -398,7 +398,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `Session` | type | `Session` | test_session_tables.py | tested |
 | `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | test_session_definitions.py | tested |
 | `SessionDocToken` | type | `SessionDocToken` | test_session_definitions.py | tested |
-| `SessionEnd` | type | `SessionEnd` | test_types.py, test_harness_storage_failure.py, test_discriminant_spellings.py | tested |
+| `SessionEnd` | type | `SessionEnd` | test_types.py, test_harness_storage_failure.py, test_discriminant_spellings.py | tested (tagged by `kind`: `closed`, or `failed` with the error that failed the Session; a watch mirrors it as `ended`/`failed` — #33, #35) |
 | `Storage` | type | `Storage` | test_storage_protocol.py | tested |
 | `StorageWrite` | type | `StorageWrite` | test_types.py, test_storage_protocol.py | tested |
 | `StoredDocument` | type | `StoredDocument` | test_types.py, test_storage_protocol.py | tested |
@@ -424,9 +424,9 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
-| `WatchCall` | type | `WatchCall` | — | planned (1.5.0: Chord's tagged listener call — `{kind: "value", value, ops, retired}`; #35, #43) |
-| `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py, test_discriminant_spellings.py | tested |
-| `WatchHandle` | type | `WatchHandle` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
+| `WatchCall` | type | `WatchCall` | — | planned (1.5.0: Chord's tagged listener call — `{kind: "value", value, ops, retired}`; #43) |
+| `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py, test_discriminant_spellings.py | tested (the shipped build's five ends, tagged by `kind`: `stopped` from `stop()`, `aborted` from the acquisition context, `ended`/`failed` from the Session, `listener_error`; #35) |
+| `WatchHandle` | type | `WatchHandle` | test_session_watches.py, test_session_checkpoints_migrations.py | tested (`value`/`start`/`stop`/`closed`; `stop()` is idempotent and yields `{kind: "stopped"}`, `chord/src/watch.ts:46-55`; #35) |
 
 ## Optional subpaths
 
@@ -456,9 +456,8 @@ Execution environment protocol and helpers.
 | `TextLineReader` | type | `TextLineReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `BinaryReader` | type | `BinaryReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `WatchTarget` | type | `WatchTarget` | test_env_conformance.py, test_env_posix.py | tested |
-| `WatchChange` | type | `WatchChange` | test_env_conformance.py, test_env_posix.py, test_discriminant_spellings.py | tested (both spellings are read and only the `kind` one is emitted since #33; #35 retires the name) |
-| `FileChange` | type | `FileChange` | — | planned (1.5.0: what `FileSystem.watch()` changes are renamed to, tagged by `kind`: `paths`, `overflow`, `failed`; #35) |
-| `FileWatcher` | type | `FileWatcher` | test_env_conformance.py, test_env_posix.py | tested |
+| `FileChange` | type | `FileChange` | test_env_conformance.py, test_env_posix.py, test_discriminant_spellings.py | tested (1.5.0 renames `WatchChange` to this and tags the three changes by `kind`: `paths`, `overflow`, `failed`; both spellings are read and only the `kind` one is emitted — #33, #35) |
+| `FileWatcher` | type | `FileWatcher` | test_env_conformance.py, test_env_posix.py | tested (`stop(context)` replaces `close(context)` since #35; readers still close) |
 | `LineScan` | type | `LineScan` | test_env_line_scan.py, test_env_conformance.py | tested |
 | `DirReader` | type | `DirReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `ListFilesOptions` | type | `ListFilesOptions` | test_env_conformance.py | tested |
@@ -679,13 +678,13 @@ SQLite backend and migrations.
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the live status and in what `compaction_start` and `compaction_end` report: test_harness_compaction.py, test_harness_events.py; #36) |
 | 9 Document observation and Chord | tested |
-| 9.1 Watches | planned (Chord's `WatchHandle`, `WatchCall`, and `WatchEnd`: `value`/`start`/`stop`/`closed`, the `kind`-tagged end including `aborted`, and the observer's `advance`/`end`; #35, #43, #44. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
+| 9.1 Watches | planned (`WatchCall`, the tagged listener call, and the observer's `advance`/`end`; #43, #44. `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
 | 9.2 `watchDoc` | planned (one change object per listener, coalesced deliveries with folded operations, the 10,000-operation root replacement, and a watch that follows its address through a retirement; #43) |
 | 9.3 Conversation view | planned (a per-watch, per-observer entry window with `before`, `ConversationWindow` bounds, and `ConversationTranscript`; everything a renderer draws is state here; #45, #46) |
 | 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
 | 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |
 | 10 Storage contract | tested (`commit_batches(batches, receive, context)` with per-batch checks, receipts and the refusal beside the single form, the optional `publishing()` scope, and the narrowed `mint_id()` monotonicity across reopen — test_storage_commit_batches.py over the memory, SQLite and JSONL backends; #38. The conformance suite now carries the receipt contract itself — the group stored in order against the state its earlier batches left, the prefix a refusal keeps, a later batch its own actions refuse, a copy resolved against its predecessors, and receipts checked one per stored batch by the wrapper every case runs through; #39. The durable backends' own depth landed with #40, which also pins that every backend module registers the same case list; the single form's deletion remains #41) |
-| 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged watch and observer ends; #35, #42, #44) |
+| 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged observer ends; #42, #44. The tagged watch ends landed with #35) |
 | 11 Backends | tested |
 | 11.1 Memory | tested (one call stores its group in order, each batch checked against the state the earlier ones left, so a copy sees what its predecessors wrote and the first refusal keeps its prefix and leaves the storage serving; the receipts ride the applied batches and stand even when a later batch's application throws — test_memory_storage.py, whose conformance cases run over `MemoryStorage` through the receipt-checking wrapper; #39) |
 | 11.2 SQLite | tested (one SQL transaction stores the whole call: every batch checked through a handle that tells a refusal from a failed database call, the allocation written with the counted-run member so a statement that changed no row rejects the call instead of handing the same sequence out twice, a driver of the old member set refused at its first commit, and a read concurrent with the group sees none of its batches or all of them — test_sqlite_storage.py and test_storage_commit_batches.py, the conformance cases run over `SqliteStorage` fresh and across reopen through the receipt-checking wrapper; #40) |

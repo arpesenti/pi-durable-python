@@ -204,7 +204,7 @@ async def watch_events(
     watch = holder["watch"]
     signal = context.abort_signal
     if signal is not None and signal.aborted:
-        watch.cancel()
+        watch.abort_acquisition()
         raise cancellation_error(signal)
     if signal is not None:
         watch.observe_cancellation(signal)

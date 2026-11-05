@@ -1,8 +1,9 @@
-"""Translated v1.3.0 ``session-watches`` suite.
+"""Translated v1.5.0 ``session-watches`` suite.
 
 Covers exact committed frames, serialized callbacks, bounded pending frames with full-value
 overflow, retirement, close, cancellation, listener failure, and continued observation after the
-tracker cache unloads.
+tracker cache unloads. The five watch ends are the shipped build's (``chord/src/watch.ts:16-19``):
+``stopped``, ``aborted``, ``ended``, ``listener_error``, and ``failed``.
 """
 
 from __future__ import annotations
@@ -209,7 +210,7 @@ async def test_never_folds_the_in_flight_frame_into_an_overflow_reset() -> None:
     await watch.stop()
 
 
-async def test_folds_retirement_into_an_overflow_reset_and_then_closes() -> None:
+async def test_folds_retirement_into_an_overflow_reset_and_goes_on() -> None:
     _storage, session, _publications = await create_state()
     watch = await session.watch_doc(StateDoc, context)
     assert watch is not None
@@ -226,8 +227,11 @@ async def test_folds_retirement_into_an_overflow_reset_and_then_closes() -> None
         deliveries.append((value, ops))
 
     watch.start(listener)
-    assert await watch.closed == {"kind": "retired"}
+    await flush()
     assert deliveries == [(None, [["r", None]])]
+    # A retirement is a change and not an end: the watch stays until it is stopped (spec §9.1).
+    assert watch.closed.done() is False
+    assert await watch.stop() == {"kind": "stopped"}
 
 
 async def test_delivers_replayable_structural_no_op_commits_instead_of_suppressing_them() -> None:
@@ -332,9 +336,10 @@ async def test_delivers_retirement_and_does_not_follow_recreation() -> None:
         (await tx.doc(StateDoc)).value = 10
 
     await session.commit(replace, context)
-    assert await old_watch.closed == {"kind": "retired"}
+    await flush()
     assert values == [None]
     assert old_watch.value is None
+    assert old_watch.closed.done() is False
 
     replacement = await session.watch_doc(StateDoc, context)
     assert replacement is not None
@@ -342,6 +347,7 @@ async def test_delivers_retirement_and_does_not_follow_recreation() -> None:
     await set_value(session, 11)
     await flush()
     assert old_watch.value is None
+    assert await old_watch.stop() == {"kind": "stopped"}
     await replacement.stop()
 
 
@@ -356,7 +362,7 @@ async def test_session_close_discards_retirement_buffered_before_start() -> None
 
     await session.commit(retire, context)
     await session.close(context)
-    assert await watch.closed == {"kind": "session_closed"}
+    assert await watch.closed == {"kind": "ended"}
     assert watch.value is baseline
     with pytest.raises(RuntimeError, match="stopped"):
         watch.start(lambda _value, _ops, _context: None)
@@ -384,7 +390,7 @@ async def test_session_close_discards_retirement_behind_an_in_flight_callback() 
 
     await session.commit(retire, context)
     await session.close(context)
-    assert await watch.closed == {"kind": "session_closed"}
+    assert await watch.closed == {"kind": "ended"}
     release.resolve()
     await flush()
     assert values[0] is not None and values[0]["value"] == 1
@@ -408,6 +414,31 @@ async def test_supports_idempotent_stop_and_rejects_repeated_or_late_start() -> 
     await stopped.stop()
     with pytest.raises(RuntimeError, match="stopped"):
         stopped.start(lambda _value, _ops, _context: None)
+
+
+async def test_stop_and_the_acquisition_abort_are_two_distinct_ends() -> None:
+    """``stop()`` yields ``stopped`` and the acquisition context's abort yields ``aborted``.
+
+    The changelog calls the second end ``cancelled``; the shipped build (``chord/src/watch.ts:16-19``
+    and ``:46-55``) keeps them apart, and so does the port: whichever comes first is the end, and
+    the other path reports it rather than overwriting it.
+    """
+
+    _storage, session, _publications = await create_state()
+
+    stopped_first = with_cancel(context)
+    by_stop = await session.watch_doc(StateDoc, stopped_first.context)
+    assert by_stop is not None
+    assert await by_stop.stop() == {"kind": "stopped"}
+    stopped_first.cancel()
+    assert await by_stop.closed == {"kind": "stopped"}
+
+    aborted_first = with_cancel(context)
+    by_abort = await session.watch_doc(StateDoc, aborted_first.context)
+    assert by_abort is not None
+    aborted_first.cancel()
+    assert await by_abort.closed == {"kind": "aborted"}
+    assert await by_abort.stop() == {"kind": "aborted"}
 
 
 async def test_cancels_acquisition_without_leaking_a_registered_watch() -> None:
@@ -461,7 +492,7 @@ async def test_cancels_future_delivery_without_aborting_an_in_flight_callback() 
     await set_value(session, 1)
     await entered.promise
     child.cancel()
-    assert await watch.closed == {"kind": "cancelled"}
+    assert await watch.closed == {"kind": "aborted"}
     assert delivery_context.abort_signal is None
     release.resolve()
 
@@ -485,7 +516,7 @@ async def test_session_close_stops_future_delivery_without_joining_an_in_flight_
     await entered.promise
     await session.close(context)
     assert delivery_context.abort_signal is None
-    assert await watch.closed == {"kind": "session_closed"}
+    assert await watch.closed == {"kind": "ended"}
     release.resolve()
 
 

@@ -781,7 +781,7 @@ class SessionImpl:
                     return None
                 watch = self._attach_watch(definition, loaded)
             if cancelled:
-                watch.cancel()
+                watch.abort_acquisition()
                 raise_if_cancelled()
             if signal is not None:
                 watch.observe_cancellation(signal)

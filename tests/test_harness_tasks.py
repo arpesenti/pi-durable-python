@@ -1356,7 +1356,7 @@ async def test_close_seals_admission_before_signalling_handlers_and_stops_watche
     await opened["harness"].close(context)
     with pytest.raises(Exception, match="closed"):
         await state["from_listener"]
-    assert state["watch_end"] == {"kind": "session_closed"}
+    assert state["watch_end"] == {"kind": "ended"}
 
 
 async def test_writes_no_fault_when_close_seals_before_the_failed_phase_step() -> None:

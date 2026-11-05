@@ -1,12 +1,16 @@
-"""Both discriminant spellings of every union 1.5.0 retags (#33).
+"""Both discriminant spellings of every union 1.5.0 retags (#33, #35).
 
 Upstream 1.5.0 moves the tag key of six unions from ``type``/``reason`` to ``kind``: the watch
 end and the session end (``docs/upstream/spec-1.5.0.md`` §9.1 and §4), the report description and
 the report source (§10.1), the document commit change (§2, which adds ``kind: "change"|"retire"``
 beside the ``type`` that stays), and the execution environment's file change (upstream
-``src/env/index.ts:127``). This is the expand half of expand–migrate–contract: every reader of
-those unions accepts either spelling, every writer emits only ``kind``, and #37 deletes the retired
-spelling again.
+``src/env/index.ts:127``, where the union is also renamed ``WatchChange`` → ``FileChange``). This is
+the expand half of expand–migrate–contract: every reader of those unions accepts either spelling,
+every writer emits only ``kind``, and #37 deletes the retired spelling again.
+
+#35 settled the two pairs that move more than the key, and this file pins both halves: a watch end
+written with the 1.4.0 tag *and* the 1.4.0 word reads as the end the shipped build carries
+(``chord/src/watch.ts:16-19``), and a file change written untagged reads as the tagged one.
 
 Each case below takes a value written in the retired spelling through the same reader that takes
 the value written in the current spelling, and asserts the reader cannot tell them apart. The
@@ -28,15 +32,15 @@ from task_support import completed, eventually
 from pi_durable import define_doc, define_extension, define_task
 from pi_durable.context import BACKGROUND_CONTEXT, with_cancel
 from pi_durable.env import (
+    FileChange,
+    FileChangeFailed,
+    FileChangeFailedLegacy,
+    FileChangeInput,
+    FileChangeOverflow,
+    FileChangeOverflowLegacy,
+    FileChangePaths,
+    FileChangePathsLegacy,
     FileError,
-    WatchChange,
-    WatchChangeInput,
-    WatchError,
-    WatchErrorLegacy,
-    WatchOverflow,
-    WatchOverflowLegacy,
-    WatchPaths,
-    WatchPathsLegacy,
     WatchTarget,
     get_or_throw,
     to_file_change,
@@ -64,6 +68,7 @@ from pi_durable.types import (
     StorageWrite,
     SubmissionRecord,
     TaskState,
+    WatchEnd,
     WatchEndInput,
     to_document_commit_change,
     to_session_end,
@@ -100,7 +105,7 @@ async def set_value(session: Any, value: int) -> None:
     await session.commit(change, context)
 
 
-# ── The watch end: `reason` became `kind` (spec §9.1) ───────────────────────
+# ── The watch end: `reason` became `kind`, and the ends were renamed (§9.1) ───
 
 
 async def test_every_way_a_watch_ends_emits_its_tag_under_kind() -> None:
@@ -111,10 +116,10 @@ async def test_every_way_a_watch_ends_emits_its_tag_under_kind() -> None:
     assert await stopped.stop() == {"kind": "stopped"}
 
     controller = with_cancel(context)
-    cancelled = await session.watch_doc(EndStateDoc, controller.context)
-    assert cancelled is not None
+    aborted = await session.watch_doc(EndStateDoc, controller.context)
+    assert aborted is not None
     controller.cancel()
-    assert await cancelled.closed == {"kind": "cancelled"}
+    assert await aborted.closed == {"kind": "aborted"}
 
     failing = await session.watch_doc(EndStateDoc, context)
     assert failing is not None
@@ -138,10 +143,11 @@ async def test_every_way_a_watch_ends_emits_its_tag_under_kind() -> None:
 
     await session.commit(retire, context)
     retired.start(lambda _value, _ops, _delivery_context: None)
-    assert await retired.closed == {"kind": "retired"}
+    # A retirement is a change and not an end: the watch is the host's to stop (spec §9.1).
+    assert await retired.stop() == {"kind": "stopped"}
 
     await session.close(context)
-    assert await closed.closed == {"kind": "session_closed"}
+    assert await closed.closed == {"kind": "ended"}
 
 
 async def test_a_session_that_fails_emits_its_watch_end_under_kind_with_the_failure() -> None:
@@ -155,20 +161,31 @@ async def test_a_session_that_fails_emits_its_watch_end_under_kind_with_the_fail
         await set_value(session, 1)
 
     end = cast(dict[str, Any], await watch.closed)
-    assert end == {"kind": "session_failed", "error": failure}
+    assert end == {"kind": "failed", "error": failure}
 
 
 def test_a_watch_end_written_with_the_retired_reason_key_reads_as_the_same_end() -> None:
-    for tag in ("stopped", "cancelled", "session_closed", "retired"):
-        retired_spelling: WatchEndInput = {"reason": tag}
-        current_spelling: WatchEndInput = {"kind": tag}
-        assert to_watch_end(retired_spelling) == to_watch_end(current_spelling) == {"kind": tag}
+    """The retired tag key came with the retired words, so the reader moves both at once (#35)."""
+
+    pairs: list[tuple[WatchEndInput, WatchEnd]] = [
+        ({"reason": "stopped"}, {"kind": "stopped"}),
+        ({"reason": "cancelled"}, {"kind": "aborted"}),
+        ({"reason": "session_closed"}, {"kind": "ended"}),
+    ]
+    for retired_spelling, current in pairs:
+        assert to_watch_end(retired_spelling) == to_watch_end(current) == current
+
     failure = RuntimeError("listener threw")
-    for tag in ("listener_error", "session_failed"):
-        retired_spelling = cast(WatchEndInput, {"reason": tag, "error": failure})
-        current_spelling = cast(WatchEndInput, {"kind": tag, "error": failure})
-        assert to_watch_end(retired_spelling) == to_watch_end(current_spelling)
-        assert to_watch_end(retired_spelling) == {"kind": tag, "error": failure}
+    errored: list[tuple[WatchEndInput, WatchEnd]] = [
+        ({"reason": "listener_error", "error": failure}, {"kind": "listener_error", "error": failure}),
+        ({"reason": "session_failed", "error": failure}, {"kind": "failed", "error": failure}),
+    ]
+    for retired_spelling, current in errored:
+        assert to_watch_end(retired_spelling) == to_watch_end(current) == current
+
+    # The 1.4.0 ``retired`` end has no successor to read it as: a retirement is a change now.
+    with pytest.raises(ValueError, match="retirement is a change"):
+        to_watch_end(cast(WatchEndInput, {"reason": "retired"}))
 
 
 # ── The session end: `reason` became `kind` (spec §4, line 1378) ────────────
@@ -397,26 +414,29 @@ async def test_a_task_that_reports_the_old_way_about_its_source_is_reported_iden
     await harness.close(context)
 
 
-# ── The file change: the untagged shape became `kind`-tagged (upstream env/index.ts:127) ─
+# ── The file change: `WatchChange` became the `kind`-tagged `FileChange` ──────
 
 
 def test_a_file_change_written_the_old_way_reads_as_the_same_change() -> None:
     failure = FileError("invalid", "too many directories")
-    pairs: list[tuple[WatchChangeInput, WatchChangeInput]] = [
-        (WatchPathsLegacy(paths=["a.txt", "dir"]), WatchPaths(kind="paths", paths=["a.txt", "dir"])),
-        (WatchOverflowLegacy(overflow=True), WatchOverflow(kind="overflow")),
-        (WatchErrorLegacy(error=failure), WatchError(kind="failed", error=failure)),
+    pairs: list[tuple[FileChangeInput, FileChangeInput]] = [
+        (
+            FileChangePathsLegacy(paths=["a.txt", "dir"]),
+            FileChangePaths(kind="paths", paths=["a.txt", "dir"]),
+        ),
+        (FileChangeOverflowLegacy(overflow=True), FileChangeOverflow(kind="overflow")),
+        (FileChangeFailedLegacy(error=failure), FileChangeFailed(kind="failed", error=failure)),
     ]
     for retired_spelling, current_spelling in pairs:
         assert to_file_change(retired_spelling) == to_file_change(current_spelling)
-    assert to_file_change(WatchOverflowLegacy(overflow=True)) == {"kind": "overflow"}
-    assert to_file_change(WatchErrorLegacy(error=failure)) == {"kind": "failed", "error": failure}
-    assert to_file_change(WatchPathsLegacy(paths=[])) == {"kind": "paths", "paths": []}
+    assert to_file_change(FileChangeOverflowLegacy(overflow=True)) == {"kind": "overflow"}
+    assert to_file_change(FileChangeFailedLegacy(error=failure)) == {"kind": "failed", "error": failure}
+    assert to_file_change(FileChangePathsLegacy(paths=[])) == {"kind": "paths", "paths": []}
 
 
 async def test_a_watched_change_is_emitted_under_kind(tmp_path: Any) -> None:
     env = PosixExecutionEnv(cwd=str(tmp_path), watch={"poll_interval_ms": 20})
-    changes: list[WatchChange] = []
+    changes: list[FileChange] = []
     watcher = get_or_throw(
         await env.watch([WatchTarget({"path": "watched"})], changes.append, BACKGROUND_CONTEXT)
     )
@@ -429,7 +449,7 @@ async def test_a_watched_change_is_emitted_under_kind(tmp_path: Any) -> None:
         assert all(change["kind"] == "paths" for change in changes)
         assert "overflow" not in changes[-1] and "error" not in changes[-1]
     finally:
-        await watcher.close(BACKGROUND_CONTEXT)
+        await watcher.stop(BACKGROUND_CONTEXT)
 
 
 # ── The unions 1.5.0 leaves alone keep the tag key they have ───────────────

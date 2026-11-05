@@ -680,7 +680,7 @@ async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> 
     await eventually(lambda: len(seen) > 0)
     assert opened["reports"] == [failure]
     await harness.close(context)
-    assert (await watch.closed)["kind"] == "session_closed"
+    assert (await watch.closed)["kind"] == "ended"
 
 
 async def test_faults_only_the_task_and_ends_the_watch_for_an_unformattable_value() -> None:

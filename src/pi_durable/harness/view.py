@@ -90,12 +90,12 @@ class ConversationViews:
         return await self.attach(id, _state_observer, context)
 
     async def watch(self, id: ConversationId, context: Context) -> CommittedWatch:
-        """A serialized exact-frame watch of the view; cancelling ``context`` stops it."""
+        """A serialized exact-frame watch of the view; aborting ``context`` ends it ``aborted``."""
 
         observer = await self.attach(id, _watch_observer, context)
         signal = context.abort_signal
         if signal is not None and signal.aborted:
-            observer.cancel()
+            observer.abort_acquisition()
             raise cancellation_error(signal)
         if signal is not None:
             observer.observe_cancellation(signal)
