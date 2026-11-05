@@ -1,18 +1,22 @@
-"""Translated v1.3.0 ``testing`` assertions, runner, and the conformance case list.
+"""Translated v1.5.0 ``testing`` assertions, runner, receipt wrapper, and conformance case list.
 
 The runner-independent cases are asserted through the public adapter, exactly as the upstream
 ``createExpectAssertions`` adapter is. The runner test drives ``register_storage_conformance``
-with a recording runner instead of Vitest's global ``describe``/``it``.
+with a recording runner instead of Vitest's global ``describe``/``it``, and the last cases hold
+the suite's receipt-checking wrapper to its own contract.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from typing import Any
 
+import pytest
 from storage_support import expect
 
 from pi_durable import MemoryStorage
+from pi_durable.context import Context
+from pi_durable.ids import Seq
 from pi_durable.testing import (
     StorageConformanceCase,
     StorageConformanceOptions,
@@ -20,6 +24,7 @@ from pi_durable.testing import (
     create_storage_conformance,
     register_storage_conformance,
 )
+from pi_durable.types import CommitReceipt, CommitResult, StorageWrite
 
 
 class _RecordingMatcher:
@@ -137,7 +142,7 @@ async def test_register_storage_conformance_registers_one_case_per_suite() -> No
         StorageConformanceOptions(assertions=create_expect_assertions(expect), with_storage=with_storage)
     )
     assert [name for name, _, _ in recording.registered] == [case.name for case in cases]
-    assert len(recording.registered) == 25
+    assert len(recording.registered) == 30
     assert all(timeout is None for _, _, timeout in recording.registered)
 
     first = dict((name, test) for name, test, _ in recording.registered)[
@@ -163,3 +168,76 @@ async def test_conformance_cases_run_the_provider_exactly_once() -> None:
 
     await next(case for case in cases if case.name == "rejects every operation after close").run()
     assert calls == [1]
+
+
+class _MisreceivedMemoryStorage(MemoryStorage):
+    """A memory storage that hands the suite the receipts the contract forbids.
+
+    The batches themselves are stored: only what the wrapper is told about them is wrong.
+    """
+
+    def __init__(self, misuse: str) -> None:
+        super().__init__()
+        self._misuse = misuse
+
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        commit_context: Context,
+    ) -> CommitResult:
+        stored: list[Seq] = []
+        result = await super().commit_batches(
+            batches, lambda _index, seq: stored.append(seq), commit_context
+        )
+        delivered = list(enumerate(stored))
+        if self._misuse == "same-index":
+            delivered = [(0, seq) for seq in stored]
+        elif self._misuse == "reverse-order":
+            delivered = list(reversed(delivered))
+        elif self._misuse == "extra-receipt":
+            delivered.append((len(stored), Seq(stored[-1] + 1)))
+        for index, seq in delivered:
+            receive(index, seq)
+        return result
+
+
+@pytest.mark.parametrize(
+    ("misuse", "refusal"),
+    [
+        ("same-index", "0 is not 1"),
+        ("reverse-order", "2 is not 0"),
+        ("extra-receipt", "4 is not 3"),
+        ("honest", None),
+    ],
+)
+async def test_the_receipt_contract_is_checked_in_every_case(misuse: str, refusal: str | None) -> None:
+    """The wrapper is what holds a backend to the receipt contract, not one case's assertions.
+
+    The batches are stored exactly as a conforming storage stores them; only the receipts are
+    wrong, so the case fails on the receipt it was given, before any assertion of its own runs.
+    """
+
+    async def with_storage(use: Callable[[Any], Awaitable[None]]) -> None:
+        await use(_MisreceivedMemoryStorage(misuse))
+
+    cases = create_storage_conformance(
+        StorageConformanceOptions(
+            assertions=create_expect_assertions(expect), with_storage=with_storage
+        )
+    )
+    case = next(
+        candidate
+        for candidate in cases
+        if candidate.name == "resolves a batched copy against the state the earlier batches left"
+    )
+
+    if refusal is None:
+        # The control: honest receipts, delivered the way the contract asks for them, pass.
+        await case.run()
+    else:
+        # The wording is the wrapper's own: it compares the receipt it was given with the one the
+        # contract owes at that point in the group.
+        with pytest.raises(AssertionError) as raised:
+            await case.run()
+        assert str(raised.value) == refusal

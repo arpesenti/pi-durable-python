@@ -1,8 +1,12 @@
-"""Runner-independent storage conformance cases, translated from v1.3.0 ``testing``.
+"""Runner-independent storage conformance cases, translated from v1.5.0 ``testing``.
 
 The suite covers atomic commits, detached values, cursor pagination and order, fork ancestry,
 task and submission indexes, document history and copies, global ID ownership, and close
-behavior. It exercises only the public :class:`~pi_durable.types.Storage` contract.
+behavior, together with the batched commit: a group stored in one call, each batch with its own
+sequence checked against the state the earlier ones left, the first refusal ending the call, and
+one durability receipt per stored batch. Every case runs its storage through the receipt-checking
+wrapper, so a backend cannot pass the suite by receiving the way one backend happens to work.
+It exercises only the public :class:`~pi_durable.types.Storage` contract.
 """
 
 from __future__ import annotations
@@ -11,14 +15,24 @@ import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeAlias, cast
 
-from ..context import BACKGROUND_CONTEXT
+from ..context import BACKGROUND_CONTEXT, Context
 from ..ids import (
     ROOT_CONVERSATION_ID,
     ConversationId,
     EntryId,
+    Seq,
     id_from_number,
 )
-from ..types import Cursor, Page, ScanOrder, Storage, StorageWrite
+from ..types import (
+    CommitReceipt,
+    CommitResult,
+    Cursor,
+    Page,
+    ScanOrder,
+    Storage,
+    StorageWrite,
+)
+from .commit_writes import commit_writes
 from .types import (
     StorageConformanceAssertions,
     StorageConformanceCase,
@@ -116,13 +130,61 @@ def _assertion_facade(
     return lambda actual: _AssertionResult(actual, assertions)
 
 
+class _ReceiptCheckingStorage:
+    """``storage`` with every batched commit checked against the receipt contract.
+
+    One ``receive`` per stored batch, in order, with increasing sequences, all before the call
+    settles. Every conformance case runs its storage through this wrapper, so the contract is a
+    precondition of the suite rather than one case's claim about it.
+    """
+
+    def __init__(self, storage: Storage, assertions: StorageConformanceAssertions) -> None:
+        self._storage = storage
+        self._assertions = assertions
+
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        commit_context: Context,
+    ) -> CommitResult:
+        seqs: list[Seq] = []
+        settled = False
+
+        def recording(index: int, seq: Seq) -> None:
+            nonlocal settled
+            self._assertions.ok(not settled, "Storage.commit() received a batch after it settled")
+            self._assertions.strict_equal(index, len(seqs))
+            if seqs:
+                self._assertions.greater_than(seq, seqs[-1])
+            seqs.append(seq)
+            receive(index, seq)
+
+        try:
+            result = await self._storage.commit_batches(batches, recording, commit_context)
+            self._assertions.strict_equal(len(seqs), result["stored"])
+            return result
+        finally:
+            settled = True
+
+    def __getattr__(self, name: str) -> Any:
+        # Everything the receipt contract does not concern, straight through to the storage.
+        return getattr(self._storage, name)
+
+
+def _check_receipts(storage: Storage, assertions: StorageConformanceAssertions) -> Storage:
+    return _ReceiptCheckingStorage(storage, assertions)
+
+
 def _create_case(
     options: StorageConformanceOptions,
     name: str,
     test: Callable[[Storage], Awaitable[None]],
 ) -> StorageConformanceCase:
+    assertions = options["assertions"]
+
     async def run() -> None:
-        await options["with_storage"](test)
+        await options["with_storage"](lambda storage: test(_check_receipts(storage, assertions)))
 
     return StorageConformanceCase(name=name, run=run)
 
@@ -143,6 +205,45 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
                 [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
             )
         ).rejects.to_throw(f"ID {ROOT_CONVERSATION_ID} already belongs to conversation")
+
+    async def receives_a_durable_commit_once(storage: Storage) -> None:
+        root_id = await _create_root(storage)
+        events: list[str] = []
+        entry_id = await storage.mint_id()
+        received: list[Seq] = []
+        started: list[Any] = []
+
+        def record(_index: int, seq: Seq) -> None:
+            received.append(seq)
+            events.append(f"receive {seq}")
+            # The batch is durable when it is received: a read started now observes it.
+            started.append(storage.entry(entry_id, context))
+
+        result = await storage.commit_batches(
+            [[{"type": "entry", "value": _entry(entry_id, root_id)}]], record, context
+        )
+        events.append(f"resolve {result['stored']}")
+        expect(events).to_equal([f"receive {received[0]}", "resolve 1"])
+        stored_entry = await started[0]
+        expect(stored_entry is not None).to_be(True)
+        expect(stored_entry["commitSeq"]).to_be(received[0])
+
+        events.clear()
+        refused = await storage.commit_batches(
+            [[{"type": "conversation", "value": {"id": root_id}}]],
+            lambda index, seq: events.append(f"receive {seq}"),
+            context,
+        )
+        expect(refused["stored"]).to_be(0)
+        expect(str(refused.get("refused"))).to_be(f"ID {root_id} already belongs to conversation")
+        expect(events).to_equal([])
+
+        next_seq = await commit_writes(
+            storage,
+            [{"type": "entry", "value": _entry(await storage.mint_id(), root_id)}],
+            context,
+        )
+        expect(next_seq).to_be_greater_than(received[0])
 
     async def commits_mixed_table_writes(storage: Storage) -> None:
         root_id = await _create_root(storage)
@@ -1915,6 +2016,233 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         await expect(storage.mint_id()).rejects.to_throw("ID space is exhausted")
         await expect(storage.mint_id()).rejects.to_throw("ID space is exhausted")
 
+    async def commits_batches_in_order(storage: Storage) -> None:
+        root_id = await _create_root(storage)
+        first_id = await storage.mint_id()
+        last_id = await storage.mint_id()
+        document_id = await storage.mint_id()
+        receipts: list[tuple[int, Seq]] = []
+        started: list[Any] = []
+
+        def receive(index: int, seq: Seq) -> None:
+            receipts.append((index, seq))
+            # Receipts follow the last durable batch: a read started at the first observes it.
+            if not started:
+                started.append(storage.entry(last_id, context))
+
+        result = await storage.commit_batches(
+            [
+                [
+                    {"type": "entry", "value": _entry(first_id, root_id)},
+                    {
+                        "type": "document.create",
+                        "record": {
+                            "id": document_id,
+                            "kind": "batch.doc",
+                            "scope": {"kind": "conversation", "conversationId": root_id},
+                            "history": "latest",
+                            "fork": "initial",
+                        },
+                        "content": {"kind": "base", "version": 1, "value": {"count": 1}},
+                    },
+                ],
+                # Changes the document the batch before created.
+                [
+                    {
+                        "type": "document.change",
+                        "id": document_id,
+                        "content": {"kind": "delta", "version": 1, "ops": [["s", ["count"], 2]]},
+                    }
+                ],
+                [{"type": "entry", "value": _entry(last_id, root_id)}],
+            ],
+            receive,
+            context,
+        )
+        expect(result).to_equal({"stored": 3})
+        expect([index for index, _ in receipts]).to_equal([0, 1, 2])
+        first_seq, second_seq, last_seq = (seq for _, seq in receipts)
+        expect(second_seq).to_be_greater_than(first_seq)
+        expect(last_seq).to_be_greater_than(second_seq)
+        observed = await started[0]
+        expect(observed is not None).to_be(True)
+        expect(observed["commitSeq"]).to_be(last_seq)
+        first_entry = await storage.entry(first_id, context)
+        assert first_entry is not None
+        expect(first_entry["commitSeq"]).to_be(first_seq)
+        document = await storage.document(document_id, "current", context)
+        assert document is not None
+        expect(document["value"]).to_equal({"count": 2})
+        next_seq = await commit_writes(
+            storage,
+            [{"type": "entry", "value": _entry(await storage.mint_id(), root_id)}],
+            context,
+        )
+        expect(next_seq).to_be_greater_than(last_seq)
+
+    async def stores_the_prefix_before_a_refusal(storage: Storage) -> None:
+        root_id = await _create_root(storage)
+        first_id = await storage.mint_id()
+        after_id = await storage.mint_id()
+        receipts: list[int] = []
+
+        result = await storage.commit_batches(
+            [
+                [{"type": "entry", "value": _entry(first_id, root_id)}],
+                # Refused against the state the first batch left: the ID is taken now.
+                [
+                    {"type": "task", "value": _pending_task(await storage.mint_id(), root_id)},
+                    {"type": "entry", "value": _entry(first_id, root_id)},
+                ],
+                [{"type": "entry", "value": _entry(after_id, root_id)}],
+            ],
+            lambda index, _seq: receipts.append(index),
+            context,
+        )
+        expect(result["stored"]).to_be(1)
+        expect(str(result.get("refused"))).to_be(f"ID {first_id} already belongs to entry")
+        expect(receipts).to_equal([0])
+        expect(await storage.entry(first_id, context)).to_be_defined()
+        expect(await storage.entry(after_id, context)).to_be_undefined()
+        tasks = (await storage.scan_tasks({}, 10, None, context))["items"]
+        expect([task["id"] for task in tasks]).to_equal([])
+
+        # A refused first batch stores nothing; the storage goes on.
+        refused = await storage.commit_batches(
+            [[{"type": "conversation", "value": {"id": root_id}}]],
+            lambda index, _seq: receipts.append(index),
+            context,
+        )
+        expect(refused["stored"]).to_be(0)
+        expect(str(refused.get("refused"))).to_be(f"ID {root_id} already belongs to conversation")
+        expect(receipts).to_equal([0])
+        await commit_writes(storage, [{"type": "entry", "value": _entry(after_id, root_id)}], context)
+        expect(await storage.entry(after_id, context)).to_be_defined()
+
+    async def refuses_a_later_batch_its_own_actions_fail(storage: Storage) -> None:
+        root_id = await _create_root(storage)
+        document_id = await storage.mint_id()
+        await commit_writes(
+            storage,
+            [
+                {
+                    "type": "document.create",
+                    "record": {"id": document_id, "kind": "staged", "scope": {"kind": "session"}},
+                    "content": {"kind": "base", "version": 1, "value": {"n": 1}},
+                }
+            ],
+            context,
+        )
+        first_id = await storage.mint_id()
+        second_id = await storage.mint_id()
+        after_id = await storage.mint_id()
+        receipts: list[int] = []
+
+        result = await storage.commit_batches(
+            [
+                [{"type": "entry", "value": _entry(first_id, root_id)}],
+                # Malformed in itself, whatever is stored: one document retired twice.
+                [
+                    {"type": "entry", "value": _entry(second_id, root_id)},
+                    {"type": "document.retire", "id": document_id},
+                    {"type": "document.retire", "id": document_id},
+                ],
+                [{"type": "entry", "value": _entry(after_id, root_id)}],
+            ],
+            lambda index, _seq: receipts.append(index),
+            context,
+        )
+        expect(result["stored"]).to_be(1)
+        expect(result.get("refused") is not None).to_be(True)
+        expect(receipts).to_equal([0])
+        expect(await storage.entry(first_id, context)).to_be_defined()
+        expect(await storage.entry(second_id, context)).to_be_undefined()
+        expect(await storage.entry(after_id, context)).to_be_undefined()
+        staged = await storage.document(document_id, "current", context)
+        assert staged is not None
+        expect(staged["value"]).to_equal({"n": 1})
+
+    async def resolves_a_batched_copy_against_the_earlier_batches(storage: Storage) -> None:
+        root_id = await _create_root(storage)
+        child_id = await storage.mint_id()
+        source_id = await storage.mint_id()
+        copy_id = await storage.mint_id()
+
+        def record(id: int, conversation_id: int) -> dict[str, Any]:
+            return {
+                "id": id,
+                "kind": "batch.copy",
+                "scope": {"kind": "conversation", "conversationId": conversation_id},
+                "history": "rewindable",
+                "fork": "asOf",
+            }
+
+        seqs: list[Seq] = []
+        result = await storage.commit_batches(
+            [
+                [
+                    {
+                        "type": "document.create",
+                        "record": record(source_id, root_id),
+                        "content": {"kind": "base", "version": 1, "value": {"count": 1}},
+                    }
+                ],
+                [
+                    {
+                        "type": "document.change",
+                        "id": source_id,
+                        "content": {"kind": "delta", "version": 1, "ops": [["s", ["count"], 2]]},
+                    }
+                ],
+                [
+                    {"type": "conversation", "value": {"id": child_id}},
+                    {
+                        "type": "document.copy",
+                        "record": record(copy_id, child_id),
+                        "source": {"id": source_id, "at": "current"},
+                    },
+                ],
+            ],
+            lambda _index, seq: seqs.append(seq),
+            context,
+        )
+        expect(result).to_equal({"stored": 3})
+        copied = await storage.document(copy_id, "current", context)
+        assert copied is not None
+        expect(copied["value"]).to_equal({"count": 2})
+        source = await storage.document(source_id, seqs[0], context)
+        assert source is not None
+        expect(source["value"]).to_equal({"count": 1})
+
+        # A copy whose source the same batch changes is refused before the batch writes anything.
+        later_id = await storage.mint_id()
+        later_copy_id = await storage.mint_id()
+        refused = await storage.commit_batches(
+            [
+                [
+                    {"type": "conversation", "value": {"id": later_id}},
+                    {
+                        "type": "document.copy",
+                        "record": record(later_copy_id, later_id),
+                        "source": {"id": source_id, "at": "current"},
+                    },
+                    {
+                        "type": "document.change",
+                        "id": source_id,
+                        "content": {"kind": "delta", "version": 1, "ops": [["s", ["count"], 3]]},
+                    },
+                ]
+            ],
+            lambda _index, _seq: None,
+            context,
+        )
+        expect(refused["stored"]).to_be(0)
+        expect(refused.get("refused") is not None).to_be(True)
+        expect(await storage.conversation(later_id, context)).to_be_undefined()
+        unchanged = await storage.document(source_id, "current", context)
+        assert unchanged is not None
+        expect(unchanged["value"]).to_equal({"count": 2})
+
     async def rejects_every_operation_after_close(storage: Storage) -> None:
         await _create_root(storage)
         await storage.close(context)
@@ -1925,7 +2253,14 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         await expect(storage.mint_id()).rejects.to_throw("closed")
 
     return [
-        _create_case(options, "reserves ID 1 for the immutable root conversation", reserves_id_one),
+        _create_case(
+            options, "reserves ID 1 for the immutable root conversation", reserves_id_one
+        ),
+        _create_case(
+            options,
+            "receives a durable commit once before resolving, and never a refused one",
+            receives_a_durable_commit_once,
+        ),
         _create_case(
             options,
             "commits mixed table writes atomically and rolls all of them back on failure",
@@ -2026,6 +2361,26 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             options,
             "keeps one global record ID namespace and rejects exhausted ID minting",
             keeps_one_global_id_namespace,
+        ),
+        _create_case(
+            options,
+            "commits batches in order, each with its seq, checked against the earlier ones",
+            commits_batches_in_order,
+        ),
+        _create_case(
+            options,
+            "stores the batches before the first one refused, and none after it",
+            stores_the_prefix_before_a_refusal,
+        ),
+        _create_case(
+            options,
+            "refuses a later batch its own malformed actions fail, keeping the batches before it",
+            refuses_a_later_batch_its_own_actions_fail,
+        ),
+        _create_case(
+            options,
+            "resolves a batched copy against the state the earlier batches left",
+            resolves_a_batched_copy_against_the_earlier_batches,
         ),
         _create_case(options, "rejects every operation after close", rejects_every_operation_after_close),
     ]
