@@ -344,7 +344,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `CommitOptions` | type | `CommitOptions` | — | planned (1.5.0: the `persistence` mark one commit takes; #47) |
 | `CommitPersistence` | type | `CommitPersistence` | — | planned (1.5.0: `{kind: "immediate"}` or `{kind: "deferred", within_ms?}`; #47) |
 | `CommitPublication` | type | `CommitPublication` | test_types.py | tested (1.5.0 keeps the shape and narrows when it is published; #42) |
-| `CommitResult` | type | `CommitResult` | — | planned (1.5.0: `{stored, refused?}` — what one `Storage.commit()` call stored; #38) |
+| `CommitResult` | type | `CommitResult` | test_storage_commit_batches.py | tested (1.5.0: `{stored, refused?}` — what one `Storage.commit_batches()` call stored, the refusal a resolved outcome; #38) |
 | `CommonDocDefinition` | type | `CommonDocDefinition` | test_session_definitions.py | tested |
 | `ContextEdit` | type | `ContextEdit` | test_types.py | tested |
 | `ConversationDocFamilyToken` | type | `ConversationDocFamilyToken` | test_session_definitions.py | tested |
@@ -556,7 +556,7 @@ Conformance helpers; benchmarks are excluded.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `createExpectAssertions` | value | `create_expect_assertions` | test_testing_conformance.py | tested |
-| `commitWrites` | value | `commit_writes` | — | planned (1.5.0: the sanctioned way to seed a storage with one batch — resolves with its sequence, raises the refusal; #38, #41) |
+| `commitWrites` | value | `commit_writes` | test_storage_commit_batches.py | tested (1.5.0: the sanctioned way to seed a storage with one batch — resolves with its sequence, raises the refusal; #38, and #41 moves every remaining seeding path onto it) |
 | `createEnvConformance` | value | `create_env_conformance` | test_env_conformance.py | tested |
 | `registerEnvConformance` | value | `register_env_conformance` | test_env_conformance.py | tested |
 | `registerStorageConformance` | value | `register_storage_conformance` | test_testing_conformance.py | tested |
@@ -633,7 +633,7 @@ SQLite backend and migrations.
 | `./storage/sqlite/node` | Node SQLite driver; Python opens the stdlib-backed `PosixSqliteDatabase` facade and passes it to `SqliteStorage.open()`. |
 | `./storage/sqlite/cloudflare` | Cloudflare-only adapter. |
 | `./storage/indexeddb` | Browser storage backend; out of scope like the Cloudflare adapters. |
-| `./storage/store` | The attached-host storage subpath added at 1.5.0: `StoreStorage` keeps a Session's records as declared tables of a Chord v2 store and publishes each commit inside the batch of the host the store serves. This port has no Chord host to attach to — Chord is an internal implementation detail here (ADR 0003). The optional `publishing()` scope it exists to serve is still ported, on the `Storage` protocol (ADR 0003). |
+| `./storage/store` | The attached-host storage subpath added at 1.5.0: `StoreStorage` keeps a Session's records as declared tables of a Chord v2 store and publishes each commit inside the batch of the host the store serves. This port has no Chord host to attach to — Chord is an internal implementation detail here (ADR 0003). The optional `publishing()` scope it exists to serve is still ported, as the companion `PublishingStorage` protocol (ADR 0003). |
 | `./harness/telemetry` | Host observability tied to `@earendil-works/pi-telemetry`, with no normative spec section; see ADR 0002. |
 | `test-workers/*` | Browser and Cloudflare Workers suites; out of scope with the adapters they exercise. |
 
@@ -684,7 +684,7 @@ SQLite backend and migrations.
 | 9.3 Conversation view | planned (a per-watch, per-observer entry window with `before`, `ConversationWindow` bounds, and `ConversationTranscript`; everything a renderer draws is state here; #45, #46) |
 | 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
 | 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |
-| 10 Storage contract | planned (`commit(batches, receive, context)` with per-batch checks and receipts, the optional `publishing()` scope, and the narrowed `mint_id()` monotonicity; #38, #39, #40, #41) |
+| 10 Storage contract | tested (`commit_batches(batches, receive, context)` with per-batch checks, receipts and the refusal beside the single form, the optional `publishing()` scope, and the narrowed `mint_id()` monotonicity across reopen — test_storage_commit_batches.py over the memory, SQLite and JSONL backends; #38, with the per-backend conformance depth in #39 and #40 and the single form's deletion in #41) |
 | 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged watch and observer ends; #35, #42, #44) |
 | 11 Backends | tested |
 | 11.1 Memory | tested (the batched call for the memory backend is #39) |
@@ -847,7 +847,7 @@ orchestrator/worker/reviewer, diamond, and longer-cycle) are translated in
 | Telemetry host callback | `HostCallback` carries `"telemetry"` for an adapter that threw while a commit was published | excluded with telemetry: the port's exhaustive host-callback set has no `telemetry` member (ADR 0003) |
 | pi-schema builders | `obj()`, `num()`, and `Static<T>` type a tool's `parameters` and `structuredOutputSchema` | excluded; parameters stay plain JSON Schema dicts validated by the `schema` extra, so there is no builder DSL to port and no static type to produce (ADR 0003) |
 | Object schemas closed by default | `obj(properties, options)` emits `...(open === true ? {} : { additionalProperties: false })` (`packages/schema/src/builders.ts:197`), and every built-in tool passes `{ open: true }`; an emitted schema therefore carries the keyword only where it is closed, and never for a built-in | with no builder to write the keyword, `pi_durable.harness.validation` compiles an object that names `properties` or `required` and leaves `additionalProperties` unwritten as closed, and reads `additionalProperties: true` as the data spelling of `{ open: true }` (`is_closed_by_default`); an object naming neither constrains no property name, so it stays open. The open spelling is an authoring option rather than part of the interface a host is told, so `without_open_marker` strips it deep at the one boundary a schema leaves the port, `to_tool_declaration` -- a `false` is never stripped, and a keyword holding a subschema is kept -- so an emitted built-in schema is literally the object upstream's builder emitted, not merely equal to it after normalisation |
-| Attached-host storage | `StoreStorage` on Chord v2's store (`./storage/store`) | excluded; no Chord host to attach to (ADR 0003). The optional `publishing()` scope is ported on the `Storage` protocol |
+| Attached-host storage | `StoreStorage` on Chord v2's store (`./storage/store`) | excluded; no Chord host to attach to (ADR 0003). The optional `publishing()` scope is ported as the companion `PublishingStorage` protocol |
 | pi-ai client identity | `HarnessOptions.identity` and `DEFAULT_HARNESS_IDENTITY` on every model request | excluded; the provider adapters keep their own attribution headers (ADR 0002) |
 | IndexedDB and `test-workers` | `IndexedDbStorage` and the Workers suites | excluded with the browser and Cloudflare backends (ADR 0002) |
 | Windows support | supported | unsupported |

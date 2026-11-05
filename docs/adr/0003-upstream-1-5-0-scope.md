@@ -37,8 +37,10 @@ Four things stay out of scope.
   actually delegates — `ChordStore.commitSeries` and the store's outbox — is Chord's own contract.
   Porting it would port a host rather than a backend, and its suite would test an adapter that could
   never be attached. `excluded`. The optional `publishing(publish, context)` scope it exists to serve
-  is a `Storage` protocol member and stays: it is the seam through which a host that owns a batch runs
-  each commit's publication, and the port's own backends are tested against its absence.
+  is ported and stays: it is the seam through which a host that owns a batch runs each commit's
+  publication. A Python protocol has no optional member, so the scope is the companion
+  `PublishingStorage` protocol rather than a `Storage` member, and the port's own backends are tested
+  against its absence.
 - **Any pi-schema builder analogue.** 1.5.0 types `ToolRegistration.parameters` and
   `structuredOutputSchema` with `@earendil-works/pi-schema`, whose builders (`obj()`, `num()`,
   `{ open: true }`) are a DSL for the compile-time `Static<T>` type of the parsed arguments. Python

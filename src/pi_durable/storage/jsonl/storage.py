@@ -27,6 +27,8 @@ from ...ids import (
     seq_from_number,
 )
 from ...types import (
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
@@ -276,6 +278,9 @@ def _parse_sidecar_record(text: str, file: str, line: int) -> dict[str, Any]:
 class JsonlStorage:
     """Portable JSONL implementation of the storage contract."""
 
+    # No ``publishing`` member at all (see ``PublishingStorage``): the append of a group is its own
+    # step and the publication is not part of it, so the Session publishes directly (ADR 0003).
+
     def __init__(
         self,
         fs: FileSystem,
@@ -341,6 +346,85 @@ class JsonlStorage:
         self._adopt_sidecar_state(prepared.writes)
         await self._reclaim_sidecars(reclamations, context)
         return seq
+
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        """Store ``batches`` as one call: every sidecar appended, then all markers in one write.
+
+        Each batch is prepared against the state the batches before it left, so the first batch
+        refused leaves the ones before it stored and writes nothing of its own. A batch applies in
+        memory before the file has it, so a failure of the file after one applied poisons the storage
+        rather than leaving it serving memory the file never got.
+        """
+
+        self._assert_usable()
+        seqs: list[Seq] = []
+        encoded: list[_EncodedCommit] = []
+        reclamations: dict[str, str] = {}
+        refused: list[BaseException] = []
+        try:
+            for writes in batches:
+                try:
+                    prepared = self._memory.prepare_commit(writes)
+                except Exception as error:
+                    refused.append(error)
+                    break
+                commit = self._encode_commit(prepared.seq, prepared.writes)
+                # A sidecar an earlier batch replaces keeps what the later ones append,
+                # unless they replace it again.
+                for file, content in commit.sidecars.items():
+                    replacement = reclamations.get(file)
+                    if replacement is not None:
+                        reclamations[file] = replacement + content
+                reclamations.update(self._plan_reclamations(prepared.writes, commit))
+                seqs.append(prepared.apply())
+                self._adopt_sidecar_state(prepared.writes)
+                encoded.append(commit)
+            if encoded:
+                # Memory runs ahead of the file for the whole group. Upstream holds reads off it
+                # until the append settles (its ``readable()``); the port's reads are served from
+                # memory that no concurrent batch call is mid-way through, and the shared
+                # conformance pass that pins this for both backends is #40's.
+                await self._append(encoded, context)
+        except Exception as error:
+            if not seqs:
+                raise
+            raise self._poison(error) from error
+        # The markers are appended: the batches are durable. Reclaiming sidecars comes after.
+        for index, seq in enumerate(seqs):
+            receive(index, seq)
+        await self._reclaim_sidecars(reclamations, context)
+        if refused:
+            return {"stored": len(seqs), "refused": refused[0]}
+        return {"stored": len(seqs)}
+
+    async def _append(self, commits: Sequence[_EncodedCommit], context: Context) -> None:
+        """Append the sidecar records of ``commits``, fsynced, then their markers in one write."""
+
+        contents: dict[str, str] = {}
+        for commit in commits:
+            for file, content in commit.sidecars.items():
+                contents[file] = contents.get(file, "") + content
+        paths = {
+            file: await self._resolve_file(file, context) for file, _content in contents.items()
+        }
+        for file, content in contents.items():
+            result = await self._fs.append_file(paths[file], content, context)
+            if isinstance(result, Err):
+                raise _error_from_file(f"append to {file}", result.error)
+        if self._fsync:
+            for file in contents:
+                result = await self._fs.flush_file(paths[file], context)
+                if isinstance(result, Err):
+                    raise _error_from_file(f"flush of {file}", result.error)
+        markers = "".join(commit.marker for commit in commits)
+        marker = await self._fs.append_file(self._main_path, markers, context)
+        if isinstance(marker, Err):
+            raise _error_from_file(f"append to {MAIN_FILE}", marker.error)
 
     async def mint_id(self) -> int:
         return await self._store.mint_id()

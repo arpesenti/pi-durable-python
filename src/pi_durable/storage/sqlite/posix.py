@@ -115,6 +115,12 @@ class _PosixSqliteExecutor:
 
         return self._run(execute)
 
+    def run_counted(self, sql: str, *params: SqliteValue) -> asyncio.Future[int]:
+        def execute() -> int:
+            return self._statement(sql).execute(sql, params).rowcount
+
+        return self._run(execute)
+
     def get(self, sql: str, *params: SqliteValue) -> asyncio.Future[dict[str, Any] | None]:
         def execute() -> dict[str, Any] | None:
             cursor = self._statement(sql)

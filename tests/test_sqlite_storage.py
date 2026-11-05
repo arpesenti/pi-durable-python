@@ -90,6 +90,17 @@ class ReopeningStorage:
             await self._current.close(context)
             self._current = await open_posix_sqlite_storage(str(self._path))
 
+    async def commit_batches(
+        self, batches: Any, receive: Any, commit_context: Context
+    ) -> Any:
+        if self._closed:
+            return await self._current.commit_batches(batches, receive, commit_context)
+        try:
+            return await self._current.commit_batches(batches, receive, commit_context)
+        finally:
+            await self._current.close(context)
+            self._current = await open_posix_sqlite_storage(str(self._path))
+
     async def mint_id(self) -> int:
         return await self._current.mint_id()
 

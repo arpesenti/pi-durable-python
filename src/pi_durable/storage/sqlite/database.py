@@ -31,6 +31,9 @@ class SqliteExecutor(Protocol):
     def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
         """Run one statement with positional bindings."""
 
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        """Run one statement with positional bindings and return the rows it changed."""
+
     def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
         """Return the first row of one statement, or ``None``."""
 

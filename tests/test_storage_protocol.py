@@ -12,6 +12,8 @@ from pi_durable.ids import (
     TaskId,
 )
 from pi_durable.types import (
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
@@ -41,6 +43,17 @@ class FakeStorage:
     async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
         assert context is BACKGROUND_CONTEXT
         return Seq(1)
+
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        assert context is BACKGROUND_CONTEXT
+        for index in range(len(batches)):
+            receive(index, Seq(index + 1))
+        return {"stored": len(batches)}
 
     async def mint_id(self) -> ConversationId:
         return ConversationId(2)

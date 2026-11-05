@@ -1066,6 +1066,44 @@ class EntryLookup(TypedDict):
 # ── Storage protocol ────────────────────────────────────────────────────────
 
 
+class CommitResult(TypedDict):
+    """What one :meth:`Storage.commit_batches` call stored: the durable batch count, and the
+    refusal when a batch was refused.
+
+    ``refused`` is the error Durable's own checks raised for the first batch they refused; the
+    batches before it are durable and it, and every batch after it, is not. It is a resolved
+    outcome, unlike a database or driver error, which rejects the call.
+    """
+
+    stored: int
+    refused: NotRequired[BaseException]
+
+
+CommitReceipt: TypeAlias = Callable[[int, Seq], None]
+"""One durability receipt: ``receive(index, seq)`` per stored batch, in order, before the call settles."""
+
+CommitPublicationScope: TypeAlias = Callable[[Callable[[], None], Context], None]
+"""A storage's own scope for one commit's publication: it runs ``publish``, exactly once, inside it."""
+
+
+@runtime_checkable
+class PublishingStorage(Protocol):
+    """The optional publication scope a :class:`Storage` may carry, as one companion protocol.
+
+    Upstream declares ``publishing`` as an optional member of ``Storage``; a Python protocol has no
+    optional member, so it lives here instead and the Session asks for it with ``isinstance`` rather
+    than requiring it. A storage that owns a batch -- upstream's attached-host
+    store, which ADR 0003 excludes -- takes each commit's publication inside that batch, so what the
+    publication marks lands together with what the commit stored. It runs ``publish`` exactly once,
+    now or soon after; the Session publishes the next commit only once it ran, and reports and
+    publishes directly when the scope itself throws. Every bundled backend omits it, which is what
+    the Session publishes directly against.
+    """
+
+    def publishing(self, publish: Callable[[], None], context: Context) -> None:
+        """Run ``publish`` -- one stored commit's publication -- inside this storage's own scope."""
+
+
 @runtime_checkable
 class Storage(Protocol):
     """Atomic persistence boundary for Session records.
@@ -1078,18 +1116,46 @@ class Storage(Protocol):
     An error a method throws is final: it fails the Session, which nothing retries, so retry
     transient failures inside the method. Two errors of a read fail only that read: a
     :class:`~pi_durable.errors.StorageRequestError` for an invalid request, and a rejection
-    because its caller's context was aborted. Any error from :meth:`commit` or :meth:`mint_id`
-    is fatal.
+    because its caller's context was aborted. Any error from :meth:`commit`,
+    :meth:`commit_batches` or :meth:`mint_id` is fatal.
+
+    The optional publication scope is not a member here: see :class:`PublishingStorage`.
     """
 
     async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        """Atomically persist one batch and return its sequence."""
+        """Atomically persist one batch and return its sequence.
+
+        The single-batch form, kept beside :meth:`commit_batches` while backends gain the batched
+        call; :class:`pi_durable.testing.commit_writes` is the sanctioned way to seed a storage.
+        """
+
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        """Persist ``batches`` in order, each as one atomic commit with its own sequence.
+
+        Each batch is checked against the state the batches before it left, in as few round trips
+        as the backend can make. Every batch has at least one write. The call stops at the first
+        batch Durable's own rules refuse -- global IDs, document actions, copy resolution: the
+        batches before it are durable, it and the batches after it are not -- and resolves with
+        their number in ``stored`` and the refusal in ``refused``. Any other failure (a driver or
+        I/O error, a failed ``COMMIT``) rejects the whole call and stores nothing the backend could
+        roll back, and the receipts already made stand.
+
+        ``receive(index, seq)`` runs once per stored batch, in order, once all of them are durable
+        and before the next call starts; it is a durability receipt, not publication, and the
+        Session publishes later.
+        """
 
     async def mint_id(self) -> int:
-        """Return a fresh ID greater than every ID minted or stored before, also across reopen.
+        """Return a fresh ID above every ID minted since this storage was opened and every ID stored.
 
-        The value is unbranded; a caller applies :func:`~pi_durable.ids.id_from_number` at its
-        own trusted boundary.
+        The contract holds also across reopen: scans order by ID as creation order, and the Harness
+        relies on it. The value is unbranded; a caller applies
+        :func:`~pi_durable.ids.id_from_number` at its own trusted boundary.
         """
 
     async def conversation(self, id: ConversationId, context: Context) -> ConversationRecord | None:

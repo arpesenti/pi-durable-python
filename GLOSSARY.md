@@ -102,3 +102,16 @@ A failure that does not fail the calling operation, or the Session's own failure
 `on_report(report)` as one `Report`: the fields of a `ReportInfo` tagged by `kind` — what happened,
 from `storage_failed` to `listener_error` — beside the `error` itself.
 _Avoid_: log, error event, notification, report info argument
+
+**Commit batch**:
+One group of writes a storage stores as one atomic commit with its own sequence. One
+`Storage.commit_batches()` call stores a group of them in order, each checked against the state the
+earlier ones left, and stops at the first batch its own rules refuse: those before it stand, it and
+every batch after it do not.
+_Avoid_: transaction, chunk, group of writes
+
+**Durability receipt**:
+The `receive(index, seq)` call a storage makes once per stored batch, in order, after all of them
+are durable and before the next call settles. It says the batch is stored, not that it is
+published; the Session publishes later.
+_Avoid_: publication, acknowledgement, commit callback

@@ -45,6 +45,9 @@ class ControlledSettlementDatabase:
     def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
         return self._delegate.run(sql, *params)
 
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._delegate.run_counted(sql, *params)
+
     def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
         return self._delegate.get(sql, *params)
 

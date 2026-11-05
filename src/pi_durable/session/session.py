@@ -28,6 +28,9 @@ from ..timers import host_timers
 from ..types import (
     CommitChange,
     CommitPublication,
+    CommitPublicationScope,
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
@@ -41,6 +44,7 @@ from ..types import (
     EntryRecord,
     EntryWithHead,
     Page,
+    PublishingStorage,
     SessionEnd,
     SessionEndInput,
     Storage,
@@ -378,9 +382,39 @@ class SessionImpl:
                 raise
             for document in documents:
                 self._touch_document(_record_address_id(document["record"]))
-            self._publish(seq, writes, documents, context)
+            self._publishing(partial(self._publish, seq, writes, documents, context), context)
             self._sweep_documents()
             return result
+
+    def _publishing(self, publish: Callable[[], None], context: Context) -> None:
+        """Run one commit's publication inside the storage's own scope, or directly without one.
+
+        The optional ``publishing`` member (see
+        :class:`~pi_durable.types.PublishingStorage`) lets a storage that owns a batch take each
+        publication inside that batch, so what the publication marks lands together. No bundled
+        backend has one, so the Session normally publishes directly. A storage that throws instead
+        of running the publication is reported and the publication runs anyway: the commit is
+        stored, so it must be published.
+        """
+
+        scope = self._storage.publishing
+        if scope is None:
+            publish()
+            return
+        ran = False
+
+        def once() -> None:
+            nonlocal ran
+            if ran:
+                return
+            ran = True
+            publish()
+
+        try:
+            scope(once, context)
+        except BaseException as error:
+            self.report(error, LISTENER)
+            once()
 
     async def read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
         self.assert_usable()
@@ -984,6 +1018,12 @@ class GuardedStorage:
         if self._session.failure is not None:
             raise SessionFailed(self._session.failure)
 
+    @property
+    def publishing(self) -> CommitPublicationScope | None:
+        """The backend's own scope for a publication, when it carries one; not a call to guard."""
+
+        return self._storage.publishing if isinstance(self._storage, PublishingStorage) else None
+
     async def _call(self, read: Context | None, run: Callable[[], Awaitable[Any]]) -> Any:
         self._assert_healthy()
         if self._closing:
@@ -1010,6 +1050,16 @@ class GuardedStorage:
 
     async def commit(self, writes: Any, context: Context) -> Seq:
         return cast(Seq, await self._call(None, lambda: self._storage.commit(writes, context)))
+
+    async def commit_batches(
+        self, batches: Any, receive: CommitReceipt, context: Context
+    ) -> CommitResult:
+        return cast(
+            CommitResult,
+            await self._call(
+                None, lambda: self._storage.commit_batches(batches, receive, context)
+            ),
+        )
 
     async def mint_id(self) -> int:
         return cast(int, await self._call(None, lambda: self._storage.mint_id()))
