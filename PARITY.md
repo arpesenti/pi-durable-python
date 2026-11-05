@@ -893,7 +893,7 @@ cases skip by design, and every remaining deviation is explicit.
 - [x] 9. v1.4.0 sync: durable sleeps, timers and wakeups, the crash-loop guard, typed reports,
   host inputs as functions, `afterFailedRun`, per-model compaction settings, required
   `checkpointWhen`, and the SQLite schema-version-2 migration.
-- [ ] 10. v1.4.0 release (separate ticket, as `Release 1.3.0` was).
+- [x] 10. v1.4.0 release (separate ticket, as `Release 1.3.0` was).
 
 ## Updating this file
 
