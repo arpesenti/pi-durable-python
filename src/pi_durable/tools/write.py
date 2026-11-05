@@ -31,6 +31,8 @@ WRITE_SCHEMA: dict[str, Any] = {
         "content": {"type": "string", "description": "Content to write to the file"},
     },
     "required": ["path", "content"],
+    # Opened, as upstream's write is: `obj({...}, {open: true})` (src/tools/write.ts).
+    "additionalProperties": True,
 }
 
 

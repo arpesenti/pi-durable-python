@@ -58,6 +58,8 @@ REPLACE_EDIT_SCHEMA: dict[str, Any] = {
         "newText": {"type": "string", "description": "Replacement text for this targeted edit."},
     },
     "required": ["oldText", "newText"],
+    # Opened, as upstream's `replaceEditSchema` is: `obj({...}, {open: true})` (src/tools/edit.ts).
+    "additionalProperties": True,
 }
 
 EDIT_SCHEMA: dict[str, Any] = {
@@ -78,6 +80,8 @@ EDIT_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["path", "edits"],
+    # Opened, as upstream's `editSchema` is: `obj({...}, {open: true})`.
+    "additionalProperties": True,
 }
 
 

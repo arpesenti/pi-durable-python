@@ -18,6 +18,7 @@ from tool_support import DONE, add_tool, calls, chat_setup, results
 
 from pi_durable import AgentDoc, MemoryStorage
 from pi_durable.harness.define import define_extension, define_tool
+from pi_durable.harness.prompt import to_tool_declaration
 from pi_durable.harness.types import ToolRegistration
 from pi_durable.search import SearchDocument, rank_documents, tokenize
 from pi_durable.tool_search import (
@@ -97,7 +98,7 @@ def test_exposes_the_coding_agents_tool_search_definition() -> None:
     registration = create_tool_search_tool()
     assert registration.name == TOOL_SEARCH_TOOL_NAME
     assert registration.description == DESCRIPTION
-    assert registration.parameters == {
+    parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
             "query": {
@@ -111,6 +112,10 @@ def test_exposes_the_coding_agents_tool_search_definition() -> None:
         },
         "required": ["query"],
     }
+    # The authored schema carries the port's spelling of upstream's `{open: true}`; see PARITY.md.
+    assert registration.parameters == {**parameters, "additionalProperties": True}
+    # What a host is told drops it: all upstream's `obj(..., {open: true})` ever emitted.
+    assert to_tool_declaration(registration)["parameters"] == parameters
     assert registration.callers == ["model"]
     assert registration.replay == "safe"
     extension = create_tool_search_extension()

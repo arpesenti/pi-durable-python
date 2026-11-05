@@ -495,12 +495,12 @@ Coding tools; PowerShell is excluded.
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createBashTool` | value | `create_bash_tool` | test_tools.py | tested |
+| `createBashTool` | value | `create_bash_tool` | test_tools.py, test_harness_tool_schemas.py | tested |
 | `createPowerShellTool` | value | `create_power_shell_tool` | — | excluded |
-| `createEditTool` | value | `create_edit_tool` | test_tools.py | tested |
+| `createEditTool` | value | `create_edit_tool` | test_tools.py, test_harness_tool_schemas.py | tested |
 | `DEFAULT_IMAGE_LIMITS` | value | `DEFAULT_IMAGE_LIMITS` | test_tools.py | tested |
-| `createReadTool` | value | `create_read_tool` | test_tools.py, test_tools_read_differential.py | tested |
-| `createWriteTool` | value | `create_write_tool` | test_tools.py | tested |
+| `createReadTool` | value | `create_read_tool` | test_tools.py, test_tools_read_differential.py, test_harness_tool_schemas.py | tested |
+| `createWriteTool` | value | `create_write_tool` | test_tools.py, test_harness_tool_schemas.py | tested |
 | `createCodingTools` | value | `create_coding_tools` | test_tools.py | tested |
 | `CodingTools` | value | `CodingTools` | test_tools.py | tested |
 | `BashExecution` | type | `BashExecution` | test_tools.py | tested |
@@ -803,10 +803,20 @@ The upstream `harness-structured-output` suite is translated in
 `test_harness_structured_output.py`: schema-less output shapes, bounds without rendered
 diagnostics, the stored null, validated schema output, every broken-output path for callers and for
 the model's calls, Harness-written errors, the schema tool's error-text diagnostic, `afterTool`
-replacement, and `bash`'s structured output. `harness-structured` is the structured-concurrency
-suite already translated with #9 and #10, and has no nested-call cases; its seven wait-graph
-cases (two-task, held-owner, two-hold, background, orchestrator/worker/reviewer, diamond, and
-longer-cycle) are translated in `test_harness_structured_cycles.py`.
+replacement, and `bash`'s structured output. Its wording is asserted on its own in
+`test_harness_structured_output_wording.py`: the three `structuredOutputError` messages quoted from
+upstream, the `root` path, the dotted path a JSON Pointer becomes through its `~1`/`~0` unescaping,
+the `invalid` fallback, and the compile-time refusal of a schema whose `$ref` names nothing.
+`test_harness_tool_schemas.py` holds the built-in parameter and structured-output schemas as
+`@earendil-works/pi-schema`'s builders emit them, the accepting call for each object upstream opens
+and the rejecting call for a host's object that leaves `additionalProperties` unwritten, and the
+translated `tool-args-typebox` case: a tool whose `parameters` is a plain JSON Schema object reaches
+`prepare_arguments` and `execute` as the value that schema types.
+
+`harness-structured` is the structured-concurrency suite already translated with #9 and #10, and has
+no nested-call cases; its seven wait-graph cases (two-task, held-owner, two-hold, background,
+orchestrator/worker/reviewer, diamond, and longer-cycle) are translated in
+`test_harness_structured_cycles.py`.
 
 ## Allowed deviations
 
@@ -817,8 +827,8 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | Tool registration fields | `Tool` plus execution fields on `ToolRegistration`, with `constrainedSampling` | `ToolRegistration.constrained_sampling`, `execution_mode`, `structured_output_schema`, `output_limits`, and `prepare_arguments` on the Python-facing registration; declarations persist `constrainedSampling` |
 | Tool result and control fields | `structuredOutput`, `isError`, `addTools` | camelCase in a returned result, a stored task outcome, and an entry's message, because they are wire shapes; the registration's own fields are snake_case |
 | Tool execution api | `retainedOutput()`, `outputWindow`, camelCase window fields | `retained_output()`, `output_window` with snake_case fields (`max_bytes`, `max_lines`, `min_interval_ms`, `bytes_per_second`); `details()` registers its update synchronously and returns an awaitable |
-| Tool argument validation | pi-ai TypeBox `validateToolArguments` | a JSON Schema validator in `pi_durable.harness.validation` with pi-ai's primitive coercion and optional-null removal; the `schema` extra is not needed for argument validation |
-| Structured output validation | TypeBox `Compile(schema).Check` | `jsonschema`'s `Draft202012Validator`, imported lazily, so the core package keeps no runtime dependencies; the `schema` extra is required only by a tool that declares `structured_output_schema` |
+| Tool argument validation | pi-ai `validateToolArguments`, which compiles the tool's schema with `@earendil-works/pi-schema` (`coerce: true`, `unresolvedRefs: "reject"`) | a JSON Schema validator in `pi_durable.harness.validation` with pi-ai's primitive coercion and optional-null removal; the `schema` extra is not needed for argument validation |
+| Structured output validation | `@earendil-works/pi-schema`'s `compile(schema, { formats, unresolvedRefs: "reject" })`, whose first error `src/harness/tool.ts:777-801` `structuredOutputError` wraps | `jsonschema`'s `Draft202012Validator` with `referencing`, both imported lazily, so the core package keeps no runtime dependencies; the `schema` extra is required only by a tool that declares `structured_output_schema`. pi-schema is a TypeScript package that cannot be imported here, and `jsonschema` is the mature validator for this baseline's draft 2020-12, so it is what the port substitutes -- and the first error it reports is the substitute's own, both its words and the JSON Pointer it names (upstream's explainer reports an undeclared property at the property's own path as `extra: unknown field`, `packages/schema/src/explain.ts:201`, where `jsonschema` reports it at the guarded object). Everything around that substitution is upstream's: the three `structuredOutputError` messages, the `formatValidationPath` dotted path with its `~1`/`~0` unescaping, the `root` path, the `invalid` fallback, and one compiled validator per schema object (a bounded LRU keyed by its identity, Python having no `WeakMap`). Where they part company is a `$ref` that names nothing: `unresolvedRefs: "reject"` resolves it to `false` so only values at its place fail, while the port refuses the whole schema where it is compiled (`ToolSchemaError`, in upstream's own `unresolved reference <ref>` words), because `jsonschema` would otherwise discover the dangling reference lazily while a value was checked |
 | Bounded output and progress | Chord `OutputBuffer` and `Progress` | `pi_durable.harness.output` with the same windows and pacing; the bounded overlap search lives in `pi_durable.delta` (`overlap_strings`, 64 KiB) |
 | Class and type names | PascalCase | PascalCase |
 | Persisted JSON fields | camelCase | camelCase |
@@ -836,6 +846,7 @@ longer-cycle) are translated in `test_harness_structured_cycles.py`.
 | Telemetry | `HarnessOptions.telemetry` and `DURABLE_TELEMETRY_SCHEMA` | excluded; see ADR 0002 |
 | Telemetry host callback | `HostCallback` carries `"telemetry"` for an adapter that threw while a commit was published | excluded with telemetry: the port's exhaustive host-callback set has no `telemetry` member (ADR 0003) |
 | pi-schema builders | `obj()`, `num()`, and `Static<T>` type a tool's `parameters` and `structuredOutputSchema` | excluded; parameters stay plain JSON Schema dicts validated by the `schema` extra, so there is no builder DSL to port and no static type to produce (ADR 0003) |
+| Object schemas closed by default | `obj(properties, options)` emits `...(open === true ? {} : { additionalProperties: false })` (`packages/schema/src/builders.ts:197`), and every built-in tool passes `{ open: true }`; an emitted schema therefore carries the keyword only where it is closed, and never for a built-in | with no builder to write the keyword, `pi_durable.harness.validation` compiles an object that names `properties` or `required` and leaves `additionalProperties` unwritten as closed, and reads `additionalProperties: true` as the data spelling of `{ open: true }` (`is_closed_by_default`); an object naming neither constrains no property name, so it stays open. The open spelling is an authoring option rather than part of the interface a host is told, so `without_open_marker` strips it deep at the one boundary a schema leaves the port, `to_tool_declaration` -- a `false` is never stripped, and a keyword holding a subschema is kept -- so an emitted built-in schema is literally the object upstream's builder emitted, not merely equal to it after normalisation |
 | Attached-host storage | `StoreStorage` on Chord v2's store (`./storage/store`) | excluded; no Chord host to attach to (ADR 0003). The optional `publishing()` scope is ported on the `Storage` protocol |
 | pi-ai client identity | `HarnessOptions.identity` and `DEFAULT_HARNESS_IDENTITY` on every model request | excluded; the provider adapters keep their own attribution headers (ADR 0002) |
 | IndexedDB and `test-workers` | `IndexedDbStorage` and the Workers suites | excluded with the browser and Cloudflare backends (ADR 0002) |
@@ -905,7 +916,7 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | Session clock, guarded-storage accessor, and before-close join hook | `pi_durable.session.session` | tested (`test_harness_lifecycle.py`, `test_harness_storage_failure.py`) |
 | Stdlib SQLite database adapter, file entrypoint, and connection options | `pi_durable.storage.sqlite.posix` | tested (`test_sqlite_facade.py`, `test_sqlite_storage.py`) |
 | Bounded output windows and adaptive progress commits | `pi_durable.harness.output` | tested (`test_harness_output.py`, `test_harness_tools.py`, `test_harness_live_deltas.py`) |
-| Tool argument repair, coercion, and validation | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`) |
+| Tool argument repair, coercion, and validation; object schemas closed by default; the structured-output validator and upstream's wording | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`, `test_harness_structured_output.py`, `test_harness_structured_output_wording.py`, `test_harness_tool_schemas.py`) |
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
 | BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`) |
 | Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |

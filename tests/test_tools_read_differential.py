@@ -91,8 +91,10 @@ def reference_read(
 
     mime_type = detect_supported_image_mime_type(bytes_)
     if mime_type is not None:
+        block = {"type": "image", "data": to_base64(bytes_), "mimeType": mime_type}
         return {
-            "output": [{"type": "image", "data": to_base64(bytes_), "mimeType": mime_type}],
+            "output": [block],
+            "structuredOutput": block,
             "diagnostics": [
                 {
                     "severity": "info",
@@ -187,6 +189,7 @@ def reference_read(
         )
     result: dict[str, Any] = {
         "output": [] if output_text == "" else [{"type": "text", "text": output_text}],
+        "structuredOutput": output_text,
         "diagnostics": diagnostics,
     }
     if details is not None:

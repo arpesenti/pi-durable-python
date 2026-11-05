@@ -18,6 +18,7 @@ from ..json import JsonValue, copy_json
 from ..providers.transcript import current_tools as replay_tools
 from ..types import ContextEdit, MessageRecord, TypedEntryDraft
 from .types import ContextView, PromptInput, PromptSection, ToolRegistration
+from .validation import without_open_marker
 
 
 class ToolDeclaration(TypedDict):
@@ -118,7 +119,9 @@ def to_tool_declaration(
     declaration: dict[str, Any] = {
         "name": name,
         "description": description,
-        "parameters": copy_json(parameters),
+        # What a host is told about the tool's shape: the port's ``{open: true}`` spelling stays
+        # with the authored schema, so the declaration holds what a builder would have emitted.
+        "parameters": without_open_marker(parameters),
     }
     if sampling is not None:
         declaration["constrainedSampling"] = copy_json(sampling)

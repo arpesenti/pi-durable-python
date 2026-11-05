@@ -62,6 +62,10 @@ BASH_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["command"],
+    # Upstream builds this one `obj(body, {open: true})` (src/tools/bash.ts): an argument the
+    # schema does not name stays accepted. An authored object that does not open itself is
+    # compiled closed, which is `obj()`'s own default. See PARITY.md Allowed deviations.
+    "additionalProperties": True,
 }
 
 SHELL_STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -82,6 +86,8 @@ SHELL_STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
         "exitCode": {"type": "number"},
     },
     "required": ["output", "truncated", "exitCode"],
+    # Opened upstream too: `obj({...}, {open: true})`.
+    "additionalProperties": True,
 }
 
 

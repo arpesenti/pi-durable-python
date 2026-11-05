@@ -206,7 +206,7 @@ async def test_reports_tool_start_output_appends_and_the_result_entry() -> None:
     setup.faux.set_responses(
         [
             assistant_message(
-                [{"type": "toolCall", "id": "c1", "name": "print", "arguments": {"n": 1}}],
+                [{"type": "toolCall", "id": "c1", "name": "print", "arguments": {"text": "print"}}],
                 stop_reason="toolUse",
             ),
             DONE,
@@ -245,7 +245,7 @@ async def test_reports_tool_start_output_appends_and_the_result_entry() -> None:
     assert first["toolCallId"] == "c1"
     assert first["toolName"] == "print"
     assert isinstance(first["taskId"], int)
-    assert first["args"] == {"n": 1}
+    assert first["args"] == {"text": "print"}
     end = execution[-1]
     assert end["type"] == "tool_execution_end"
     assert end["toolCallId"] == "c1"
