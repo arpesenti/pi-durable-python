@@ -779,12 +779,14 @@ async def test_ends_a_call_that_never_runs_and_a_tool_aborted_with_its_generatio
         for event in events()
     ]
     ghost_end = round_events.index("tool_execution_end")
-    assert round_events[ghost_end - 1:ghost_end + 3] == [
-        "end:pi.assistant",
+    # The call the request did not offer has its own task, so its result lands in that task's commit:
+    # the answer's usage is stored before it, not in the round's own commit.
+    assert round_events[ghost_end:ghost_end + 3] == [
         "tool_execution_end",
         "start:toolResult",
         "end:pi.tool-result",
     ]
+    assert round_events.index("usage_changed") < ghost_end
     tool_events = [
         event for event in events() if event["type"].startswith("tool_execution")
     ]

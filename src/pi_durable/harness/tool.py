@@ -74,6 +74,8 @@ class ModelToolTaskInput(TypedDict):
     kind: Literal["model"]
     assistant: EntryId
     callId: str
+    unoffered: NotRequired[Literal[True]]
+    """The request did not offer this tool: the call settles ``tool_unavailable`` unresolved."""
 
 
 class NestedToolTaskInput(TypedDict):
@@ -170,7 +172,8 @@ Content = list[JsonValue]
 async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     input = cast(ToolTaskInput, task["input"])
     call = await read_call(runtime, input, context)
-    tool = await resolve_tool(runtime, input, call["name"], context)
+    # An unoffered call never resolves its name, so it cannot run even when the agent has the tool.
+    tool = None if _is_unoffered(input) else await resolve_tool(runtime, input, call["name"], context)
     if tool is None:
         message = f"Tool {call['name']} is not available"
         await settle(
@@ -284,8 +287,11 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     input = cast(ToolTaskInput, task["input"])
     call = await read_call(runtime, input, context)
     # Abandoned after a restart (``TaskOptions.abandonOnRestart``): say whether the call may have run.
+    # An unoffered call could not run in any case, and its result says so.
     checkpoint = task["state"].get("checkpoint") or {}
-    if task.get("abortReason") != "restart":
+    if _is_unoffered(input):
+        code, message = "tool_unavailable", f"Tool {call['name']} is not available"
+    elif task.get("abortReason") != "restart":
         code, message = "aborted", f"Tool {call['name']} was aborted"
     elif checkpoint.get("phase") == "execute":
         code = "interrupted"
@@ -304,11 +310,22 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     )
 
 
-def _migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
-    """Version 1 had only model-issued calls."""
+def _is_unoffered(input: ToolTaskInput) -> bool:
+    """Whether ``input`` is a model-issued call to a tool its request did not offer."""
 
+    return input["kind"] == "model" and input.get("unoffered") is True
+
+
+def _migrate(input: Any, checkpoint: Any, version: int) -> dict[str, Any]:
+    """Carry a stored ``pi.tool`` input forward to version 3.
+
+    Version 1 had only model-issued calls, without ``kind``; version 3 added ``unoffered``, which a
+    version 2 input never carries, so it stays as it is.
+    """
+
+    carried = {"kind": "model", **cast(Mapping[str, Any], input)} if version == 1 else input
     return {
-        "input": {"kind": "model", **cast(Mapping[str, Any], input)},
+        "input": carried,
         "checkpoint": checkpoint,
     }
 
@@ -316,7 +333,7 @@ def _migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
 ToolTask = define_task(
     {
         "name": TOOL_TASK_KIND,
-        "version": 2,
+        "version": 3,
         "initial": lambda _input: {"phase": "call"},
         "migrate": _migrate,
         "phases": {"call": _call_phase, "execute": _execute_phase},

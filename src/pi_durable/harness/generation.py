@@ -340,7 +340,17 @@ async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None
 
     async def start(tx: Transaction) -> dict[str, Any]:
         live = await tx.doc(LiveDoc, runtime.conversation_id)
-        task_id = await create_tool_task(tx, runtime, assistant, call_id)
+        unoffered = next(
+            (
+                True
+                for slot in live.get("tools") or ()
+                if slot.get("callId") == call_id
+                and slot.get("taskId") is None
+                and slot.get("unoffered") is True
+            ),
+            None,
+        )
+        task_id = await create_tool_task(tx, runtime, assistant, call_id, unoffered)
         for slot in live.get("tools") or ():
             if slot.get("callId") == call_id and slot.get("taskId") is None:
                 slot["taskId"] = task_id
@@ -370,7 +380,8 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
                 # A provider call such as cancelling a deferred response is a host callback.
                 runtime.report(error, {"kind": "host", "callback": "models"})
     conversation_id = runtime.conversation_id
-    # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results.
+    # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results,
+    # unoffered ones ``tool_unavailable``.
     unstarted = (
         await read_calls(runtime, checkpoint["assistant"], checkpoint["pending"], context)
         if checkpoint["phase"] == "tools"
@@ -381,12 +392,24 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
         live = await tx.doc(LiveDoc, conversation_id)
         await convert_partial(tx, live, conversation_id)
         for call in unstarted:
-            message = f"Tool {call['name']} was aborted"
+            # A call its request did not offer could not have run either way.
+            unoffered = next(
+                (
+                    slot.get("unoffered") is True
+                    for slot in live.get("tools") or ()
+                    if slot.get("callId") == call["id"]
+                ),
+                False,
+            )
+            if unoffered:
+                error = harness_error("tool_unavailable", f"Tool {call['name']} is not available")
+            else:
+                error = harness_error("aborted", f"Tool {call['name']} was aborted")
             await append_tool_result(
                 tx,
                 conversation_id,
                 call,
-                harness_error("aborted", message),
+                error,
                 {"timestamp": runtime.now()},
             )
         end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "aborted"})
@@ -395,11 +418,23 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     await runtime.commit(stop, context)
 
 
+def _migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
+    """Carry a stored ``pi.generation`` task forward to version 2.
+
+    Version 2 leaves calls to tools the request did not offer in a sequential round's ``pending``,
+    flagged ``unoffered`` in their slots; a version 1 checkpoint has no such calls, so it is kept as
+    it is.
+    """
+
+    return {"input": input, "checkpoint": checkpoint}
+
+
 GenerationTask = define_task(
     {
         "name": "pi.generation",
-        "version": 1,
+        "version": 2,
         "initial": lambda _input: {"phase": "prepare", "attempt": 1},
+        "migrate": _migrate,
         "phases": {
             "prepare": _prepare_phase,
             "request": _request_phase,
@@ -686,6 +721,11 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             await tx.append_entry(
                 UserEntry, conversation_id, cast(EntryDraft, {"model": [user]})
             )
+            # The continuation starts the run's turn count over: bounding ``onYield`` loops is the
+            # extension's job.
+            run = live.get("run")
+            if run is not None and run["taskId"] == runtime.task_id:
+                run["turns"] = 0
             del live["generation"]
             hand_over(
                 live,
@@ -730,13 +770,24 @@ def _is_sequential(tools: Sequence[Any], name: str) -> bool:
 
 
 async def create_tool_task(
-    tx: Transaction, runtime: Any, assistant: EntryId, call_id: str
+    tx: Transaction,
+    runtime: Any,
+    assistant: EntryId,
+    call_id: str,
+    unoffered: bool | None = None,
 ) -> TaskId:
-    """A tool task for ``call_id``, owned by the generation."""
+    """A tool task for ``call_id``, owned by the generation.
 
+    ``unoffered`` flags a call to a tool the request did not offer: its task settles
+    ``tool_unavailable`` without resolving the name.
+    """
+
+    input: dict[str, Any] = {"kind": "model", "assistant": assistant, "callId": call_id}
+    if unoffered:
+        input["unoffered"] = True
     return await tx.create_task(
         ToolTask,
-        {"kind": "model", "assistant": assistant, "callId": call_id},
+        input,
         {"ownership": {"kind": "task", "taskId": runtime.task_id}},
     )
 
@@ -750,9 +801,10 @@ async def start_tool_round(
 ) -> None:
     """Append the tool-calling answer and start its tool round in one commit.
 
-    A call to a tool the request did not offer gets its ``tool_unavailable`` result here; every other
-    call gets a tool task owned by the generation, only the first one now when the round is
-    sequential. The generation then waits for them in its ``tools`` phase, keeping the run.
+    Every call gets a tool task owned by the generation, in call order, only the first one now when
+    the round is sequential; a call to a tool the request did not offer is flagged, and its task
+    settles ``tool_unavailable``. The generation then waits for them in its ``tools`` phase, keeping
+    the run.
     """
 
     conversation_id = runtime.conversation_id
@@ -774,41 +826,32 @@ async def start_tool_round(
         tool_tasks: list[TaskId] = []
         pending: list[str] = []
         for call in calls:
-            if call["name"] not in offered:
-                unavailable = harness_error("tool_unavailable", f"Tool {call['name']} is not available")
-                result = await append_tool_result(
-                    tx,
-                    conversation_id,
-                    call,
-                    unavailable,
-                    {"timestamp": runtime.now()},
-                )
-                slots.append(
-                    {
-                        "callId": call["id"],
-                        "name": call["name"],
-                        "status": "done",
-                        "entry": result["id"],
-                    }
-                )
-                continue
+            unoffered = call["name"] not in offered
             if sequential and tool_tasks:
                 pending.append(call["id"])
-                slots.append({"callId": call["id"], "name": call["name"], "status": "pending"})
+                slot = {"callId": call["id"], "name": call["name"], "status": "pending"}
+                if unoffered:
+                    slot["unoffered"] = True
+                slots.append(slot)
                 continue
-            task_id = await create_tool_task(tx, runtime, entry["id"], call["id"])
+            task_id = await create_tool_task(tx, runtime, entry["id"], call["id"], unoffered)
             tool_tasks.append(task_id)
-            slots.append(
-                {
-                    "callId": call["id"],
-                    "name": call["name"],
-                    "taskId": task_id,
-                    "status": "pending",
-                }
-            )
+            started = {
+                "callId": call["id"],
+                "name": call["name"],
+                "taskId": task_id,
+                "status": "pending",
+            }
+            if unoffered:
+                started["unoffered"] = True
+            slots.append(started)
         if "generation" in live:
             del live["generation"]
         live["tools"] = slots
+        run = live.get("run")
+        if run is not None and run["taskId"] == runtime.task_id:
+            # A tool round is one turn of the run.
+            run["turns"] += 1
         checkpoint_value: dict[str, Any] = {
             "phase": "tools",
             "assistant": entry["id"],

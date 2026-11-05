@@ -816,7 +816,8 @@ async def test_orphans_a_blocked_run_task_with_full_run_cleanup() -> None:
         definition = GenerationTask.definition
         newer = type(definition)(
             name=definition.name,
-            version=2,
+            # Newer than this process registers, for example after a downgrade.
+            version=definition.version + 1,
             initial=definition.initial,
             phases=definition.phases,
             abort=definition.abort,

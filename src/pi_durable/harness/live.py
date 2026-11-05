@@ -9,7 +9,7 @@ or waits out a retry backoff, and the newest failure stays for a client to show.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from ..documents import define_doc
 from ..errors import error_message
@@ -26,6 +26,8 @@ class RunState(TypedDict):
 
     taskId: TaskId
     inputs: list[SubmissionId]
+    turns: int
+    """Tool rounds this run has taken; the count a turn limit bounds, and that a stored run starts at 0."""
 
 
 class SlotProgress(TypedDict, total=False):
@@ -44,12 +46,13 @@ class SlotProgress(TypedDict, total=False):
 class ToolSlot(SlotProgress):
     """Presentation of one tool call of the current round.
 
-    ``taskId`` is absent for a call not started yet (a sequential round) and for a call its request
-    did not offer, which starts ``done`` with the ``entry`` generation wrote. ``entry`` is absent
-    when the tool task faulted or was orphaned.
+    ``taskId`` is absent for a call not started yet (a sequential round). ``unoffered`` marks a call
+    to a tool its request did not offer: its task settles ``tool_unavailable`` without ever
+    resolving the name. ``entry`` is absent when the tool task faulted or was orphaned.
     """
 
     taskId: NotRequired[TaskId]
+    unoffered: NotRequired[Literal[True]]
     entry: NotRequired[EntryId]
 
 
@@ -76,7 +79,7 @@ class CompactionStatus(TypedDict, total=False):
     """Presentation of one live compaction task (spec section 8.7)."""
 
     taskId: TaskId
-    reason: CompactionReason
+    trigger: CompactionReason
     blocking: bool
     attempt: int
     retry: dict[str, JsonValue]
@@ -86,7 +89,7 @@ class CompactionFailure(TypedDict):
     """The newest compaction that failed since a compaction last produced a summary."""
 
     taskId: TaskId
-    reason: CompactionReason
+    trigger: CompactionReason
     error: str
 
 
@@ -113,14 +116,49 @@ def _checkpoint_when(value: dict[str, Any], _ops: Any, _info: Any) -> bool:
     return True
 
 
+def _rename_reason(value: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of a version 1 compaction status or failure with ``reason`` renamed ``trigger``.
+
+    The keys keep their stored order: a migrated value is compared with one written fresh, and the
+    port's JSON keeps the order its members were set in.
+    """
+
+    return {"trigger" if key == "reason" else key: field for key, field in value.items()}
+
+
+def _migrate(value: Mapping[str, Any], _version: int) -> dict[str, Any]:
+    """Carry a stored version 1 or 2 ``pi.live`` forward to version 3.
+
+    Version 1 named a compaction's trigger ``reason``, in ``compactions`` and ``compactionFailure``;
+    version 2 already names it ``trigger``, so renaming leaves it alone. Versions before ``run.turns``
+    was stored may lack the count: a run in flight across the upgrade counts its turns from 0. An
+    absent member stays absent — a migration never materialises one.
+    """
+
+    migrated = dict(value)
+    run = value.get("run")
+    if run is not None:
+        turns = run.get("turns")
+        counted = turns if isinstance(turns, (int, float)) and not isinstance(turns, bool) else 0
+        migrated["run"] = {**run, "turns": counted}
+    compactions = value.get("compactions")
+    if compactions is not None:
+        migrated["compactions"] = [_rename_reason(status) for status in compactions]
+    failure = value.get("compactionFailure")
+    if failure is not None:
+        migrated["compactionFailure"] = _rename_reason(failure)
+    return migrated
+
+
 LiveDoc = define_doc(
     {
         "kind": "pi.live",
-        "version": 1,
+        "version": 3,
         "scope": "conversation",
         "history": "latest",
         "fork": "initial",
         "initial": lambda: {},
+        "migrate": _migrate,
         "checkpoint_when": _checkpoint_when,
     }
 )
@@ -160,7 +198,7 @@ async def start_run(
         {},
         {"ownership": {"kind": "conversation"}, "conversationId": conversation_id},
     )
-    live["run"] = {"taskId": task_id, "inputs": list(inputs)}
+    live["run"] = {"taskId": task_id, "inputs": list(inputs), "turns": 0}
 
 
 def end_run(
@@ -228,7 +266,7 @@ def fail_compaction_status(live: Any, task_id: TaskId, error: str) -> None:
     if status is not None:
         live["compactionFailure"] = {
             "taskId": status["taskId"],
-            "reason": status["reason"],
+            "trigger": status["trigger"],
             "error": error,
         }
     remove_compaction_status(live, task_id)

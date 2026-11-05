@@ -396,7 +396,7 @@ async def test_migrates_a_version_1_tool_record_and_answers_it_as_model_issued(t
     submission = await opened["harness"].submission(submission_id, context)
     assert (await submission.wait(context))["status"] == "done"
     migrated = await opened["harness"].get_task(task_id, context)
-    assert migrated["version"] == 2
+    assert migrated["version"] == ToolTask.definition.version
     assert migrated["input"]["kind"] == "model"
     [tool_result] = results(await all_entries(opened["root"]))
     assert result_text(tool_result) == (

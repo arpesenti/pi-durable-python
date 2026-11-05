@@ -377,7 +377,7 @@ async def create_compaction(
     )
     add_compaction_status(
         await tx.doc(LiveDoc, conversation_id),
-        {"taskId": task_id, "reason": input["reason"], "blocking": owner is not None, "attempt": 1},
+        {"taskId": task_id, "trigger": input["reason"], "blocking": owner is not None, "attempt": 1},
     )
     return task_id
 

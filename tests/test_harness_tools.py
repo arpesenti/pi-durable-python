@@ -125,7 +125,7 @@ async def test_gives_tools_and_hooks_the_harness_models() -> None:
     await result["harness"].close(context)
 
 
-async def test_answers_calls_to_tools_the_request_did_not_offer_without_a_task() -> None:
+async def test_answers_calls_to_tools_the_request_did_not_offer_through_a_flagged_task() -> None:
     setup = chat_setup()
     add_tool(setup.registry, tool("echo", lambda *_args: {"output": []}))
     result = await run(setup, [calls(["ghost", {}, "c1"], ["echo", {}, "c2"]), DONE])
@@ -141,7 +141,33 @@ async def test_answers_calls_to_tools_the_request_did_not_offer_without_a_task()
             {"severity": "error", "code": "tool_unavailable", "message": "Tool ghost is not available"}
         ]
     }
-    assert len(await _tool_tasks(result["harness"], result["root"].id)) == 1
+    # #11043: the unoffered call has its own task, so `afterTool` and `control` apply to it as to
+    # any call, and only the offered one carries no flag.
+    inputs = [task["input"] for task in await _tool_tasks(result["harness"], result["root"].id)]
+    assert len(inputs) == 2
+    assert any(item.get("callId") == "c1" and item.get("unoffered") is True for item in inputs)
+    assert any(item.get("callId") == "c2" and "unoffered" not in item for item in inputs)
+    await result["harness"].close(context)
+
+
+async def test_never_runs_a_tool_the_request_did_not_offer_even_when_the_agent_has_it() -> None:
+    setup = chat_setup()
+    ran: list[str] = []
+    add_tool(
+        setup.registry,
+        tool("hidden", lambda *_args: ran.append("ran") or {"output": []}, deferred=True),
+    )
+    result = await run(setup, [calls(["hidden", {}, "c1"]), DONE])
+    assert result["status"] == "done"
+    assert ran == []
+    assert result_text(results(result["entries"])[0]) == (
+        "<harness>\n[error] Tool hidden is not available\n</harness>"
+    )
+    # Its slot carries the flag, and it settles through its own task like any other call.
+    live = await result["harness"].snapshot(LiveDoc, result["root"].id, context)
+    assert live == {}
+    tasks = await _tool_tasks(result["harness"], result["root"].id)
+    assert [task["input"].get("unoffered") for task in tasks] == [True]
     await result["harness"].close(context)
 
 

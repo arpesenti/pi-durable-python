@@ -1104,7 +1104,7 @@ async def test_background_compaction_starts_above_the_threshold_without_blocking
     assert task["input"] == {"reason": "threshold"}
     assert task.get("owner") is None
     assert (await live(chat))["compactions"] == [
-        {"taskId": task["id"], "reason": "threshold", "blocking": False, "attempt": 1}
+        {"taskId": task["id"], "trigger": "threshold", "blocking": False, "attempt": 1}
     ]
     # Background work: neither conversation idle nor Esc waits for or stops it.
     await chat.root.wait_for_idle(context)
@@ -1162,7 +1162,7 @@ async def test_records_a_compaction_failure_in_pi_live_until_a_summary_is_produc
     await turn(chat, text("u4", 100), text("a4", 100))
     await eventually(lambda: _has_failure(chat))
     recorded = (await live(chat))["compactionFailure"]
-    assert recorded["reason"] == "threshold"
+    assert recorded["trigger"] == "threshold"
     assert recorded["error"] == "Summarization failed: bad request"
     await eventually(
         lambda: any(event["type"] == "compaction_end" for event in events)
@@ -1232,7 +1232,7 @@ async def test_blocking_compaction_appends_the_summary_before_the_request() -> N
     assert record["state"]["checkpoint"]["compacted"] == child["id"]
     assert record["state"]["checkpoint"]["threshold"] is True
     assert (await live(chat))["compactions"] == [
-        {"taskId": child["id"], "reason": "threshold", "blocking": True, "attempt": 1}
+        {"taskId": child["id"], "trigger": "threshold", "blocking": True, "attempt": 1}
     ]
     # Nothing was appended before the wait.
     assert (await kinds(chat.root))[-1] == "pi.user"
@@ -1288,7 +1288,7 @@ async def test_fails_the_run_with_its_blocking_compactions_error_without_a_reque
     assert (await kinds(chat.root))[-1] == "pi.user"
     state = await live(chat)
     assert state.get("compactions") is None
-    assert state["compactionFailure"]["reason"] == "threshold"
+    assert state["compactionFailure"]["trigger"] == "threshold"
     assert state["compactionFailure"]["error"] == "Summarization failed: bad request"
     await chat.harness.close(context)
 
@@ -1756,7 +1756,7 @@ async def test_reports_start_and_end_and_the_retry_backoff_in_a_late_joiners_sna
     late = await watch_events(chat.harness, chat.root.id, context)
     [status] = late.snapshot["compactions"]
     assert status["taskId"] == id
-    assert status["reason"] == "manual"
+    assert status["trigger"] == "manual"
     assert status["blocking"] is False
     assert status["attempt"] == 1
     assert status["retry"]["error"] == "overloaded"
@@ -1790,7 +1790,7 @@ async def test_shows_a_late_joiner_a_compaction_that_is_summarizing() -> None:
     await reached.promise
     stream = await watch_events(chat.harness, chat.root.id, context)
     assert stream.snapshot["compactions"] == [
-        {"taskId": id, "reason": "manual", "blocking": False, "attempt": 1}
+        {"taskId": id, "trigger": "manual", "blocking": False, "attempt": 1}
     ]
     await stream.stop()
     await chat.harness.abort_task(id, context)
@@ -2219,7 +2219,7 @@ async def test_fails_the_run_when_its_blocking_compaction_faults_and_records_the
     assert "pi.compaction" not in await kinds(chat.root)
     state = await live(chat)
     assert state.get("compactions") is None
-    assert state["compactionFailure"]["reason"] == "threshold"
+    assert state["compactionFailure"]["trigger"] == "threshold"
     assert state["compactionFailure"]["error"] == "no credentials"
     await chat.harness.close(context)
 
@@ -2627,7 +2627,7 @@ async def test_survives_reopen_blocked_and_is_orphaned_on_abort_with_its_status_
             newer, {"reason": "manual"}, {"ownership": {"kind": "conversation"}}
         )
         live = await tx.doc(LiveDoc, opened["root"].id)
-        live["compactions"] = [{"taskId": id, "reason": "manual", "blocking": False, "attempt": 1}]
+        live["compactions"] = [{"taskId": id, "trigger": "manual", "blocking": False, "attempt": 1}]
         return id
 
     id = await opened["root"].commit(create, context)

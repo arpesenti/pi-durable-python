@@ -85,7 +85,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `addTools` | value | `add_tools` | test_harness_tools.py | tested |
-| `AgentDoc` | value | `AgentDoc` | test_harness_registry_agent.py | tested |
+| `AgentDoc` | value | `AgentDoc` | test_harness_registry_agent.py, test_harness_live_migrations.py | tested (version 1 at `agent.ts:46`, unchanged by this baseline) |
 | `configure` | value | `configure` | test_harness_registry_agent.py | tested |
 | `DEFAULT_COMPACTION_POLICY` | value | `DEFAULT_COMPACTION_POLICY` | test_harness_registry_agent.py | tested |
 | `DEFAULT_PROGRESS_POLICY` | value | `DEFAULT_PROGRESS_POLICY` | test_harness_registry_agent.py | tested |
@@ -96,7 +96,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `CompactionTask` | value | `CompactionTask` | test_harness_compaction.py | tested |
+| `CompactionTask` | value | `CompactionTask` | test_harness_compaction.py, test_harness_live_migrations.py | tested (version 1 at `compaction.ts:116`; its input still names the trigger `reason`, which the live status spells `trigger`) |
 | `CompactionCheckpoint` | type | `CompactionCheckpoint` | test_harness_compaction.py | tested (including the recovery cases) |
 | `CompactionInput` | type | `CompactionInput` | test_harness_compaction.py | tested |
 | `SummaryRequest` | type | `SummaryRequest` | test_harness_compaction.py | tested |
@@ -128,7 +128,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `GenerationTask` | value | `GenerationTask` | test_harness_generation.py | tested |
+| `GenerationTask` | value | `GenerationTask` | test_harness_generation.py, test_harness_tools.py, test_harness_live_migrations.py | tested (version 2 at `generation.ts:164`: a sequential round may hold calls the request did not offer, and a stored version 1 checkpoint is carried unchanged) |
 | `GenerationCheckpoint` | type | `GenerationCheckpoint` | test_harness_generation.py | tested |
 | `GenerationInput` | type | `GenerationInput` | test_harness_generation.py | tested |
 | `GenerationResult` | type | `GenerationResult` | test_harness_generation.py | tested |
@@ -156,16 +156,16 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py | tested |
-| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py, test_harness_events.py | tested (live status and its event stream) |
-| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py, test_harness_events.py | tested (live status and the late-joiner snapshot) |
-| `LiveRun` | type | `LiveRun` | — | planned (1.5.0 `pi.live.run`: `turns`, `first`, and `afterRun`; #36, #48) |
-| `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py | tested |
+| `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_migrations.py | tested (version 3 at `live.ts:196`, with the in-place migrate from stored versions 1 and 2) |
+| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py, test_harness_events.py, test_harness_live_migrations.py | tested (live status and its event stream; `trigger` names what started it, and a stored `reason` is renamed in place) |
+| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py, test_harness_events.py, test_harness_live_migrations.py | tested (live status and the late-joiner snapshot; `trigger` names what started it, and a stored `reason` is renamed in its key order) |
+| `LiveRun` | type | `LiveRun` | test_harness_live_deltas.py, test_harness_live_migrations.py, test_harness_tools.py | tested (`turns`: a round counts it and a stored run without one counts from 0; `first` and `afterRun` are #48) |
+| `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_live_migrations.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
 | `NestedToolSummary` | type | `NestedToolSummary` | test_harness_nested_tools.py | tested |
 | `RunFailure` | type | `RunFailure` | — | planned (1.5.0: why the newest run ended without an answer, kept until a run starts; #48) |
 | `RunFailureReason` | type | `RunFailureReason` | — | planned (1.5.0 adds `interrupted`, `restart_limit`, `nothing_to_answer`, and `turn_limit`; #48) |
-| `ToolSlot` | type | `ToolSlot` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_deltas.py | tested |
+| `ToolSlot` | type | `ToolSlot` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_deltas.py | tested (including the `unoffered` flag a call to a tool the request did not offer carries) |
 
 ### `./harness/provider.ts` → `pi_durable.harness.provider`
 
@@ -223,11 +223,11 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | --- | --- | --- | --- | --- |
 | `appendToolResult` | value | `append_tool_result` | test_harness_tools.py, test_harness_nested_tools.py | tested |
 | `harnessError` | value | `harness_error` | test_harness_tools.py, test_harness_nested_tools.py, test_harness_structured_output.py | tested |
-| `NestedCallDoc` | value | `NestedCallDoc` | test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested |
-| `ToolTask` | value | `ToolTask` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py | tested |
+| `NestedCallDoc` | value | `NestedCallDoc` | test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py, test_harness_live_migrations.py | tested (version 1 at `tool.ts:119`, unchanged by this baseline) |
+| `ToolTask` | value | `ToolTask` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_live_migrations.py | tested (version 3 at `tool.ts:138`: an `unoffered` input resolves `tool_unavailable` without touching the registry, and the migrate adds `kind` to a stored version 1 input) |
 | `NestedCallState` | type | `NestedCallState` | test_harness_nested_tools.py, test_harness_structured_output.py | tested |
 | `ToolTaskCheckpoint` | type | `ToolTaskCheckpoint` | test_harness_tools_recovery.py | tested |
-| `ToolTaskInput` | type | `ToolTaskInput` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py | tested |
+| `ToolTaskInput` | type | `ToolTaskInput` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py | tested (the model-issued shape carries `unoffered`) |
 | `ToolTaskResult` | type | `ToolTaskResult` | test_harness_tools.py, test_harness_nested_tools.py | tested |
 
 ### `./harness/types.ts` → `pi_durable.harness.types`
@@ -614,7 +614,7 @@ SQLite backend and migrations.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `applySqliteMigrations` | value | `apply_sqlite_migrations` | test_sqlite_migrations.py | tested |
-| `CURRENT_SQLITE_SCHEMA_VERSION` | value | `CURRENT_SQLITE_SCHEMA_VERSION` | test_sqlite_migrations.py | tested |
+| `CURRENT_SQLITE_SCHEMA_VERSION` | value | `CURRENT_SQLITE_SCHEMA_VERSION` | test_sqlite_migrations.py, test_harness_live_migrations.py | tested (the stored documents retag without moving the schema, and a database written by the previous release still opens) |
 | `SQLITE_MIGRATIONS` | value | `SQLITE_MIGRATIONS` | test_sqlite_migrations.py | tested |
 | `SqliteStorage` | value | `SqliteStorage` | test_sqlite_storage.py, test_sqlite_facade.py | tested |
 | `SqliteDatabase` | type | `SqliteDatabase` | test_sqlite_facade.py, test_sqlite_storage.py | tested |
@@ -651,7 +651,7 @@ SQLite backend and migrations.
 | 3.3 Access and creation | planned (the Chord state getters are gone and observer attachment and windowed conversation watches replace them; #44, #45) |
 | 3.4 Mutation ownership | planned (the admission, pending-batch, receipt and publication states of group commit, and what a held deferred commit does and does not show; #42, #47) |
 | 3.5 Bases and checkpoints | planned (a held deferred commit runs its predicate once against the stored count and stores its base with the held operations; #47) |
-| 3.6 Versions and migrations | planned (`documentState()` leaves the access-driven migration list; `pi.live` reaches version 3 with #36) |
+| 3.6 Versions and migrations | planned (`documentState()` leaves the access-driven migration list with #44. `pi.live` is version 3 and stored versions 1 and 2 migrate in place, the persisted version constants are read at their definition sites, and the SQLite schema and JSONL format stand still: test_harness_live_migrations.py, #36) |
 | 3.7 Forks | planned (fork metadata hydrates watches and mounted views only; the document-state path is gone; #44) |
 | 4 Transactions and storage ownership | planned (group commit: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound, and outcomes in line order — see the vendored group-commit document; #42) |
 | 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
@@ -664,20 +664,20 @@ SQLite backend and migrations.
 | 5.6 Sleeping, timers, and wakeups | planned (`on_wake` runs in a microtask the line never waits for, and the foreground timer now also arms a deferred commit's deadline; #47) |
 | 6 Submissions and inbox | planned (continue submissions, `when_idle="reject"` with `ConversationIdle`, `submit(tx, draft)` inside a commit, and the answer-resolves-while-busy rule; #48, #50) |
 | 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
-| 7.1 Extensions, registry, and agent resolution | planned (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup; #36) |
+| 7.1 Extensions, registry, and agent resolution | tested (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup, and the registry is never touched for it; test_harness_tools.py, test_harness_tools_recovery.py) |
 | 7.2 Hooks | planned (`afterTool` on every result the tool task writes, `beforeProviderRequest`, `afterRun` with `RunSummary` and `RunEndTask`, and `HookApi.entry()`/`entries()`; #36, #48) |
-| 7.3 Tools | planned (parameters as plain JSON Schema closed by default with pi-schema's validator wording, `unoffered` slots, deferred tool progress, and `ConversationHandle.submit(tx, ...)`; #36, #47, #50, #51) |
+| 7.3 Tools | planned (parameters as plain JSON Schema closed by default with pi-schema's validator wording is #51, deferred tool progress is #47, and `ConversationHandle.submit(tx, ...)` is #50. `unoffered` slots and the hidden call's own task are tested in test_harness_tools.py and test_harness_live_migrations.py; #36) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
 | 8 Built-in tasks | planned (generation and tool progress commit deferred, so a crash loses the throttle window plus what was not stored yet; #47) |
-| 8.1 Built-in entries | planned (the `pi.tool-result` producer list follows the aborted-round and `unoffered` results; #36) |
-| 8.2 Live document | planned (`pi.live` version 3: `run.turns`, `run.first`, `run.afterRun`, `runFailure`, `trigger` on compaction status, and `unoffered` slots; #36, #48) |
-| 8.3 Generation | planned (the `finish` and `drain` phases, the interrupted-attempt charge under the retry policy, `nothing_to_answer`, `unoffered` calls, and deferred partials; #36, #47, #48) |
-| 8.4 Tool | planned (`pi.tool` version 3, an `unoffered` call resolving `tool_unavailable`, and the `afterTool` chain over every result the task writes with its bounds; #36, #49) |
+| 8.1 Built-in entries | tested (the `pi.tool-result` producer list is the tasks: an aborted round writes its own results, and an unoffered call's `tool_unavailable` result comes from its tool task; test_harness_tools.py, test_harness_tools_recovery.py) |
+| 8.2 Live document | planned (`run.first`, `run.afterRun`, and `runFailure` are #48. Version 3 carries `run.turns`, `trigger` on compaction status, and `unoffered` slots, and a stored version 1 or 2 document migrates in place: test_harness_live_migrations.py, test_harness_compaction.py, test_harness_tools.py; #36) |
+| 8.3 Generation | planned (the `finish` and `drain` phases, the interrupted-attempt charge under the retry policy, `nothing_to_answer`, and deferred partials are #47 and #48. `unoffered` calls get their own tool task and count the turn they cost the run: test_harness_tools.py, test_harness_generation.py; #36) |
+| 8.4 Tool | planned (the `afterTool` chain over every result the task writes, with its bounds, is #49. `pi.tool` is version 3 and an `unoffered` call resolves `tool_unavailable`: test_harness_tools.py, test_harness_tools_recovery.py; #36) |
 | 8.5 Tool rounds | planned (a handoff continues the run, a `terminate` round hands to `finish`, and `max_turns` ends the round `turn_limit`; #48) |
 | 8.6 Usage | tested |
-| 8.7 Compaction | planned (`trigger` names what started it, the restart-cutoff failure, and the interrupted request's charge; #36, #48, #49) |
+| 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the live status and in what `compaction_start` and `compaction_end` report: test_harness_compaction.py, test_harness_events.py; #36) |
 | 9 Document observation and Chord | tested |
 | 9.1 Watches | planned (Chord's `WatchHandle`, `WatchCall`, and `WatchEnd`: `value`/`start`/`stop`/`closed`, the `kind`-tagged end including `aborted`, and the observer's `advance`/`end`; #35, #43, #44. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
 | 9.2 `watchDoc` | planned (one change object per listener, coalesced deliveries with folded operations, the 10,000-operation root replacement, and a watch that follows its address through a retirement; #43) |
@@ -919,6 +919,7 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
 | BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`) |
 | Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |
+| Pre-upgrade stored databases, written by this port's `v1.4.0` tag and opened by this release | `tests/fixtures/pre-1.5.0` (see its README) | tested (`test_harness_live_migrations.py`) |
 | Shared provider plumbing: catalog lookup, request options, transcript replay, cross-model message adaptation, argument parsing, request-attempt retries, usage pricing, and the stream/abort wrapper | `pi_durable.providers.base`, `.request`, `.transcript`, `.json_parse`, `.retry`, `.usage`, `.stream` | tested through the adapter suites (`test_providers_openai.py`, `test_providers_anthropic.py`) |
 | OpenAI model adapter over Chat Completions | `pi_durable.providers.openai` | tested (`test_providers_openai.py`, `test_providers_extras.py`) |
 | Anthropic model adapter over Messages | `pi_durable.providers.anthropic` | tested (`test_providers_anthropic.py`, `test_providers_extras.py`) |

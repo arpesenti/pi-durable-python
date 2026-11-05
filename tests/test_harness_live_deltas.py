@@ -224,9 +224,10 @@ async def test_hands_a_generation_over_to_its_tool_round_with_one_field_write_ea
     assert commits[0][0][0] == "s" and commits[0][0][1] == ["run"]
     assert commits[0][0][2]["taskId"] == first_generation
     assert len(commits[0][0][2]["inputs"]) == 1
+    assert commits[0][0][2]["turns"] == 0
     # request
     assert commits[1] == [["s", ["generation"], {"attempt": 1}]]
-    # the generation starts its tool round and keeps the run
+    # the generation starts its tool round and keeps the run, counting the round as one turn
     assert contains(
         commits[2],
         ["d", ["generation"]],
@@ -235,6 +236,7 @@ async def test_hands_a_generation_over_to_its_tool_round_with_one_field_write_ea
             ["tools"],
             [{"callId": "c1", "name": "noop", "taskId": tool_task, "status": "pending"}],
         ],
+        ["s", ["run", "turns"], 1],
     )
     # intent
     assert commits[3] == [["s", ["tools", 0, "status"], "running"]]
@@ -253,7 +255,7 @@ async def test_hands_a_generation_over_to_its_tool_round_with_one_field_write_ea
     assert commits[6] == [["s", ["generation"], {"attempt": 1}]]
     # the answer ends the run
     assert contains(commits[7], ["d", ["run"]], ["d", ["generation"]])
-    assert [len(commits[index]) for index in (2, 4, 5)] == [2, 2, 2]
+    assert [len(commits[index]) for index in (2, 4, 5)] == [3, 2, 2]
     await harness.close(context)
 
 

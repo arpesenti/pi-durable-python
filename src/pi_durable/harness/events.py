@@ -520,7 +520,9 @@ def translate(
                 {
                     "type": "compaction_end",
                     "taskId": status["taskId"],
-                    "reason": status["reason"],
+                    # The live status names this member ``trigger``; the event keeps the name this
+                    # adapter has always emitted.
+                    "reason": status["trigger"],
                     **({} if error is None else {"error": error}),
                 }
             )
@@ -593,7 +595,7 @@ def translate(
                 {
                     "type": "compaction_start",
                     "taskId": status["taskId"],
-                    "reason": status["reason"],
+                    "reason": status["trigger"],
                     "blocking": status.get("blocking", False),
                 }
             )
