@@ -14,6 +14,7 @@ from chat_support import all_entries, assistant_message, chat_setup, open_chat, 
 from session_support import context, document_changes
 
 from pi_durable import LiveDoc, MemoryStorage
+from pi_durable.types import CommitReceipt, Seq
 
 
 def live_commit_ops(harness: Any) -> list[list[Any]]:
@@ -62,18 +63,27 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs(
     live_id: dict[str, Any] = {}
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, call_context: Any) -> Any:
-            kind: str | None = None
-            for write in writes:
-                if (
-                    write["type"] == "document.change"
-                    and write["id"] == live_id.get("id")
-                ):
-                    kind = write["content"]["kind"]
-            seq = await super().commit(writes, call_context)
-            if kind is not None:
-                written[seq] = kind
-            return seq
+        async def commit_batches(
+            self,
+            batches: Any,
+            receive: CommitReceipt,
+            call_context: Any,
+        ) -> Any:
+            kinds: dict[int, str] = {}
+            for index, writes in enumerate(batches):
+                for write in writes:
+                    if (
+                        write["type"] == "document.change"
+                        and write["id"] == live_id.get("id")
+                    ):
+                        kinds[index] = write["content"]["kind"]
+
+            def recorded(index: int, seq: Seq) -> None:
+                receive(index, seq)
+                if index in kinds:
+                    written[seq] = kinds[index]
+
+            return await super().commit_batches(batches, recorded, call_context)
 
     setup = chat_setup()
     setup.faux.set_responses(
@@ -362,15 +372,24 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs_
     live_id: dict[str, Any] = {}
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, call_context: Any) -> Any:
-            kind: str | None = None
-            for write in writes:
-                if write["type"] == "document.change" and write["id"] == live_id.get("id"):
-                    kind = write["content"]["kind"]
-            seq = await super().commit(writes, call_context)
-            if kind is not None:
-                written[seq] = kind
-            return seq
+        async def commit_batches(
+            self,
+            batches: Any,
+            receive: CommitReceipt,
+            call_context: Any,
+        ) -> Any:
+            kinds: dict[int, str] = {}
+            for index, writes in enumerate(batches):
+                for write in writes:
+                    if write["type"] == "document.change" and write["id"] == live_id.get("id"):
+                        kinds[index] = write["content"]["kind"]
+
+            def recorded(index: int, seq: Seq) -> None:
+                receive(index, seq)
+                if index in kinds:
+                    written[seq] = kinds[index]
+
+            return await super().commit_batches(batches, recorded, call_context)
 
     setup = chat_setup()
     for name in ("first", "second"):

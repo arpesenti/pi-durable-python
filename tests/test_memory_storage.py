@@ -45,7 +45,8 @@ async def test_storage_conformance(case: StorageConformanceCase) -> None:
 
 async def test_does_not_expose_retained_state_through_a_prepared_commit() -> None:
     storage = MemoryStorage()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
     )
     entry_id = EntryId(2)
@@ -78,13 +79,15 @@ async def test_applies_operation_payloads_without_aliasing_them_into_the_documen
     """A payload set or spliced by one operation is addressable by later operations."""
 
     storage = MemoryStorage()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
     )
     document_id = await storage.mint_id()
     payload = {"nested": {"count": 1}}
     appended = [{"value": 1}]
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -98,7 +101,8 @@ async def test_applies_operation_payloads_without_aliasing_them_into_the_documen
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",

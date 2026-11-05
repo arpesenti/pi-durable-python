@@ -1,10 +1,11 @@
-"""Translated v1.5.0 batched ``Storage.commit()`` contract (#38), over every backend (#40).
+"""Translated v1.5.0 batched ``Storage.commit_batches()`` contract (#38), over every backend (#40).
 
-The batch form lands beside the single-commit form: one call stores a group of commit batches, each
-an atomic commit with its own sequence checked against the state the batches before it left, and
-resolves with how many were stored and, when one was refused, the refusal. A refusal is a resolved
-outcome of Durable's own checks; an error of the database or driver is a rejected call that stores
-nothing the backend can roll back -- the two are told apart in every case below.
+One call stores a group of commit batches, each an atomic commit with its own sequence checked
+against the state the batches before it left, and resolves with how many were stored and, when one
+was refused, the refusal. A refusal is a resolved outcome of Durable's own checks; an error of the
+database or driver is a rejected call that stores nothing the backend can roll back -- the two are
+told apart in every case below. The batched call is the only commit shape the protocol declares
+(#41), so the seeding cases here go through the same helper every other test seeds with.
 
 The SQLite cases also hold the backend to the counted-run member 1.5.0 adds: the commit is the
 member's first caller, so an allocation statement that changed no row rejects the call instead of
@@ -177,8 +178,9 @@ async def test_a_call_stores_every_batch_with_its_own_sequence(create_storage: A
     assert second_read is not None and second_read["commitSeq"] == last_seq
     stored = await storage.document(document_id, "current", context)
     assert stored is not None and stored["value"] == {"count": 2}
-    # The single form still allocates above the group, so both forms share one sequence.
-    next_seq = await storage.commit(
+    # The batch after the group allocates above it: every call draws the one sequence.
+    next_seq = await commit_writes(
+        storage,
         [{"type": "entry", "value": _entry(await storage.mint_id(), root_id)}], context
     )
     assert next_seq > last_seq
@@ -229,8 +231,9 @@ async def test_the_first_batch_durable_refuses_leaves_the_earlier_ones_stored(cr
     assert second is not None and second["commitSeq"] == receipts[1][1]
     # The batch after the refusal is not stored either: the call stopped at the refusal.
     assert await storage.entry(after_id, context) is None
-    # A refusal is resolved, not thrown: the storage goes on serving commits, batched or single.
-    following = await storage.commit(
+    # A refusal is resolved, not thrown: the storage goes on serving batched commits.
+    following = await commit_writes(
+        storage,
         [{"type": "entry", "value": _entry(after_id, root_id)}], context
     )
     assert following > receipts[1][1]
@@ -538,7 +541,8 @@ async def test_a_minted_id_is_above_every_id_minted_and_every_id_stored(create_s
     storage = await create_storage()
     await _create_root(storage)
     high_id = 9_000
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "document.create", "record": _document(high_id, "batch.doc"),
           "content": {"kind": "base", "version": 1, "value": {}}}],
         context,
@@ -556,7 +560,8 @@ async def test_a_minted_id_stays_above_every_stored_id_across_reopen() -> None:
     root_id = await _create_root(storage)
     minted_before = [await storage.mint_id() for _ in range(2)]
     stored_high = 5_000
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "entry", "value": _entry(minted_before[0], root_id)},
             {"type": "document.create", "record": _document(stored_high, "batch.doc"),
@@ -581,7 +586,8 @@ async def test_a_minted_id_stays_above_every_stored_id_across_sqlite_reopen() ->
     await _create_root(storage)
     minted_before = [await storage.mint_id() for _ in range(2)]
     stored_high = 7_000
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "document.create", "record": _document(stored_high, "batch.doc"),
           "content": {"kind": "base", "version": 1, "value": {}}}],
         context,
@@ -612,12 +618,6 @@ class _PublishingStorage:
             publish()
         finally:
             self.open_batches -= 1
-
-    async def commit(self, writes: Sequence[StorageWrite], commit_context: Context) -> Seq:
-        self.open_batches += 1
-        seq = await self._inner.commit(writes, commit_context)
-        self.events.append("commit")
-        return seq
 
     async def commit_batches(
         self,
@@ -904,14 +904,24 @@ async def test_a_driver_without_the_counted_run_member_fails_the_commit() -> Non
 # ── The contract as declared ────────────────────────────────────────────────
 
 
-def test_the_batch_form_is_declared_beside_the_single_form() -> None:
-    assert {"commit", "commit_batches"} <= set(Storage.__dict__)
+def test_the_batched_call_is_the_only_commit_shape() -> None:
+    """One commit shape on the protocol: the batched call, and no single-write companion."""
+
+    assert "commit_batches" in Storage.__dict__
+    assert "commit" not in Storage.__dict__
     assert CommitResult.__annotations__.keys() == {"stored", "refused"}
     assert isinstance(MemoryStorage(), Storage)
 
 
-async def test_the_single_form_still_carries_what_the_batch_form_left() -> None:
-    """Both forms are one contract: the old commit still serves a storage the batch form wrote."""
+@_BACKENDS
+async def test_no_backend_carries_the_retired_single_write_signature(create_storage: Any) -> None:
+    """A host that implements the retired form does not satisfy this protocol."""
+
+    assert not hasattr(await create_storage(), "commit")
+
+
+async def test_the_single_batch_a_seeding_call_writes_carries_on_the_group_sequence() -> None:
+    """One contract and one sequence: the helper's batch continues what the batched call left."""
 
     storage = MemoryStorage()
     root_id = await _create_root(storage)
@@ -924,8 +934,8 @@ async def test_the_single_form_still_carries_what_the_batch_form_left() -> None:
     )
     assert stored == {"stored": 1}
 
-    single = await storage.commit(
-        [{"type": "entry", "value": _entry(second_id, root_id)}], context
+    single = await commit_writes(
+        storage, [{"type": "entry", "value": _entry(second_id, root_id)}], context
     )
     assert single == receipts[0][1] + 1
     loaded = await storage.entry(second_id, context)

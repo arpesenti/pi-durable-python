@@ -24,6 +24,7 @@ from pi_durable.storage.sqlite import (
     SqliteValue,
 )
 from pi_durable.storage.sqlite.posix import PosixSqliteDatabase, open_posix_sqlite_database
+from pi_durable.testing import commit_writes
 
 context = BACKGROUND_CONTEXT
 
@@ -122,8 +123,9 @@ async def test_prepares_each_storage_statement_once_per_connection_and_reuses_it
     connection.row_factory = sqlite3.Row
     database = PrepareCountingDatabase(connection)
     storage = await SqliteStorage.open(database)
-    await storage.commit([{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context)
-    await storage.commit(
+    await commit_writes(storage, [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context)
+    await commit_writes(
+        storage,
         [
             {
                 "type": "entry",
@@ -137,7 +139,8 @@ async def test_prepares_each_storage_statement_once_per_connection_and_reuses_it
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "entry",
@@ -157,7 +160,8 @@ async def test_prepares_each_storage_statement_once_per_connection_and_reuses_it
     assert second is not None
     assert second["entry"]["kind"] == "cached-again"
     with pytest.raises(RuntimeError, match="ID 1 already belongs to conversation"):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
         )
     still_cached = await storage.entry(EntryId(2), context)
@@ -266,7 +270,8 @@ async def test_runs_operations_in_call_order_whether_they_start_immediately_or_w
 
     storage = await SqliteStorage.open(database)
     commit = asyncio.ensure_future(
-        storage.commit(
+        commit_writes(
+            storage,
             [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
         )
     )
@@ -328,7 +333,8 @@ async def test_queues_database_calls_made_synchronously_by_an_immediate_transact
 async def test_lets_admitted_multi_query_reads_finish_before_storage_closes() -> None:
     storage = await SqliteStorage.open(await open_posix_sqlite_database(":memory:"))
     entry_id = EntryId(2)
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}},
             {
@@ -405,7 +411,8 @@ async def test_awaits_async_transaction_settlement_and_adopts_ids_only_after_suc
 
     database.control_next_settlement("delay")
     committing = asyncio.ensure_future(
-        storage.commit(
+        commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -428,7 +435,8 @@ async def test_awaits_async_transaction_settlement_and_adopts_ids_only_after_suc
 
     database.control_next_settlement("reject")
     rejected = asyncio.ensure_future(
-        storage.commit(
+        commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -459,7 +467,8 @@ async def test_reads_a_document_from_one_committed_state_while_a_commit_replaces
     # queries.
     for yields in range(16):
         storage = await SqliteStorage.open(await open_posix_sqlite_database(":memory:"))
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -477,7 +486,8 @@ async def test_reads_a_document_from_one_committed_state_while_a_commit_replaces
         for _ in range(yields):
             await asyncio.sleep(0)
         replace = asyncio.ensure_future(
-            storage.commit(
+            commit_writes(
+                storage,
                 [
                     {
                         "type": "document.change",

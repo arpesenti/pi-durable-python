@@ -28,6 +28,7 @@ from tool_support import (
 
 from pi_durable import LiveDoc, MemoryStorage, NestedCallDoc, ToolTask, UsageDoc, watch_events
 from pi_durable.context import AbortController, with_abort_signal
+from pi_durable.types import CommitReceipt
 
 
 def call(name: str, args: dict[str, Any] | None = None, call_id: str = "c1") -> dict[str, Any]:
@@ -120,11 +121,14 @@ async def test_stores_one_document_per_nested_call_keyed_by_its_key() -> None:
     written: list[tuple[str, str | None]] = []
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, commit_context: Any) -> Any:
-            for write in writes:
-                if write["type"] == "document.create":
-                    written.append((write["record"]["kind"], write["record"].get("key")))
-            return await super().commit(writes, commit_context)
+        async def commit_batches(
+            self, batches: Any, receive: CommitReceipt, commit_context: Any
+        ) -> Any:
+            for writes in batches:
+                for write in writes:
+                    if write["type"] == "document.create":
+                        written.append((write["record"]["kind"], write["record"].get("key")))
+            return await super().commit_batches(batches, receive, commit_context)
 
     setup.faux.set_responses([call("batch"), DONE])
     opened = await open_chat(RecordingStorage(), setup)

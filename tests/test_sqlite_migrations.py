@@ -28,6 +28,7 @@ from pi_durable.storage.sqlite.posix import (
     open_posix_sqlite_database,
     open_posix_sqlite_storage,
 )
+from pi_durable.testing import commit_writes
 
 context = BACKGROUND_CONTEXT
 
@@ -127,7 +128,8 @@ async def test_rolls_initial_bootstrap_and_every_pending_migration_back_together
 async def test_rolls_a_failed_migration_back_and_preserves_stored_data_for_a_successful_retry() -> None:
     path = _database_path()
     storage = await open_posix_sqlite_storage(path)
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}},
             {

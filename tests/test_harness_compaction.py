@@ -43,6 +43,7 @@ from pi_durable.harness.context import order_tool_results
 from pi_durable.harness.types import ContextView
 from pi_durable.harness.util import cancellation_error
 from pi_durable.providers import Model
+from pi_durable.testing import commit_writes
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1945,7 +1946,7 @@ async def test_resumes_a_retry_backoff_after_reopen() -> None:
             if key not in ("phase", "until")
         }, "until": until},
     }
-    await storage.reopen().commit([{"type": "task", "value": cast(Any, legacy)}], context)
+    await commit_writes(storage.reopen(), [{"type": "task", "value": cast(Any, legacy)}], context)
     chat = await _reopen(storage, chat.setup, chat.faux)
     await eventually(
         lambda: _sleeping_record(chat, id)

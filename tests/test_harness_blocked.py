@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,8 @@ from pi_durable.context import Context
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
 from pi_durable.storage.sqlite.posix import open_posix_sqlite_storage
-from pi_durable.types import Seq, StorageWrite
+from pi_durable.testing import commit_writes
+from pi_durable.types import StorageWrite
 
 _directories: list[Path] = []
 #: Storages of killed Harnesses, never closed by them: closed after each test.
@@ -122,7 +123,7 @@ class _KillableStorage:
 
 
 class _FailingOnceStorage:
-    """A Storage whose first ``commit`` rejects, as on a platform reset."""
+    """A Storage whose first ``commit_batches`` call rejects, as on a platform reset."""
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -132,16 +133,16 @@ class _FailingOnceStorage:
         value = getattr(self._inner, name)
         if not callable(value):
             return value
-        if name != "commit":
+        if name != "commit_batches":
             return value
 
-        async def commit(writes: Sequence[StorageWrite], commit_context: Context) -> Seq:
+        async def commit_batches(batches: Any, receive: Any, commit_context: Context) -> Any:
             if self.fail_next:
                 self.fail_next = False
                 raise RuntimeError("reset")
-            return await value(writes, commit_context)
+            return await value(batches, receive, commit_context)
 
-        return commit
+        return commit_batches
 
 
 async def _open_with(
@@ -205,7 +206,7 @@ async def test_keeps_the_hosts_wake_active_until_opens_recovery_pass_has_landed(
     record.pop("memos", None)
     record["state"] = {"status": "completing", "outcome": {"status": "completed", "result": None}}
     writes: list[StorageWrite] = [{"type": "task", "value": task_write(record)}]
-    await raw.commit(writes, context)
+    await commit_writes(raw, writes, context)
     await raw.close(context)
 
     # That pass's commit fails, as on a platform reset.

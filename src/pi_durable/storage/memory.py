@@ -246,9 +246,6 @@ class MemoryStorage:
         self._next_seq = 1
         self._closed = False
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        return self.prepare_commit(writes).apply()
-
     async def commit_batches(
         self,
         batches: Sequence[Sequence[StorageWrite]],

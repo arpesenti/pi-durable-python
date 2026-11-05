@@ -45,7 +45,7 @@ _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 
 async def _create_root(storage: Storage) -> ConversationId:
-    await storage.commit([{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context)
+    await commit_writes(storage, [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context)
     return ROOT_CONVERSATION_ID
 
 
@@ -153,7 +153,9 @@ class _ReceiptCheckingStorage:
 
         def recording(index: int, seq: Seq) -> None:
             nonlocal settled
-            self._assertions.ok(not settled, "Storage.commit() received a batch after it settled")
+            self._assertions.ok(
+                not settled, "Storage.commit_batches() received a batch after it settled"
+            )
             self._assertions.strict_equal(index, len(seqs))
             if seqs:
                 self._assertions.greater_than(seq, seqs[-1])
@@ -201,7 +203,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             {"id": ROOT_CONVERSATION_ID}
         )
         await expect(
-            storage.commit(
+            commit_writes(
+                storage,
                 [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
             )
         ).rejects.to_throw(f"ID {ROOT_CONVERSATION_ID} already belongs to conversation")
@@ -259,7 +262,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "status": "placed",
             "entry": entry_id,
         }
-        initial_seq = await storage.commit(
+        initial_seq = await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -284,7 +288,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         running_task = {**task, "state": {"status": "running", "checkpoint": {"phase": "effect"}}}
         done_submission = {**submission, "status": "done", "answer": transient_entry_id}
         await expect(
-            storage.commit(
+            commit_writes(
+                storage,
                 [
                     {"type": "task", "value": running_task},
                     {"type": "submission", "value": done_submission},
@@ -298,7 +303,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         expect(await storage.task(task_id, context)).to_equal(task)
         expect(await storage.submission(submission_id, context)).to_equal(submission)
         expect(await storage.entry(transient_entry_id, context)).to_be_undefined()
-        after_rollback_seq = await storage.commit(
+        after_rollback_seq = await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -330,7 +336,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "reason": "failed",
             "detail": detail,
         }
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "entry", "value": stored_entry},
                 {"type": "task", "value": stored_task},
@@ -379,7 +386,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         data: dict[str, Any] = json.loads(
             '{"__proto__":{"polluted":false},"constructor":{"label":"stored"},"toString":"value"}'
         )
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(entry_id, root_id, "note", data=data)}], context
         )
 
@@ -403,7 +411,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
 
     async def indexes_entries_out_of_order(storage: Storage) -> None:
         root_id = await _create_root(storage)
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "entry", "value": _entry(30, root_id)},
                 {"type": "entry", "value": _entry(10, root_id)},
@@ -426,7 +435,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         oldest_id = await storage.mint_id()
         middle_id = await storage.mint_id()
         newest_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "entry", "value": _entry(oldest_id, root_id)},
                 {"type": "entry", "value": _entry(middle_id, root_id)},
@@ -438,7 +448,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         first = await storage.scan_entries({"conversationId": root_id}, 2, None, context)
         expect([item["id"] for item in first["items"]]).to_equal([newest_id, middle_id])
         appended_id = await storage.mint_id()
-        await storage.commit([{"type": "entry", "value": _entry(appended_id, root_id)}], context)
+        await commit_writes(storage, [{"type": "entry", "value": _entry(appended_id, root_id)}], context)
         second = await storage.scan_entries({"conversationId": root_id}, 2, first.get("next"), context)
         expect([item["id"] for item in second["items"]]).to_equal([oldest_id])
         expect(second.get("next")).to_be_undefined()
@@ -447,7 +457,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         root_id = await _create_root(storage)
         second_id = await storage.mint_id()
         third_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "conversation", "value": {"id": third_id}},
                 {"type": "conversation", "value": {"id": second_id}},
@@ -471,7 +482,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         first_id = await storage.mint_id()
         second_id = await storage.mint_id()
         third_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "conversation", "value": {"id": other_owner_id}},
                 {
@@ -536,7 +548,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         root_first = await storage.mint_id()
         root_fork_point = await storage.mint_id()
         root_excluded_same_commit = await storage.mint_id()
-        root_entries_seq = await storage.commit(
+        root_entries_seq = await commit_writes(
+            storage,
             [
                 {"type": "entry", "value": _entry(root_first, root_id)},
                 {
@@ -548,7 +561,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             context,
         )
         child_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "conversation",
@@ -562,7 +576,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         )
         child_fork_point = await storage.mint_id()
         child_excluded = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "entry", "value": _entry(child_fork_point, child_id, "note")},
                 {"type": "entry", "value": _entry(child_excluded, child_id)},
@@ -570,11 +585,13 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             context,
         )
         root_excluded_later = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(root_excluded_later, root_id)}], context
         )
         grandchild_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "conversation",
@@ -588,7 +605,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         )
         grandchild_head = await storage.mint_id()
         grandchild_tail = await storage.mint_id()
-        grandchild_entries_seq = await storage.commit(
+        grandchild_entries_seq = await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -599,7 +617,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             context,
         )
         child_excluded_later = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(child_excluded_later, child_id)}], context
         )
 
@@ -762,7 +781,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             conversation_id = await storage.mint_id()
             task_id = await storage.mint_id()
             submission_id = await storage.mint_id()
-            await storage.commit(
+            await commit_writes(
+                storage,
                 [
                     {"type": "conversation", "value": {"id": conversation_id}},
                     {"type": "task", "value": _pending_task(task_id, root_id)},
@@ -833,7 +853,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         first = {**_pending_task(first_id, root_id), "memos": {"winner": "first"}}
         second = {**_pending_task(second_id, root_id), "background": True}
         third = {**_pending_task(third_id, root_id), "abortRequested": True}
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "task", "value": first},
                 {"type": "task", "value": second},
@@ -847,7 +868,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "state": {"status": "running", "checkpoint": {"phase": "effect", "attempt": 1}},
             "abortRequested": True,
         }
-        await storage.commit([{"type": "task", "value": running}], context)
+        await commit_writes(storage, [{"type": "task", "value": running}], context)
         expect(await storage.task(first_id, context)).to_equal(running)
         terminal = {
             "id": first_id,
@@ -859,7 +880,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "background": False,
             "abortRequested": True,
         }
-        await storage.commit([{"type": "task", "value": terminal}], context)
+        await commit_writes(storage, [{"type": "task", "value": terminal}], context)
         expect(await storage.task(first_id, context)).to_equal(terminal)
 
         pending_page = await storage.scan_tasks({"status": "pending"}, 1, None, context)
@@ -911,7 +932,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "owner": owner_id,
             "state": {"status": "completing", "outcome": {"status": "failed", "error": {"message": "held"}}},
         }
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "task", "value": owner},
                 {"type": "task", "value": waiting},
@@ -933,7 +955,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             **completing,
             "state": {"status": "terminal", "outcome": completing["state"]["outcome"]},
         }
-        await storage.commit([{"type": "task", "value": terminal}], context)
+        await commit_writes(storage, [{"type": "task", "value": terminal}], context)
         expect(await scan("completing")).to_equal([])
         expect(await scan("terminal")).to_equal([terminal])
 
@@ -945,7 +967,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "state": {"status": "sleeping", "checkpoint": {"phase": "next"}, "until": 61_000},
             "memos": {"kept": True},
         }
-        await storage.commit([{"type": "task", "value": sleeping}], context)
+        await commit_writes(storage, [{"type": "task", "value": sleeping}], context)
         expect(await storage.task(sleeping_id, context)).to_equal(sleeping)
 
         async def scan(status: str) -> list[Any]:
@@ -954,14 +976,15 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
 
         expect(await scan("sleeping")).to_equal([sleeping])
         running = {**sleeping, "state": {"status": "running", "checkpoint": {"phase": "next"}}}
-        await storage.commit([{"type": "task", "value": running}], context)
+        await commit_writes(storage, [{"type": "task", "value": running}], context)
         expect(await scan("sleeping")).to_equal([])
         expect(await scan("running")).to_equal([running])
 
     async def indexes_request_ids(storage: Storage) -> None:
         root_id = await _create_root(storage)
         second_conversation_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "conversation", "value": {"id": second_conversation_id}}], context
         )
         first_id = await storage.mint_id()
@@ -988,7 +1011,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "type": "input",
             "status": "queued",
         }
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "submission", "value": first},
                 {"type": "submission", "value": second},
@@ -1002,7 +1026,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         ).to_equal(other_conversation)
 
         placed_second = {**second, "status": "placed", "entry": await storage.mint_id()}
-        await storage.commit([{"type": "submission", "value": placed_second}], context)
+        await commit_writes(storage, [{"type": "submission", "value": placed_second}], context)
         expect(await storage.submission(second_id, context)).to_equal(placed_second)
         expect(await storage.submission_by_request(root_id, "other", context)).to_equal(
             placed_second
@@ -1051,7 +1075,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "type": "write",
             "status": "queued",
         }
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "submission", "value": queued_done},
                 {"type": "submission", "value": queued_failed},
@@ -1066,7 +1091,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "reason": "closed",
             "detail": {"retryable": False},
         }
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "submission", "value": done},
                 {"type": "submission", "value": unanswered},
@@ -1093,7 +1119,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "fork": "asOf",
         }
         initial: dict[str, Any] = {"items": ["a"], "nested": {"count": 1}}
-        created_at = await storage.commit(
+        created_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1108,7 +1135,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ["p", ["items"], 1, 0, appended],
             ["s", ["nested", "count"], 2],
         ]
-        changed_at = await storage.commit(
+        changed_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1133,7 +1161,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         assert current is not None
         expect(current["value"]).to_equal({"items": ["a", "b"], "nested": {"count": 2}})
 
-        checkpoint_at = await storage.commit(
+        checkpoint_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1147,7 +1176,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
             context,
         )
-        replaced_at = await storage.commit(
+        replaced_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1175,7 +1205,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         expect(current_after["deltasSinceBase"]).to_be(1)
 
         second_id = await storage.mint_id()
-        retired_at = await storage.commit(
+        retired_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1237,7 +1268,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "revision": 0,
             "rows": [{"value": value, "stable": f"row-{value}"} for value in range(512)],
         }
-        created_at = await storage.commit(
+        created_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1253,7 +1285,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             index = (revision * 17) % len(before_replacement["rows"])
             before_replacement["rows"][index]["value"] = -revision
             before_replacement["revision"] = revision
-            before_replacement_at = await storage.commit(
+            before_replacement_at = await commit_writes(
+                storage,
                 [
                     {
                         "type": "document.change",
@@ -1278,7 +1311,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
         }
         replacement_snapshot = json.loads(json.dumps(replacement))
-        replacement_at = await storage.commit(
+        replacement_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1295,7 +1329,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             index = (revision * 19) % len(current["rows"])
             current["rows"][index]["value"] = -revision
             current["revision"] = revision
-            await storage.commit(
+            await commit_writes(
+                storage,
                 [
                     {
                         "type": "document.change",
@@ -1334,7 +1369,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         root_id = await _create_root(storage)
         child_id = await storage.mint_id()
         second_child_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "conversation", "value": {"id": child_id}},
                 {"type": "conversation", "value": {"id": second_child_id}},
@@ -1349,7 +1385,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "history": "rewindable",
             "fork": "asOf",
         }
-        created_at = await storage.commit(
+        created_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1363,7 +1400,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
             context,
         )
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1393,7 +1431,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
                 "fork": "asOf",
             }
 
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.copy",
@@ -1422,7 +1461,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         )
         expect(await storage.document(retired_copy_id, "current", context)).to_be_undefined()
 
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1448,7 +1488,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "history": "latest",
             "fork": "current",
         }
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1458,7 +1499,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
             context,
         )
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.copy",
@@ -1472,7 +1514,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
             context,
         )
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1490,7 +1533,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         conflict_id = await storage.mint_id()
         conflict_error: object | None = None
         try:
-            await storage.commit(
+            await commit_writes(
+                storage,
                 [
                     {
                         "type": "document.copy",
@@ -1515,7 +1559,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         mismatch_id = await storage.mint_id()
         mismatch_error: object | None = None
         try:
-            await storage.commit(
+            await commit_writes(
+                storage,
                 [
                     {
                         "type": "document.copy",
@@ -1534,7 +1579,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         await _create_root(storage)
         id = await storage.mint_id()
         record = {"id": id, "kind": "session.settings", "scope": {"kind": "session"}}
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1544,7 +1590,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
             context,
         )
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1554,7 +1601,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             ],
             context,
         )
-        migrated_at = await storage.commit(
+        migrated_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1572,7 +1620,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         )
 
         await expect(
-            storage.commit(
+            commit_writes(
+                storage,
                 [
                     {
                         "type": "document.change",
@@ -1586,7 +1635,7 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         unchanged = await storage.document(id, "current", context)
         assert unchanged is not None
         expect(unchanged["value"]).to_equal({"count": 3})
-        await storage.commit([{"type": "document.retire", "id": id}], context)
+        await commit_writes(storage, [{"type": "document.retire", "id": id}], context)
         expect(await storage.document(id, "current", context)).to_be_undefined()
 
     async def indexes_logical_addresses(storage: Storage) -> None:
@@ -1598,7 +1647,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         task_singleton_id = await storage.mint_id()
         task_family_id = await storage.mint_id()
         task_other_kind_id = await storage.mint_id()
-        created_at = await storage.commit(
+        created_at = await commit_writes(
+            storage,
             [
                 {"type": "task", "value": _pending_task(task_id, root_id)},
                 {
@@ -1727,7 +1777,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         first_id = await storage.mint_id()
         second_id = await storage.mint_id()
         record = {"id": first_id, "kind": "singleton", "scope": {"kind": "session"}}
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1738,7 +1789,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             context,
         )
         await expect(
-            storage.commit(
+            commit_writes(
+                storage,
                 [
                     {
                         "type": "document.create",
@@ -1760,7 +1812,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         expect(await storage.document(second_id, "current", context)).to_be_undefined()
 
         empty_id = await storage.mint_id()
-        empty_at = await storage.commit(
+        empty_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -1806,7 +1859,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             "status": "queued",
         }
         record = {"id": document_id, "kind": "atomic", "scope": {"kind": "session"}}
-        baseline_seq = await storage.commit(
+        baseline_seq = await commit_writes(
+            storage,
             [
                 {"type": "task", "value": task},
                 {"type": "submission", "value": submission},
@@ -1822,7 +1876,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         entry_id = await storage.mint_id()
         conflicting_document_id = await storage.mint_id()
         await expect(
-            storage.commit(
+            commit_writes(
+                storage,
                 [
                     {
                         "type": "task",
@@ -1859,7 +1914,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         )
         assert address is not None
         expect(address["id"]).to_be(document_id)
-        after_rollback_seq = await storage.commit(
+        after_rollback_seq = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -1883,7 +1939,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         second_kind_document_id = await storage.mint_id()
         first_key_document_id = await storage.mint_id()
         second_key_document_id = await storage.mint_id()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "task", "value": {**_pending_task(first_task_id, root_id), "kind": first}},
                 {"type": "task", "value": {**_pending_task(second_task_id, root_id), "kind": second}},
@@ -1994,12 +2051,14 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
     async def keeps_one_global_id_namespace(storage: Storage) -> None:
         root_id = await _create_root(storage)
         explicit_entry_id = 100
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(explicit_entry_id, root_id)}], context
         )
         expect(await storage.mint_id()).to_be(101)
         await expect(
-            storage.commit(
+            commit_writes(
+                storage,
                 [
                     {
                         "type": "task",
@@ -2010,7 +2069,8 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
             )
         ).rejects.to_throw(f"ID {explicit_entry_id} already belongs to entry")
 
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(_MAX_SAFE_INTEGER, root_id, "last-id")}], context
         )
         await expect(storage.mint_id()).rejects.to_throw("ID space is exhausted")
@@ -2247,9 +2307,11 @@ def create_storage_conformance(options: StorageConformanceOptions) -> list[Stora
         await _create_root(storage)
         await storage.close(context)
         await expect(storage.conversation(ROOT_CONVERSATION_ID, context)).rejects.to_throw("closed")
-        await expect(storage.commit(cast(Sequence[StorageWrite], []), context)).rejects.to_throw(
-            "closed"
-        )
+        await expect(
+            commit_writes(
+                storage, [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
+            )
+        ).rejects.to_throw("closed")
         await expect(storage.mint_id()).rejects.to_throw("closed")
 
     return [

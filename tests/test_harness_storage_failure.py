@@ -211,6 +211,45 @@ async def test_fails_it_when_storage_cannot_close_and_an_earlier_failure_stays_t
     assert failed["reports"] == [failure]
 
 
+class RefusingStorage(ControlledStorage):
+    """Reports a resolved refusal for a commit, as a storage's own checks do for a batch."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refusal: BaseException | None = None
+
+    async def commit_batches(self, batches: Any, receive: Any, commit_context: Any) -> Any:
+        if self.refusal is not None:
+            return {"stored": 0, "refused": self.refusal}
+        return await super().commit_batches(batches, receive, commit_context)
+
+
+async def test_fails_the_session_when_the_storage_refuses_the_batch_a_commit_writes() -> None:
+    """A resolved refusal is not a stored commit: it fails the Session and stores nothing."""
+
+    storage = RefusingStorage()
+    opened = await started(storage)
+    await opened["root"].commit(
+        lambda tx: tx.append_entry(opened["root"].id, {"kind": "kept"}), context
+    )
+    refusal = ValueError("a batch this storage refuses")
+    storage.refusal = refusal
+    error = await _capture(
+        opened["root"].commit(
+            lambda tx: tx.append_entry(opened["root"].id, {"kind": "refused"}), context
+        )
+    )
+    assert error is refusal
+    assert await opened["harness"].closed == {"kind": "failed", "error": refusal}
+    assert opened["reports"] == [refusal]
+    stored = await storage.reopen().scan_entries(
+        {"conversationId": opened["root"].id}, 10, None, context
+    )
+    kinds = [item["kind"] for item in stored["items"]]
+    assert "kept" in kinds
+    assert "refused" not in kinds
+
+
 async def test_rejects_the_harnesss_own_calls_with_session_failed_after_a_failure() -> None:
     storage = ControlledStorage()
     opened = await started(storage)

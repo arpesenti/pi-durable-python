@@ -24,6 +24,7 @@ from tool_support import DONE, add_tool, calls, result_text, results, tool
 
 from pi_durable import GenerationTask, LiveDoc, UsageDoc
 from pi_durable.context import AbortError
+from pi_durable.testing import commit_writes
 
 
 def hang_after_partial(text: str, spend: dict[str, Any] | None = None) -> Step:
@@ -357,7 +358,7 @@ async def test_sleeps_again_for_a_retry_stored_as_a_running_phase_by_an_earlier_
         "status": "running",
         "checkpoint": {"phase": "retry", "attempt": 1, "until": 61_000},
     }
-    await storage.reopen().commit([{"type": "task", "value": cast(Any, legacy)}], context)
+    await commit_writes(storage.reopen(), [{"type": "task", "value": cast(Any, legacy)}], context)
     setup.faux.set_responses([assistant_message("recovered")])
 
     recovered = await open_again(storage, setup)

@@ -43,10 +43,12 @@ that ports the section moves the row, and is named in the row's parenthetical. A
   pi-ai client identity, any pi-schema builder analogue (tool parameters stay plain JSON Schema),
   the attached-host storage subpath, PowerShell, Windows support, and benchmark helpers. ADR 0002
   records the 1.4.0 exclusions and ADR 0003 the 1.5.0 ones.
-- **Storage:** the v1.5.0 backends are ported faithfully. `commit()` stores a group of commit
-  batches in one call, each batch its own atomic commit with its own sequence; the SQLite schema
-  version does not move from the previous baseline. Cross-language storage interoperability is
-  incidental, not a supported contract.
+- **Storage:** the v1.5.0 backends are ported faithfully. `commit_batches()` is the one commit
+  shape: a call stores a group of commit batches, each batch its own atomic commit with its own
+  sequence, and the retired single-write `commit()` is gone from the protocol and every backend
+  (#41); code that seeds a storage writes one batch through `pi_durable.testing.commit_writes`. The
+  SQLite schema version does not move from the previous baseline. Cross-language storage
+  interoperability is incidental, not a supported contract.
 
 ## Root exports
 
@@ -399,7 +401,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | test_session_definitions.py | tested |
 | `SessionDocToken` | type | `SessionDocToken` | test_session_definitions.py | tested |
 | `SessionEnd` | type | `SessionEnd` | test_types.py, test_harness_storage_failure.py, test_discriminant_spellings.py | tested (tagged by `kind`: `closed`, or `failed` with the error that failed the Session; a watch mirrors it as `ended`/`failed` — #33, #35) |
-| `Storage` | type | `Storage` | test_storage_protocol.py | tested |
+| `Storage` | type | `Storage` | test_storage_protocol.py | tested (one commit shape: `commit_batches(batches, receive, context)`, and the retired single-write `commit()` is absent from the protocol and from every backend; #41) |
 | `StorageWrite` | type | `StorageWrite` | test_types.py, test_storage_protocol.py | tested |
 | `StoredDocument` | type | `StoredDocument` | test_types.py, test_storage_protocol.py | tested |
 | `SubmissionCreate` | type | `SubmissionCreate` | test_types.py | tested |
@@ -555,7 +557,7 @@ Conformance helpers; benchmarks are excluded.
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `createExpectAssertions` | value | `create_expect_assertions` | test_testing_conformance.py | tested |
-| `commitWrites` | value | `commit_writes` | test_storage_commit_batches.py | tested (1.5.0: the sanctioned way to seed a storage with one batch — resolves with its sequence, raises the refusal; #38, and #41 moves every remaining seeding path onto it) |
+| `commitWrites` | value | `commit_writes` | test_storage_commit_batches.py | tested (1.5.0: the sanctioned way to write one batch to a storage — resolves with its sequence, raises the refusal; with #41 every seeding path in the conformance suite and the port's suites goes through it) |
 | `createEnvConformance` | value | `create_env_conformance` | test_env_conformance.py | tested |
 | `registerEnvConformance` | value | `register_env_conformance` | test_env_conformance.py | tested |
 | `registerStorageConformance` | value | `register_storage_conformance` | test_testing_conformance.py | tested |
@@ -683,7 +685,7 @@ SQLite backend and migrations.
 | 9.3 Conversation view | planned (a per-watch, per-observer entry window with `before`, `ConversationWindow` bounds, and `ConversationTranscript`; everything a renderer draws is state here; #45, #46) |
 | 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
 | 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |
-| 10 Storage contract | tested (`commit_batches(batches, receive, context)` with per-batch checks, receipts and the refusal beside the single form, the optional `publishing()` scope, and the narrowed `mint_id()` monotonicity across reopen — test_storage_commit_batches.py over the memory, SQLite and JSONL backends; #38. The conformance suite now carries the receipt contract itself — the group stored in order against the state its earlier batches left, the prefix a refusal keeps, a later batch its own actions refuse, a copy resolved against its predecessors, and receipts checked one per stored batch by the wrapper every case runs through; #39. The durable backends' own depth landed with #40, which also pins that every backend module registers the same case list; the single form's deletion remains #41) |
+| 10 Storage contract | tested (`commit_batches(batches, receive, context)` is the protocol's only commit call — per-batch checks against the state the earlier batches left, one durability receipt per stored batch delivered before the call settles, and the refusal a resolved outcome beside a rejection that stores nothing — with the optional `publishing()` scope and the narrowed `mint_id()` monotonicity across reopen: test_storage_commit_batches.py over the memory, SQLite and JSONL backends, and no backend carries the retired single-write signature; #38, #41. The conformance suite carries the receipt contract itself — the group stored in order against the state its earlier batches left, the prefix a refusal keeps, a later batch its own actions refuse, a copy resolved against its predecessors, receipts checked one per stored batch by the wrapper every case runs through, and every case seeded through `commit_writes`; #39, #41. The durable backends' own depth landed with #40, which also pins that every backend module registers the same case list) |
 | 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged observer ends; #42, #44. The tagged watch ends landed with #35) |
 | 11 Backends | tested |
 | 11.1 Memory | tested (one call stores its group in order, each batch checked against the state the earlier ones left, so a copy sees what its predecessors wrote and the first refusal keeps its prefix and leaves the storage serving; the receipts ride the applied batches and stand even when a later batch's application throws — test_memory_storage.py, whose conformance cases run over `MemoryStorage` through the receipt-checking wrapper; #39) |
@@ -836,6 +838,7 @@ orchestrator/worker/reviewer, diamond, and longer-cycle) are translated in
 | Execution environment options and result fields | camelCase result fields and option keys | `FileInfo`, `LineScan`, and `ShellExecResult` keep camelCase wire fields (`mtimeMs`, `firstLineEnd`, `exitCode`, `spillPath`); Python-facing option dicts use snake_case (`start_line`, `inherit_env`, `on_output`, `max_entries`, `after_bytes`) |
 | Tool path resolution | the environment resolves relative and absolute paths, with no confinement | resolved against the environment and confined to its `cwd`; a path outside it raises `ValueError` |
 | Node storage entrypoints | `openNode*` | `JsonlStorage.open()` / `SqliteStorage.open()`, with the caller supplying a `FileSystem` or a `SqliteDatabase`; file-backed SQLite opens through `open_posix_sqlite_storage()` |
+| The one commit call | `Storage.commit(batches, receive, context)` (`storage/storage.ts:250`) — upstream's only commit member: v1.5.0 turned the single-write shape into the group call in place | `Storage.commit_batches(batches, receive, context)`: the port's batched call kept its name when the retired single-write `commit()` it lived beside was deleted (#41), so the name says what the call stores — a group of commit batches — and a host's custom storage implements this one member, while `pi_durable.testing.commit_writes` is how code seeds a storage with one batch |
 | `Result` values | `{ ok: true, value }` / `{ ok: false, error }` object literals | frozen `Ok(value)` / `Err(error)` dataclasses with the same `ok` role and `value`/`error` fields |
 | Storage conformance registration | Vitest's runtime `describe`/`it` globals | `create_storage_conformance` cases are parametrized by pytest; `register_storage_conformance` keeps the runner-injection protocol |
 | JSONL serialization | `JSON.stringify` (raw UTF-8, well-formed lone-surrogate escapes) | `json.dumps(ensure_ascii=True)` (escaped non-ASCII); the decoded JSON values are identical |

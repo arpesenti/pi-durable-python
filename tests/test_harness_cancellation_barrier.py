@@ -11,6 +11,8 @@ from task_support import aborted, deferred, eventually, open_tasks
 from pi_durable import MemoryStorage
 from pi_durable.session.session import create_session
 from pi_durable.tasks import define_task
+from pi_durable.testing import commit_writes
+from pi_durable.types import CommitReceipt
 
 
 async def dormant_run(task: Any, runtime: Any, ctx: Any) -> None:
@@ -41,16 +43,19 @@ class HoldMarks(MemoryStorage):
         self.held = deferred()
         self.release = deferred()
 
-    async def commit(self, writes: Any, commit_context: Any) -> Any:
+    async def commit_batches(
+        self, batches: Any, receive: CommitReceipt, commit_context: Any
+    ) -> Any:
         if any(
             write["type"] == "task"
             and write["value"]["id"] == self.target
             and write["value"].get("abortRequested")
+            for writes in batches
             for write in writes
         ):
             self.held.resolve()
             await self.release.promise
-        return await super().commit(writes, commit_context)
+        return await super().commit_batches(batches, receive, commit_context)
 
 
 async def test_does_not_start_the_next_phase_while_the_cascade_has_not_committed() -> None:
@@ -140,7 +145,8 @@ async def test_lets_a_fail_fast_request_in_the_same_pass_override_a_restart_mark
         "on": [failed, child],
         "policy": "failFast",
     }
-    await storage.commit(
+    await commit_writes(
+        storage,
         cast(
             Any,
             [
@@ -274,7 +280,8 @@ async def test_marks_a_flagged_task_that_holds_its_outcome_and_keeps_it() -> Non
     )
     record = await storage.task(holder, context)
     assert record is not None
-    await storage.commit(
+    await commit_writes(
+        storage,
         cast(
             Any,
             [

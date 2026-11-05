@@ -371,7 +371,7 @@ class SessionImpl:
                 self._sweep_documents()
                 return result
             try:
-                seq = await self._storage.commit(writes, without_abort_signal(context))
+                seq = await self._store_one_batch(writes, context)
             except BaseException:
                 tx.discard()
                 raise
@@ -385,6 +385,29 @@ class SessionImpl:
             self._publishing(partial(self._publish, seq, writes, documents, context), context)
             self._sweep_documents()
             return result
+
+    async def _store_one_batch(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
+        """Store one commit batch through the batched call and return its sequence.
+
+        The Session commits one batch at a time until group commit (#42) puts several in one call.
+        A batch Durable's own rules refuse is a resolved outcome, not a thrown error: nothing of it
+        is stored, so it fails the Session and raises here, which is what a storage that threw the
+        refusal did from inside the guard before the batched call was the only commit shape.
+        """
+
+        received: list[Seq] = []
+
+        def receive(index: int, seq: Seq) -> None:
+            received.append(seq)
+
+        result = await self._storage.commit_batches(
+            [writes], receive, without_abort_signal(context)
+        )
+        if result["stored"] == 0 or not received:
+            error = result.get("refused", RuntimeError("Storage refused the commit batch"))
+            self.fail(error)
+            raise error
+        return received[-1]
 
     def _publishing(self, publish: Callable[[], None], context: Context) -> None:
         """Run one commit's publication inside the storage's own scope, or directly without one.
@@ -996,7 +1019,7 @@ class SessionImpl:
                 return
             batch = list(writes())
             if batch:
-                await self._storage.commit(batch, without_abort_signal(BACKGROUND_CONTEXT))
+                await self._store_one_batch(batch, BACKGROUND_CONTEXT)
 
         async with self._line:
             await job()
@@ -1047,9 +1070,6 @@ class GuardedStorage:
             self._underway.discard(call)
         self._assert_healthy()
         return result
-
-    async def commit(self, writes: Any, context: Context) -> Seq:
-        return cast(Seq, await self._call(None, lambda: self._storage.commit(writes, context)))
 
     async def commit_batches(
         self, batches: Any, receive: CommitReceipt, context: Context

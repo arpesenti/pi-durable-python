@@ -324,33 +324,6 @@ class JsonlStorage:
         await storage._recover(context)
         return storage
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        self._assert_usable()
-        prepared = self._memory.prepare_commit(writes)
-        encoded = self._encode_commit(prepared.seq, prepared.writes)
-        reclamations = self._plan_reclamations(prepared.writes, encoded)
-        sidecars: list[tuple[str, str, str]] = [
-            (file, content, await self._resolve_file(file, context))
-            for file, content in encoded.sidecars.items()
-        ]
-
-        for file, content, path in sidecars:
-            result = await self._fs.append_file(path, content, context)
-            if isinstance(result, Err):
-                raise self._poison(_error_from_file(f"append to {file}", result.error))
-        if self._fsync:
-            for file, _content, path in sidecars:
-                result = await self._fs.flush_file(path, context)
-                if isinstance(result, Err):
-                    raise self._poison(_error_from_file(f"flush of {file}", result.error))
-        marker = await self._fs.append_file(self._main_path, encoded.marker, context)
-        if isinstance(marker, Err):
-            raise self._poison(_error_from_file(f"append to {MAIN_FILE}", marker.error))
-        seq = prepared.apply()
-        self._adopt_sidecar_state(prepared.writes)
-        await self._reclaim_sidecars(reclamations, context)
-        return seq
-
     async def commit_batches(
         self,
         batches: Sequence[Sequence[StorageWrite]],
@@ -364,6 +337,10 @@ class JsonlStorage:
         memory before the file has it, so reads wait for the append to settle (``_readable``) and a
         failure of the file after one applied poisons the storage rather than leaving it serving
         memory the file never got.
+
+        This is the only call that moves the memory ahead of the file, so that gate covers every
+        write a read must not see ahead of durability: the retired single-write form applied without
+        ever opening it.
         """
 
         self._assert_usable()

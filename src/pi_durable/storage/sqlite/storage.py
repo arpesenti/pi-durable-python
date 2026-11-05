@@ -294,25 +294,6 @@ class SqliteStorage:
 
     # ── Commits ─────────────────────────────────────────────────────────────
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        self._assert_open()
-        document_actions = self._prepare_document_actions(writes)
-        candidate_next_id = self._candidate_next_id(writes)
-
-        async def run_transaction(transaction: SqliteExecutor) -> Seq:
-            metadata = await self._read_metadata(transaction)
-            committed_seq = seq_from_number(int(metadata["next_seq"]))
-            await self._check_batch(transaction, writes, document_actions)
-            await self._apply_batch(transaction, writes, document_actions, committed_seq)
-            await self._write_metadata(
-                transaction, max(int(metadata["next_id"]), candidate_next_id), int(committed_seq) + 1
-            )
-            return committed_seq
-
-        seq = await self._db.transaction(run_transaction)
-        self._next_id = max(self._next_id, candidate_next_id)
-        return seq
-
     async def commit_batches(
         self,
         batches: Sequence[Sequence[StorageWrite]],

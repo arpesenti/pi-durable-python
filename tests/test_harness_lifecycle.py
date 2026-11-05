@@ -25,6 +25,7 @@ from pi_durable.harness.registry import create_registry
 from pi_durable.harness.types import Report
 from pi_durable.ids import ConversationId, TaskId
 from pi_durable.tasks import define_task
+from pi_durable.testing import commit_writes
 
 
 def one_step(name: str, run: Any = None) -> Any:
@@ -64,7 +65,8 @@ async def storage_open(storage: Any) -> bool:
 async def seed_running_task(storage: Any) -> None:
     conversation_id = ConversationId(await storage.mint_id())
     id = TaskId(await storage.mint_id())
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "conversation", "value": {"id": conversation_id}},
             {

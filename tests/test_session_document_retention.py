@@ -244,13 +244,14 @@ async def test_writes_after_a_reload_continue_the_stored_deltas_and_bases() -> N
     storage, session, _clock = open_session(0)
     conversation_id = await create_conversation(session)
     writes: list[list[Any]] = []
-    original = storage.commit
+    original = storage.commit_batches
 
-    async def record(batch: Any, commit_context: Any) -> Any:
-        writes.append(list(batch))
-        return await original(batch, commit_context)
+    async def record(batches: Any, receive: Any, commit_context: Any) -> Any:
+        for batch in batches:
+            writes.append(list(batch))
+        return await original(batches, receive, commit_context)
 
-    storage.commit = record  # type: ignore[assignment]
+    storage.commit_batches = record  # type: ignore[method-assign]
     for _ in range(5):
         await bump(session, conversation_id)
         await settle_line(session)

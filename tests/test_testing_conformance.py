@@ -208,7 +208,9 @@ class _MisreceivedMemoryStorage(MemoryStorage):
     [
         ("same-index", "0 is not 1"),
         ("reverse-order", "2 is not 0"),
-        ("extra-receipt", "4 is not 3"),
+        # One stored batch, two receipts: the wrapper catches it on the case's first commit, which
+        # is the seeding call every case now makes through the batched helper.
+        ("extra-receipt", "2 is not 1"),
         ("honest", None),
     ],
 )

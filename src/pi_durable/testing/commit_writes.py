@@ -1,4 +1,4 @@
-"""One batch through the batched ``Storage.commit()``, for code that seeds or writes a storage."""
+"""One batch through ``Storage.commit_batches()``, for code that seeds or writes a storage."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ async def commit_writes(
 
     The sanctioned entry point for a caller that writes a storage directly, such as a test seeding
     it: it hands the batch to :meth:`~pi_durable.types.Storage.commit_batches` and turns the
-    resolved refusal back into the error Durable's own checks raised, so a refused seed raises where
-    a single-commit caller expects it to.
+    resolved refusal back into the error Durable's own checks raised, so a seed the storage refuses
+    raises where its caller expects it to.
     """
 
     received: list[Seq] = []

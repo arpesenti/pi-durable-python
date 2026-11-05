@@ -20,6 +20,7 @@ from submission_support import (
 )
 
 from pi_durable import InboxDoc, LiveDoc, MemoryStorage, ResetEntry
+from pi_durable.types import CommitReceipt, Seq
 
 
 @pytest.fixture(autouse=True)
@@ -297,21 +298,29 @@ async def test_writes_the_inbox_as_a_complete_base_exactly_when_it_becomes_empty
     inbox_id: dict[str, int] = {}
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, call_context: Any) -> Any:
-            for write in writes:
-                if (
-                    write["type"] == "document.change"
-                    and inbox_id.get("id") == write["id"]
-                ):
-                    content = write["content"]
-                    written.append(
-                        (
+        async def commit_batches(
+            self, batches: Any, receive: CommitReceipt, call_context: Any
+        ) -> Any:
+            seen: dict[int, tuple[str, bool]] = {}
+            for index, writes in enumerate(batches):
+                for write in writes:
+                    if (
+                        write["type"] == "document.change"
+                        and inbox_id.get("id") == write["id"]
+                    ):
+                        content = write["content"]
+                        seen[index] = (
                             content["kind"],
                             content["kind"] == "base"
                             and len(content["value"]["items"]) == 0,
                         )
-                    )
-            return await super().commit(writes, call_context)
+
+            def recorded(index: int, seq: Seq) -> None:
+                receive(index, seq)
+                if index in seen:
+                    written.append(seen[index])
+
+            return await super().commit_batches(batches, recorded, call_context)
 
     opened = await open_submissions(RecordingStorage())
     harness, root = opened["harness"], opened["root"]

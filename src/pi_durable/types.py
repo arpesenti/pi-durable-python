@@ -1157,18 +1157,15 @@ class Storage(Protocol):
     An error a method throws is final: it fails the Session, which nothing retries, so retry
     transient failures inside the method. Two errors of a read fail only that read: a
     :class:`~pi_durable.errors.StorageRequestError` for an invalid request, and a rejection
-    because its caller's context was aborted. Any error from :meth:`commit`,
-    :meth:`commit_batches` or :meth:`mint_id` is fatal.
+    because its caller's context was aborted. Any error from :meth:`commit_batches` or
+    :meth:`mint_id` is fatal.
+
+    ``commit_batches`` is the only commit shape: a storage implements one call and no single-write
+    companion. Code that seeds or writes a storage directly, such as a test, goes through
+    :func:`pi_durable.testing.commit_writes`, which passes one batch to this call.
 
     The optional publication scope is not a member here: see :class:`PublishingStorage`.
     """
-
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        """Atomically persist one batch and return its sequence.
-
-        The single-batch form, kept beside :meth:`commit_batches` while backends gain the batched
-        call; :class:`pi_durable.testing.commit_writes` is the sanctioned way to seed a storage.
-        """
 
     async def commit_batches(
         self,

@@ -9,11 +9,13 @@ from typing import Any, cast
 
 from pi_durable import MemoryStorage
 from pi_durable.context import BACKGROUND_CONTEXT, Context
-from pi_durable.ids import ConversationId, DocumentId, Seq
+from pi_durable.ids import ConversationId, DocumentId
 from pi_durable.json import copy_json
 from pi_durable.session.session import SessionImpl
 from pi_durable.types import (
     CommitPublication,
+    CommitReceipt,
+    CommitResult,
     DocumentAddress,
     DocumentPoint,
     DocumentRecord,
@@ -105,9 +107,16 @@ class ControlledStorage(MemoryStorage):
         self._closed = False
         return self
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        self.admitted_commits.append(writes)
-        self.commits.append(copy_json(list(writes)))  # type: ignore[arg-type]
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        commit_context: Context,
+    ) -> CommitResult:
+        # One Session commit is one call; a batch is one commit, so every batch is recorded.
+        for batch in batches:
+            self.admitted_commits.append(batch)
+            self.commits.append(copy_json(list(batch)))  # type: ignore[arg-type]
         gate = self._commit_gate
         if gate is not None:
             await gate.wait()
@@ -115,7 +124,7 @@ class ControlledStorage(MemoryStorage):
         if failure is not None:
             self._commit_failure = None
             raise failure
-        return await super().commit(writes, context)
+        return await super().commit_batches(batches, receive, commit_context)
 
     async def mint_id(self) -> int:
         self.mint_count += 1
