@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import partial
 from typing import Any, Literal, cast
@@ -41,6 +40,7 @@ from .types import (
     HarnessInspection,
     RegistryReader,
     RegistrySnapshot,
+    Report,
     ReportInfo,
     ReportInfoInput,
     SettledSubmissionRecord,
@@ -66,55 +66,38 @@ def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
     return cast(ConversationOwnership, ownership)
 
 
-def _report_arity(on_report: Callable[..., Any]) -> int:
-    """How many positional arguments a host ``on_report`` takes: it may take just the error."""
-
-    try:
-        parameters = list(inspect.signature(on_report).parameters.values())
-    except (TypeError, ValueError):
-        return 2
-    if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
-        return 2
-    positional = [
-        parameter
-        for parameter in parameters
-        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    return min(len(positional), 2)
-
-
 def _safe_report(
-    on_report: Callable[..., Any] | None,
+    on_report: Callable[[Report], Any] | None,
 ) -> Callable[[BaseException, ReportInfoInput | None], None]:
     """``on_report`` that cannot fail: it is the last place an error goes, so its own throw is dropped."""
 
-    arity = _report_arity(on_report) if on_report is not None else 2
-
     def report(error: BaseException, info: ReportInfoInput | None = None) -> None:
-        # The host's sink is handed one spelling, whichever spelling the caller used (#33, #37).
+        # The host's sink is handed one report object, whichever spelling its info used (#33, #37).
         values = to_report_info(info) if info is not None else LISTENER
 
         def call() -> Any:
             if on_report is None:
                 return None
-            return on_report(error) if arity == 1 else on_report(error, values)
+            return on_report(cast(Report, {**values, "error": error}))
 
         contained(call, lambda _error: None)
 
     return report
 
 
-def safe_now(now: Callable[[], int] | None, report: Callable[..., None]) -> Callable[[], int]:
+def safe_now(
+    now: Callable[[], int] | None,
+    report: Callable[[BaseException, ReportInfo], None],
+) -> Callable[[], int]:
     """The host clock, falling back to the wall clock when it throws.
 
-    A broken clock must not stop commits: the first throw is reported, with its ``host_error`` info
-    when the sink takes one, and later throws are not.
+    A broken clock must not stop commits: the first throw is reported as its ``host_error``, and
+    later throws are not, because the clock is read in every task change.
     """
 
     if now is None:
         return _now_ms
     reported = False
-    arity = _report_arity(report)
 
     def clock() -> int:
         nonlocal reported
@@ -124,10 +107,7 @@ def safe_now(now: Callable[[], int] | None, report: Callable[..., None]) -> Call
             # Set first: a report handler that reads the clock again must not report again.
             if not reported:
                 reported = True
-                if arity == 1:
-                    report(error)
-                else:
-                    report(error, host_error("now"))
+                report(error, host_error("now"))
             return _now_ms()
 
     return clock

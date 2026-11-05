@@ -313,7 +313,7 @@ class SessionImpl:
         except RuntimeError:
             return
         loop.create_task(self._close_after_failure())
-        self.report(error, {"kind": "session_failed"})
+        self.report(error, {"kind": "storage_failed"})
 
     async def _close_after_failure(self) -> None:
         try:
@@ -483,7 +483,7 @@ class SessionImpl:
                     error = close_error
                     if self._failure is None:
                         self._failure = close_error
-                        self.report(close_error, {"kind": "session_failed"})
+                        self.report(close_error, {"kind": "storage_failed"})
                     raise
         except BaseException as caught:
             error = caught

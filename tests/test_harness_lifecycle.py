@@ -22,6 +22,7 @@ from pi_durable.context import AbortController
 from pi_durable.harness.define import define_extension
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
+from pi_durable.harness.types import Report
 from pi_durable.ids import ConversationId, TaskId
 from pi_durable.tasks import define_task
 
@@ -109,7 +110,7 @@ async def test_open_closes_without_a_cancelled_caller_context_and_rethrows() -> 
 
 async def test_rethrows_the_open_error_and_reports_it_once_though_close_fails() -> None:
     failure = RuntimeError("disk full")
-    reports: list[BaseException] = []
+    reports: list[Report] = []
 
     class FailingClose(ControlledStorage):
         async def close(self, close_context: Any) -> None:
@@ -128,7 +129,7 @@ async def test_rethrows_the_open_error_and_reports_it_once_though_close_fails() 
     )
     with pytest.raises(Exception, match="disk full"):
         await opening
-    assert reports == [failure]
+    assert reports == [{"kind": "storage_failed", "error": failure}]
 
 
 async def test_joins_a_task_handler_that_ignores_its_signal_before_closing_storage() -> None:

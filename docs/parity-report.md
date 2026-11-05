@@ -241,3 +241,12 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `test_harness_compaction.py`, and `test_harness_registry_agent.py`.
 - **Persisted shapes.** Records stay camelCase; Python-facing objects are snake_case. This is the
   documented naming deviation in `PARITY.md`, not a semantic difference.
+- **A task cut off at open reports nothing until #49.** Upstream v1.5.0 has no parked task: its case
+  `test/harness-blocked.test.ts:136` faults an extension's task cut off `settings.restart_limit`
+  times in a row at open and reports `{kind: "task_faulted", reason: "restart_limit"}` with the
+  message `Task <id> (<kind>) was cut off 3 times without progress`. The port still parks — the
+  parked state, its `restart_limit` blocked reason, `retry_task()`, and the wake exclusion are #49's
+  to delete — and 1.5.0 carries no report kind for a task that is blocked but not ended, so the
+  `task_parked` report #34 deleted has no replacement yet.
+  `test_harness_blocked.py::test_interim_parked_task_reports_nothing_until_49` is the port-side
+  interim case that stands in for the upstream one until #49 replaces it.

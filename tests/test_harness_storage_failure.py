@@ -14,6 +14,7 @@ from pi_durable.errors import SessionFailed, StorageRequestError
 from pi_durable.harness.define import define_extension
 from pi_durable.harness.harness import Harness, safe_now
 from pi_durable.harness.registry import create_registry
+from pi_durable.harness.types import Report, ReportInfo
 from pi_durable.ids import TaskId
 from pi_durable.session.session import contained
 from pi_durable.tasks import define_task
@@ -425,8 +426,8 @@ async def test_ends_an_abort_that_joins_a_run_ignoring_its_signal_and_a_reentran
     reentered: list[Any] = []
     holder: dict[str, Any] = {}
 
-    def on_report(error: BaseException) -> None:
-        reports.append(error)
+    def on_report(report: Report) -> None:
+        reports.append(report["error"])
         reentered.append(holder["harness"].wait_for_idle(context))
 
     harness = await Harness.open(
@@ -570,7 +571,7 @@ def test_reports_a_throwing_clock_once_also_when_the_report_handler_reads_the_cl
 
     clock: Any = None
 
-    def report(error: BaseException) -> None:
+    def report(error: BaseException, _info: ReportInfo) -> None:
         reports.append(error)
         # Reentry, as a handler that commits does: the clock is read again before this report returns.
         if len(reports) < 5:
@@ -589,7 +590,7 @@ async def test_keeps_working_when_on_report_throws_and_falls_back_when_the_clock
     def broken_clock() -> int:
         raise RuntimeError("clock broke")
 
-    def broken_report(error: BaseException) -> None:
+    def broken_report(_report: Report) -> None:
         raise RuntimeError("report broke")
 
     harness = await Harness.open(

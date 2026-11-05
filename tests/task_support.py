@@ -12,7 +12,7 @@ from pi_durable.context import Context
 from pi_durable.harness.define import define_extension
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
-from pi_durable.harness.types import Registry, RegistryReader, RegistrySnapshot
+from pi_durable.harness.types import Registry, RegistryReader, RegistrySnapshot, Report
 from pi_durable.harness.util import cancellation_error
 
 __all__ = [
@@ -148,9 +148,10 @@ async def open_tasks(
 ) -> dict[str, Any]:
     """Open a Harness whose registry holds ``tasks``; failures reach ``on_report``.
 
-    ``reports`` collects each error and ``infos`` its :class:`ReportInfo`. ``override_tasks``
-    replaces built-in definitions in the snapshot the Harness reads, so submission suites can keep
-    their own generation probe without installing a colliding task.
+    ``reports`` collects each error and ``infos`` its :class:`ReportInfo`: the one ``Report`` the
+    host is handed, split the way the upstream helper splits it. ``override_tasks`` replaces
+    built-in definitions in the snapshot the Harness reads, so submission suites can keep their own
+    generation probe without installing a colliding task.
     """
 
     values = dict(options or {})
@@ -161,10 +162,9 @@ async def open_tasks(
     reports: list[BaseException] = []
     infos: list[dict[str, Any]] = []
 
-    def on_report(error: BaseException, info: dict[str, Any] | None = None) -> None:
-        reports.append(error)
-        if info is not None:
-            infos.append(info)
+    def on_report(report: Report) -> None:
+        reports.append(report["error"])
+        infos.append({key: value for key, value in report.items() if key != "error"})
 
     harness = await Harness.open(
         storage,

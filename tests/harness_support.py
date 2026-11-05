@@ -11,7 +11,7 @@ from pi_durable import MemoryStorage
 from pi_durable.harness.define import define_extension, define_tool, section
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
-from pi_durable.harness.types import Extension, Registry, ToolRegistration
+from pi_durable.harness.types import Extension, Registry, Report, ToolRegistration
 from pi_durable.types import MessageRecord, Storage
 
 
@@ -31,7 +31,7 @@ async def open_harness(
     tool_names: tuple[str, ...] = (),
     *,
     registry: Registry | None = None,
-    on_report: Callable[[BaseException], Any] | None = None,
+    on_report: Callable[[Report], Any] | None = None,
 ) -> dict[str, Any]:
     """Open a Harness with a fresh registry holding the named tools."""
 

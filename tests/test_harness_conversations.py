@@ -35,7 +35,7 @@ async def open_conversations(
         {
             "models": {},
             "registry": registry,
-            "on_report": reports.append,
+            "on_report": lambda report: reports.append(report["error"]),
             **({} if created is None else {"conversation_created": created}),
         },
         context,

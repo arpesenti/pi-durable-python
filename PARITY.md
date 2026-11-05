@@ -263,7 +263,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `HookRegistration` | type | `HookRegistration` | test_harness_tasks.py | tested |
 | `HookResult` | type | `HookResult` | test_harness_tools.py | tested |
 | `HooksOf` | type | `HooksOf` | test_types.py, test_spec_usage.py | tested (erased to `Any`; see Allowed deviations) |
-| `HostCallback` | type | `HostCallback` | test_harness_reports.py | tested |
+| `HostCallback` | type | `HostCallback` | test_harness_reports.py | tested (the exhaustive set the port reports against; upstream's `telemetry` member is excluded by ADR 0003 and asserted absent) |
 | `InputEntry` | type | `InputEntry` | test_harness_input_entries.py | tested |
 | `InputSubmissionDraft` | type | `InputSubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
 | `ModelRef` | type | `ModelRef` | test_harness_registry_agent.py | tested |
@@ -388,7 +388,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `Observer` | type | `Observer` | — | planned (1.5.0: the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph; #44) |
 | `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
 | `PhaseHandler` | type | `PhaseHandler` | test_types.py | tested |
-| `Report` | type | `Report` | — | planned (1.5.0: `on_report` takes one of these — the `ReportInfo` fields tagged by `kind`, plus the `error`; #34) |
+| `Report` | type | `Report` | test_harness_reports.py | tested (`on_report` takes one of these: the `ReportInfo` fields tagged by `kind`, plus the `error`; #34) |
 | `RewindableConversationDocFamilyToken` | type | `RewindableConversationDocFamilyToken` | test_session_definitions.py | tested |
 | `RewindableConversationDocToken` | type | `RewindableConversationDocToken` | test_session_definitions.py | tested |
 | `RewindableConversationSemantics` | type | `RewindableConversationSemantics` | test_types.py | tested |
@@ -875,7 +875,6 @@ orchestrator/worker/reviewer, diamond, and longer-cycle) are translated in
 | Record mutability | TypeScript `readonly` types | entry records are deep-frozen `FrozenDict`/`FrozenList` values |
 | Draft property deletion | assigning `undefined` deletes the property | use `del draft.key`; assigning `None` stores JSON `null` |
 | Definition callbacks | methods invoked with the definition as `this` | a callback whose first parameter is named `self` or `definition` receives the definition bound |
-| Host callback arity | JavaScript ignores arguments a callback does not declare, so a one-argument `onReport` sees the error alone | `on_report` (and `safe_now`'s sink) declared with one parameter receives the error alone: the Harness inspects the callable's arity once, and passes `info` to a callback that declares it |
 | Definition constructors | identity functions; they check nothing | `define_*` constructors validate a required non-empty name (and a task's version) eagerly; `section` and the registry check section rules |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
 | Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | `context(conversation_id, context, at=...)`; `Conversation.context()` and `TaskRuntime.context()` accept the cutoff as a keyword mapping |
@@ -924,7 +923,7 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | OpenAI model adapter over Chat Completions | `pi_durable.providers.openai` | tested (`test_providers_openai.py`, `test_providers_extras.py`) |
 | Anthropic model adapter over Messages | `pi_durable.providers.anthropic` | tested (`test_providers_anthropic.py`, `test_providers_extras.py`) |
 
-| `ReportType`, `ReportReason` | union aliases narrowing `ReportInfo.type` and `.reason` | `pi_durable.harness.types` | used by `ReportInfo`; `test_harness_reports.py` exercises every member |
+| `ReportKind`, `ReportReason` | union aliases narrowing `ReportInfo.kind` and `.reason` | `pi_durable.harness.types` | used by `ReportInfo`; `test_harness_reports.py` exercises every member |
 | `Timers`, `host_timers`, `native_timer` | internal timer arming behind `HarnessOptions.set_timer` (upstream `hostTimers` / `nativeTimer`) | `pi_durable.timers` | `test_harness_sleep.py`, `test_session_document_retention.py` |
 | `blocked_subject`, `blocked_reason()` | what the task graph reads of a record to derive its blocked reason | `pi_durable.harness.scheduler` | `test_harness_blocked.py`, `test_harness_task_graph.py` |
 

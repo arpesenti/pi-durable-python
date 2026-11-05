@@ -97,12 +97,8 @@ A cut-off of a running task by a crash, eviction, or reset, counted in `TaskReco
 open. A close is not a restart; committing a new state clears the count.
 _Avoid_: retry, rerun
 
-**Parked task**:
-A task cut off `settings.restart_limit` times in a row without progress: blocked with reason
-`restart_limit`, reported once, not active in `wake()`, and run again only by `retry_task()`.
-_Avoid_: stalled, dead, parked job
-
 **Report**:
 A failure that does not fail the calling operation, or the Session's own failure, delivered to
-`on_report(error, info)` with a typed `ReportInfo` saying what happened.
-_Avoid_: log, error event, notification
+`on_report(report)` as one `Report`: the fields of a `ReportInfo` tagged by `kind` — what happened,
+from `storage_failed` to `listener_error` — beside the `error` itself.
+_Avoid_: log, error event, notification, report info argument
