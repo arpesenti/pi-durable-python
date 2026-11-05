@@ -494,15 +494,15 @@ class PosixFileWatcher:
                 try:
                     snapshot = await self._scan()
                 except _BudgetExceeded as error:
-                    self._deliver(WatchError(error=FileError("invalid", str(error))))
+                    self._deliver(WatchError(kind="failed", error=FileError("invalid", str(error))))
                     return
                 except (FileError, OSError) as error:
-                    self._deliver(WatchError(error=to_file_error(error)))
+                    self._deliver(WatchError(kind="failed", error=to_file_error(error)))
                     return
                 changed = self._diff(self._snapshot, snapshot)
                 self._snapshot = snapshot
                 if changed:
-                    self._deliver(WatchPaths(paths=sorted(changed)))
+                    self._deliver(WatchPaths(kind="paths", paths=sorted(changed)))
         except asyncio.CancelledError:
             return
 

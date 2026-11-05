@@ -92,10 +92,10 @@ async def test_say_which_task_reported_a_failure_or_faulted() -> None:
     # The task's own failures name the extension that installed it.
     task = {"id": id, "kind": "test.faulty", "conversationId": root.id}
     assert opened["reports"] == [
-        {"message": "noted", "info": {"type": "task_error", "task": task, "extension": "test"}},
+        {"message": "noted", "info": {"kind": "task_error", "task": task, "extension": "test"}},
         {
             "message": "broken",
-            "info": {"type": "task_faulted", "task": task, "extension": "test", "reason": "threw"},
+            "info": {"kind": "task_faulted", "task": task, "extension": "test", "reason": "threw"},
         },
     ]
     await harness.close(context)
@@ -139,7 +139,7 @@ async def test_name_the_extension_whose_definition_ran_also_after_another_one_re
     await harness.wait_for_task(id, context)
 
     def faulted(report: Report) -> bool:
-        return report["info"]["type"] == "task_faulted"
+        return report["info"]["kind"] == "task_faulted"
 
     await eventually(lambda: any(faulted(report) for report in opened["reports"]))
     found = next(report for report in opened["reports"] if faulted(report))
@@ -189,16 +189,16 @@ async def test_names_the_extension_of_a_failing_section_or_hook_and_of_a_failing
     await (await root.submit({"type": "input", "content": "hi"}, context)).wait(context)
     generation = {"id": None, "kind": "pi.generation", "conversationId": root.id}
     env = info_of(reports, "env")
-    assert env["type"] == "host_error"
+    assert env["kind"] == "host_error"
     assert env["callback"] == "env"
     assert env["task"]["kind"] == generation["kind"]
     assert env["task"]["conversationId"] == generation["conversationId"]
     failed_section = info_of(reports, "section")
-    assert failed_section["type"] == "extension_error"
+    assert failed_section["kind"] == "extension_error"
     assert failed_section["extension"] == "sections"
     assert failed_section["task"]["kind"] == "pi.generation"
     failed_hook = info_of(reports, "hook")
-    assert failed_hook["type"] == "extension_error"
+    assert failed_hook["kind"] == "extension_error"
     assert failed_hook["extension"] == "hooks"
     await harness.close(context)
 
@@ -272,9 +272,9 @@ async def test_tell_extension_listener_wake_and_timer_failures_from_a_failed_ses
     )
     renamed = info_of(reports, "Wrapper renamed echo to renamed")
     assert renamed["extension"] == "wraps"
-    assert info_of(reports, "listener") == {"type": "listener_error"}
-    assert info_of(reports, "alarm") == {"type": "host_error", "callback": "onWake"}
-    assert info_of(reports, "no timers") == {"type": "host_error", "callback": "setTimer"}
+    assert info_of(reports, "listener") == {"kind": "listener_error"}
+    assert info_of(reports, "alarm") == {"kind": "host_error", "callback": "onWake"}
+    assert info_of(reports, "no timers") == {"kind": "host_error", "callback": "setTimer"}
 
     failure = RuntimeError("disk gone")
     storage.fail_next_commit(failure)
@@ -285,4 +285,4 @@ async def test_tell_extension_listener_wake_and_timer_failures_from_a_failed_ses
     except Exception:
         pass
     await harness.closed
-    assert info_of(reports, "disk gone") == {"type": "session_failed"}
+    assert info_of(reports, "disk gone") == {"kind": "session_failed"}

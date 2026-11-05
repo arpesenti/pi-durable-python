@@ -415,7 +415,7 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
     assert any(str(error) == "cancel failed" for error in setup.reports)
     # Cancelling a deferred response is a host callback, not the task's own failure.
     failed = next(info for info in infos if info.get("callback") == "models")
-    assert failed["type"] == "host_error"
+    assert failed["kind"] == "host_error"
     assert failed["task"]["kind"] == "pi.generation"
     assert await live(harness, root) == {}
     await harness.close(context)

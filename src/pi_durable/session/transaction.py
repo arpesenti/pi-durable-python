@@ -709,11 +709,9 @@ class Transaction:
                 publications.append(
                     {
                         "type": "document",
+                        "kind": "retire",
                         "record": record,
                         "conversationId": plan.conversation_id,
-                        "version": None,
-                        "value": None,
-                        "ops": [],
                     }
                 )
             elif plan.content is not None and plan.content["type"] == "document.copy":
@@ -729,6 +727,7 @@ class Transaction:
                 publications.append(
                     {
                         "type": "document",
+                        "kind": "change",
                         "record": record,
                         "conversationId": plan.conversation_id,
                         "version": change.version,

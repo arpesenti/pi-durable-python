@@ -42,11 +42,13 @@ from .types import (
     RegistryReader,
     RegistrySnapshot,
     ReportInfo,
+    ReportInfoInput,
     SettledSubmissionRecord,
     SettledTask,
     Submission,
     Wake,
     host_error,
+    to_report_info,
 )
 from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
@@ -83,13 +85,14 @@ def _report_arity(on_report: Callable[..., Any]) -> int:
 
 def _safe_report(
     on_report: Callable[..., Any] | None,
-) -> Callable[[BaseException, ReportInfo | None], None]:
+) -> Callable[[BaseException, ReportInfoInput | None], None]:
     """``on_report`` that cannot fail: it is the last place an error goes, so its own throw is dropped."""
 
     arity = _report_arity(on_report) if on_report is not None else 2
 
-    def report(error: BaseException, info: ReportInfo | None = None) -> None:
-        values = info if info is not None else LISTENER
+    def report(error: BaseException, info: ReportInfoInput | None = None) -> None:
+        # The host's sink is handed one spelling, whichever spelling the caller used (#33, #37).
+        values = to_report_info(info) if info is not None else LISTENER
 
         def call() -> Any:
             if on_report is None:
@@ -410,7 +413,7 @@ class Harness(SessionImpl):
         def report(error: BaseException, extension: str) -> None:
             self.report(
                 error,
-                {"type": "extension_error", "conversationId": id, "extension": extension},
+                {"kind": "extension_error", "conversationId": id, "extension": extension},
             )
 
         return resolve_agent(state, registry, settings, report)

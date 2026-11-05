@@ -340,7 +340,7 @@ async def test_ends_states_and_watches_at_close_and_rejects_later_acquisition() 
     watch = await root.watch(context)
     state = await root.view_state(context)
     await harness.close(context)
-    assert await watch.closed == {"reason": "session_closed"}
+    assert await watch.closed == {"kind": "session_closed"}
     assert state.value["entries"] == []
     with pytest.raises(Exception, match="closed"):
         await root.watch(context)
@@ -399,7 +399,7 @@ async def test_shares_one_mount_between_concurrent_observers_and_isolates_a_fail
     await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "one"}), context)
     await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "two"}), context)
     await drained()
-    assert (await failing.closed)["reason"] == "listener_error"
+    assert (await failing.closed)["kind"] == "listener_error"
     assert len(frames) == 2
     await recorded["watch"].stop()
     await harness.close(context)

@@ -24,8 +24,10 @@ from ..env import (
     ShellExecOptions,
     ShellOutputInfo,
     WatchChange,
+    WatchChangeInput,
     WatchTarget,
     get_or_throw,
+    to_file_change,
 )
 from ..truncate import utf8_byte_length
 from .types import (
@@ -81,14 +83,15 @@ async def _listed(
     return [f"{letters[entry['kind']]} {entry['path']}" for entry in listing["entries"]], listing["truncated"]
 
 
-def _covers(change: WatchChange, path: str) -> bool:
-    if "overflow" in change:
+def _covers(change: WatchChangeInput, path: str) -> bool:
+    settled = to_file_change(change)
+    if settled["kind"] == "overflow":
         return True
-    if "paths" not in change:
+    if settled["kind"] != "paths":
         return False
     return any(
         path == reported or path.startswith(reported + "/") or path.startswith(reported + "\\")
-        for reported in change["paths"]
+        for reported in settled["paths"]
     )
 
 

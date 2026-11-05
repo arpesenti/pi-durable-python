@@ -522,8 +522,8 @@ async def test_retires_task_documents_at_terminal_settlement() -> None:
     publication = publications[-1]
     documents = document_changes(publication)
     assert len([change for change in publication["changes"] if change["type"] == "task"]) == 1
-    assert [document["value"] for document in documents] == [None, None, None]
-    assert all(document["ops"] == [] for document in documents)
+    assert [document["kind"] for document in documents] == ["retire", "retire", "retire"]
+    assert all("ops" not in document for document in documents)
     assert all(document["conversationId"] == conversation_id for document in documents)
     assert await session.snapshot(ProgressDoc, task_id, context) is None
     assert await session.snapshot(StepDoc, task_id, "committed", context) is None
@@ -560,7 +560,7 @@ async def test_create_session_opens_over_memory_storage() -> None:
     conversation = await opened.commit(create, context)
     assert conversation["id"] == 2
     await opened.close(context)
-    assert await opened.closed == {"reason": "closed"}
+    assert await opened.closed == {"kind": "closed"}
 
 
 async def test_storage_failure_fails_the_session_and_publishes_nothing() -> None:
@@ -582,7 +582,7 @@ async def test_storage_failure_fails_the_session_and_publishes_nothing() -> None
         )
     assert raised.value.cause is failure
     closed = await asyncio.wait_for(session.closed, 1)
-    assert closed == {"reason": "failed", "error": failure}
+    assert closed == {"kind": "failed", "error": failure}
 
 
 async def test_a_failing_storage_close_fails_the_session_and_rejects_close() -> None:
@@ -594,7 +594,7 @@ async def test_a_failing_storage_close_fails_the_session_and_rejects_close() -> 
     with pytest.raises(RuntimeError, match="close failed"):
         await session.close(context)
     closed = await asyncio.wait_for(session.closed, 1)
-    assert closed["reason"] == "failed"
+    assert closed["kind"] == "failed"
     assert isinstance(closed["error"], RuntimeError)
 
 

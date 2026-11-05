@@ -512,8 +512,8 @@ async def test_retires_documents_and_creates_a_new_incarnation_at_the_same_addre
     publication = publications[-1]
     retired, created = document_changes(publication)
     assert retired["record"]["id"] == old_id
-    assert retired["value"] is None
-    assert retired["ops"] == []
+    assert retired["kind"] == "retire"
+    assert "value" not in retired and "ops" not in retired
     assert retired["record"]["retiredAt"] == publication["seq"]
     assert created["record"]["id"] != old_id
     assert created["record"]["createdAt"] == publication["seq"]

@@ -216,7 +216,7 @@ async def test_keeps_the_hosts_wake_active_until_opens_recovery_pass_has_landed(
     )
     harness = opened["harness"]
     closed = await harness.closed
-    assert closed["reason"] == "failed"
+    assert closed["kind"] == "failed"
     # The host was told work is underway, and never that it ended: its recovery alarm stays.
     assert wakes == [{"active": True}]
     await inner.close(context)
@@ -244,7 +244,7 @@ async def test_parks_a_task_cut_off_restart_limit_times_in_a_row_and_runs_it_aga
     assert record["restarts"] == 3
     assert opened["infos"] == [
         {
-            "type": "task_parked",
+            "kind": "task_parked",
             "task": {"id": id, "kind": "test.crash-loop", "conversationId": 1},
             "extension": "loop",
         }
@@ -370,7 +370,7 @@ async def test_faults_a_task_whose_abort_handler_is_cut_off_restart_limit_times(
     await eventually(lambda: opened["infos"] != [])
     assert opened["infos"] == [
         {
-            "type": "task_faulted",
+            "kind": "task_faulted",
             "task": {"id": id, "kind": "test.stuck-abort", "conversationId": 1},
             "extension": "stuck",
             "reason": "restart_limit",

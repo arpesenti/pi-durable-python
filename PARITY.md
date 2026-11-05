@@ -272,8 +272,8 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `PromptInput` | type | `PromptInput` | test_harness_prompt.py | tested |
 | `PromptSection` | type | `PromptSection` | test_harness_registry_agent.py, test_harness_prompt.py | tested |
 | `QueueMode` | type | `QueueMode` | test_harness_inbox.py | tested |
-| `ReportFrom` | type | `ReportFrom` | test_harness_reports.py | tested |
-| `ReportInfo` | type | `ReportInfo` | test_harness_reports.py, test_harness_blocked.py, test_harness_sleep.py | tested |
+| `ReportFrom` | type | `ReportFrom` | test_harness_reports.py, test_discriminant_spellings.py | tested |
+| `ReportInfo` | type | `ReportInfo` | test_harness_reports.py, test_harness_blocked.py, test_harness_sleep.py, test_discriminant_spellings.py | tested |
 | `ReportTask` | type | `ReportTask` | test_harness_reports.py, test_harness_blocked.py | tested |
 | `Registry` | type | `Registry` | test_harness_tasks.py, test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
 | `RegistryReader` | type | `RegistryReader` | test_harness_lifecycle.py, test_harness_registry_agent.py | tested |
@@ -359,7 +359,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `DocFamilyToken` | type | `DocFamilyToken` | test_session_definitions.py, test_session_states.py | tested |
 | `DocToken` | type | `DocToken` | test_session_definitions.py, test_session_documents.py, test_session_states.py | tested |
 | `DocumentAddress` | type | `DocumentAddress` | test_types.py, test_storage_protocol.py | tested |
-| `DocumentCommitChange` | type | `DocumentCommitChange` | test_types.py | tested |
+| `DocumentCommitChange` | type | `DocumentCommitChange` | test_types.py, test_discriminant_spellings.py | tested |
 | `DocumentContent` | type | `DocumentContent` | test_types.py | tested |
 | `DocumentCopySource` | type | `DocumentCopySource` | test_types.py | tested |
 | `DocumentCreate` | type | `DocumentCreate` | test_types.py | tested |
@@ -398,7 +398,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `Session` | type | `Session` | test_session_tables.py | tested |
 | `SessionDocFamilyToken` | type | `SessionDocFamilyToken` | test_session_definitions.py | tested |
 | `SessionDocToken` | type | `SessionDocToken` | test_session_definitions.py | tested |
-| `SessionEnd` | type | `SessionEnd` | test_types.py, test_harness_storage_failure.py | tested |
+| `SessionEnd` | type | `SessionEnd` | test_types.py, test_harness_storage_failure.py, test_discriminant_spellings.py | tested |
 | `Storage` | type | `Storage` | test_storage_protocol.py | tested |
 | `StorageWrite` | type | `StorageWrite` | test_types.py, test_storage_protocol.py | tested |
 | `StoredDocument` | type | `StoredDocument` | test_types.py, test_storage_protocol.py | tested |
@@ -425,7 +425,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
 | `WatchCall` | type | `WatchCall` | — | planned (1.5.0: Chord's tagged listener call — `{kind: "value", value, ops, retired}`; #35, #43) |
-| `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
+| `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py, test_discriminant_spellings.py | tested |
 | `WatchHandle` | type | `WatchHandle` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 
 ## Optional subpaths
@@ -456,7 +456,7 @@ Execution environment protocol and helpers.
 | `TextLineReader` | type | `TextLineReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `BinaryReader` | type | `BinaryReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `WatchTarget` | type | `WatchTarget` | test_env_conformance.py, test_env_posix.py | tested |
-| `WatchChange` | type | `WatchChange` | test_env_conformance.py, test_env_posix.py | tested (the 1.4.0 untagged shape; #35 retires the name) |
+| `WatchChange` | type | `WatchChange` | test_env_conformance.py, test_env_posix.py, test_discriminant_spellings.py | tested (both spellings are read and only the `kind` one is emitted since #33; #35 retires the name) |
 | `FileChange` | type | `FileChange` | — | planned (1.5.0: what `FileSystem.watch()` changes are renamed to, tagged by `kind`: `paths`, `overflow`, `failed`; #35) |
 | `FileWatcher` | type | `FileWatcher` | test_env_conformance.py, test_env_posix.py | tested |
 | `LineScan` | type | `LineScan` | test_env_line_scan.py, test_env_conformance.py | tested |

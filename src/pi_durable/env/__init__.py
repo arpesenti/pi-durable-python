@@ -18,6 +18,7 @@ from typing import (
     Protocol,
     TypeAlias,
     TypeVar,
+    cast,
     runtime_checkable,
 )
 
@@ -177,19 +178,66 @@ class WatchTarget(dict[str, Any]):
     """A file or directory to watch."""
 
 
+# 1.5.0 tags what ``FileSystem.watch()`` reports by ``kind`` (upstream ``src/env/index.ts:127``);
+# before it, the three shapes were told apart by which keys they carried. The port emits only the
+# ``kind`` spelling and reads either, until #37 deletes the retired one. The ledger of what this
+# release retags, and of the unions it leaves alone, is at the top of ``types.py``.
+
+
 class WatchPaths(dict[str, Any]):
+    kind: Literal["paths"]
     paths: list[str]
 
 
 class WatchOverflow(dict[str, Any]):
-    overflow: Literal[True]
+    kind: Literal["overflow"]
 
 
 class WatchError(dict[str, Any]):
+    kind: Literal["failed"]
     error: FileError
 
 
 WatchChange: TypeAlias = WatchPaths | WatchOverflow | WatchError
+
+
+class WatchPathsLegacy(dict[str, Any]):
+    """The pre-1.5.0 ``paths`` change: no tag, only the paths themselves; #37 deletes it."""
+
+    paths: list[str]
+
+
+class WatchOverflowLegacy(dict[str, Any]):
+    """The pre-1.5.0 ``overflow`` change: ``overflow: true`` was the whole change; #37 deletes it."""
+
+    overflow: Literal[True]
+
+
+class WatchErrorLegacy(dict[str, Any]):
+    """The pre-1.5.0 ``failed`` change: the error alone was the change; #37 deletes it."""
+
+    error: FileError
+
+
+WatchChangeLegacy: TypeAlias = WatchPathsLegacy | WatchOverflowLegacy | WatchErrorLegacy
+
+WatchChangeInput: TypeAlias = WatchChange | WatchChangeLegacy
+"""Either spelling of a file change a caller may hand the port."""
+
+
+def to_file_change(change: WatchChangeInput) -> WatchChange:
+    """The ``kind`` spelling of a file change, whichever spelling it arrived in (#33, #37).
+
+    The retired shapes are told apart exactly as 1.4.0 told them apart: by the keys they carry.
+    """
+
+    if "kind" in change:
+        return cast(WatchChange, change)
+    if "overflow" in change:
+        return WatchOverflow(kind="overflow")
+    if "error" in change:
+        return WatchError(kind="failed", error=change["error"])
+    return WatchPaths(kind="paths", paths=list(change["paths"]))
 
 
 class FileWatcher(Protocol):

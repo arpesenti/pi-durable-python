@@ -2397,7 +2397,7 @@ async def test_leaves_no_usage_submission_or_summary_when_the_classifying_commit
 
     chat.faux.summaries.append(break_commit)
     id = await chat.root.compact(None, context)
-    assert await chat.harness.closed == {"reason": "failed", "error": failure}
+    assert await chat.harness.closed == {"kind": "failed", "error": failure}
     await chat.harness.close(context)
     # Nothing of the failed commit landed: the task is still live, without usage, entry, or submission.
     storage.reopen()

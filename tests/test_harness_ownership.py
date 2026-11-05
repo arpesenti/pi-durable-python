@@ -575,7 +575,7 @@ async def test_fails_the_harness_on_a_failed_cascade_commit_and_reopening_applie
     tree = await owned_child(opened["root"], "owner")
     state["failMark"] = tree["inner"]
     open_gate("owner", "failed")
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert opened["reports"] == [failure]
     await opened["harness"].close(context)
     reopened = await open_harness(storage.reopen())

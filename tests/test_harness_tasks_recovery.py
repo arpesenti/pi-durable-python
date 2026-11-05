@@ -844,7 +844,7 @@ async def test_hands_over_to_a_newer_version_whose_migration_fails_and_stays_blo
     )
     gate.resolve()
     await eventually(lambda: len(opened["infos"]) == 1)
-    assert opened["infos"][0]["type"] == "migration_failed"
+    assert opened["infos"][0]["kind"] == "migration_failed"
     assert opened["infos"][0]["task"]["id"] == opened["id"]
     await flush()
     record = await opened["harness"].get_task(opened["id"], context)
@@ -869,7 +869,7 @@ async def test_keeps_running_under_the_old_definition_when_the_replacement_canno
     await opened["harness"].wait_for_task(opened["id"], context)
     assert log == ["old:a start", "old:a end", "old:b start", "old:b end", "old:c"]
     assert [
-        (info["type"], info["reason"], info["task"]["id"]) for info in opened["infos"]
+        (info["kind"], info["reason"], info["task"]["id"]) for info in opened["infos"]
     ] == [
         ("task_outdated", "missing_task", opened["id"]),
         ("task_outdated", "incompatible_task", opened["id"]),

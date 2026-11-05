@@ -1036,7 +1036,7 @@ async def test_ends_the_stream_with_the_harness() -> None:
     harness, root = opened["harness"], opened["root"]
     stream: AgentEventStream = await watch_events(harness, root.id, context)
     await harness.close(context)
-    assert await stream.closed == {"reason": "session_closed"}
+    assert await stream.closed == {"kind": "session_closed"}
 
 
 async def test_starts_a_message_at_the_first_committed_partial_and_ends_it_on_abort() -> None:

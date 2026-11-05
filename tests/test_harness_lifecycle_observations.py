@@ -100,9 +100,9 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     assert doc_state.value is doc_value
     assert view_state.value is view_value
     assert graph_state.value == {"tasks": {}}
-    assert await graph_watch.closed == {"reason": "session_closed"}
-    assert await doc_watch.closed == {"reason": "session_closed"}
-    assert await view_watch.closed == {"reason": "session_closed"}
+    assert await graph_watch.closed == {"kind": "session_closed"}
+    assert await doc_watch.closed == {"kind": "session_closed"}
+    assert await view_watch.closed == {"kind": "session_closed"}
     # The commit itself settled.
     assert any(write["type"] == "entry" for write in storage.commits[-1])
 

@@ -902,7 +902,7 @@ async def final_result(
             except BaseException:
                 # Only names the extension: a failed resolution leaves the report without the name.
                 extension = None
-            runtime.report(ValueError(broken), {"type": "extension", **optional_extension(extension)})
+            runtime.report(ValueError(broken), {"kind": "extension", **optional_extension(extension)})
     # Programs get the tool's own value: without a schema, its output. The model reads only ``output``,
     # so model-issued calls skip both.
     if input["kind"] == "nested" and tool.structured_output_schema is None:

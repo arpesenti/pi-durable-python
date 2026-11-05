@@ -710,7 +710,8 @@ async def test_watch_refuses_and_errors_on_a_directory_budget(tmp_path: Path) ->
         _unwrap(await env.create_dir("tree/d", None, BACKGROUND_CONTEXT))
         deadline = asyncio.get_running_loop().time() + 3
         while (
-            not any("error" in change for change in changes) and asyncio.get_running_loop().time() < deadline
+            not any(change.get("kind") == "failed" for change in changes)
+            and asyncio.get_running_loop().time() < deadline
         ):
             await asyncio.sleep(0.02)
         assert changes

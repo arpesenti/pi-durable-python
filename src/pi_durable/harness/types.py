@@ -8,7 +8,19 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Never, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Never,
+    NotRequired,
+    Protocol,
+    Required,
+    TypeAlias,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
 from ..context import AbortSignal, Context
 from ..documents import (
@@ -381,6 +393,11 @@ AfterFailedRun = Literal["keep", "continue", "withdraw"]
 
 
 # ── Reports, timers, and wakeups ────────────────────────────────────────────
+#
+# 1.5.0 retags `ReportInfo` and `ReportFrom` from `type` to `kind`. The ledger of what this
+# release retags, and of the unions it leaves alone, is at the top of `types.py`: both spellings
+# are accepted on input (`to_report_info`, `to_report_from`), only `kind` is emitted, and #37
+# deletes the retired spelling again.
 
 
 class ReportTask(TypedDict):
@@ -400,10 +417,10 @@ HostCallback = Literal["now", "settings", "registry", "env", "models", "setTimer
 def host_error(callback: HostCallback) -> ReportInfo:
     """The report info of a host callback that threw."""
 
-    return {"type": "host_error", "callback": callback}
+    return {"kind": "host_error", "callback": callback}
 
 
-LISTENER: ReportInfo = {"type": "listener_error"}
+LISTENER: ReportInfo = {"kind": "listener_error"}
 """The report info of a listener, which never fails what ran it."""
 
 
@@ -433,15 +450,15 @@ ReportReason = Literal["threw", "restart_limit", "missing_task", "incompatible_t
 
 
 class ReportInfo(TypedDict):
-    """What a report to ``HarnessOptions.on_report`` is about.
+    """What a report to ``HarnessOptions.on_report`` is about, tagged by ``kind`` (spec §10.1).
 
-    ``type`` says what happened. A task report carries ``task`` (its ID, kind, and conversation);
+    ``kind`` says what happened. A task report carries ``task`` (its ID, kind, and conversation);
     ``extension`` names the extension whose code failed, when known. ``reason`` explains a
     ``task_faulted`` or ``task_outdated`` report, ``callback`` names the failing host callback, and
     ``conversationId`` a wrapper failure outside a task.
     """
 
-    type: ReportType
+    kind: ReportType
     task: NotRequired[ReportTask]
     extension: NotRequired[str]
     reason: NotRequired[ReportReason]
@@ -449,12 +466,62 @@ class ReportInfo(TypedDict):
     conversationId: NotRequired[ConversationId]
 
 
-class ReportFrom(TypedDict, total=False):
-    """Whose code a task's ``runtime.report()`` is about when not the task's own."""
+class ReportInfoLegacy(TypedDict, total=False):
+    """The pre-1.5.0 spelling of a report info, tagged by ``type``; #37 deletes it.
 
-    type: Literal["extension", "host"]
+    1.5.0 moved only the tag key: every field of the current spelling is carried the same way here.
+    """
+
+    type: Required[ReportType]
+    task: ReportTask
+    extension: str
+    reason: ReportReason
+    callback: HostCallback
+    conversationId: ConversationId
+
+
+ReportInfoInput: TypeAlias = ReportInfo | ReportInfoLegacy
+"""Either spelling of a report info a caller may hand the port."""
+
+
+def to_report_info(info: ReportInfoInput) -> ReportInfo:
+    """The ``kind`` spelling of a report info, whichever spelling it arrived in (#33, #37)."""
+
+    if "type" not in info:
+        return info
+    retired = cast(ReportInfoLegacy, info)
+    values = {key: value for key, value in retired.items() if key != "type"}
+    return cast(ReportInfo, {"kind": retired["type"], **values})
+
+
+class ReportFrom(TypedDict, total=False):
+    """Whose code a task's ``runtime.report()`` is about when not the task's own, tagged by ``kind``."""
+
+    kind: Literal["extension", "host"]
     extension: str
     callback: HostCallback
+
+
+class ReportFromLegacy(TypedDict, total=False):
+    """The pre-1.5.0 spelling of a report source, tagged by ``type``; #37 deletes it."""
+
+    type: Required[Literal["extension", "host"]]
+    extension: str
+    callback: HostCallback
+
+
+ReportFromInput: TypeAlias = ReportFrom | ReportFromLegacy
+"""Either spelling of a report source a caller may hand the port."""
+
+
+def to_report_from(from_: ReportFromInput) -> ReportFrom:
+    """The ``kind`` spelling of a report source, whichever spelling it arrived in (#33, #37)."""
+
+    if "type" not in from_:
+        return from_
+    retired = cast(ReportFromLegacy, from_)
+    values = {key: value for key, value in retired.items() if key != "type"}
+    return cast(ReportFrom, {"kind": retired["type"], **values})
 
 
 class Wake(TypedDict):
@@ -659,7 +726,7 @@ class TaskRuntime(Protocol):
 
     def now(self) -> int: ...
 
-    def report(self, error: BaseException, from_: ReportFrom | None = None) -> None:
+    def report(self, error: BaseException, from_: ReportFromInput | None = None) -> None:
         """A ``task_error``, or with ``from_`` an ``extension_error`` or ``host_error``."""
         ...
 

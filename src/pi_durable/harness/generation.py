@@ -146,7 +146,7 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
     except BaseException as error:
         if context.abort_signal is not None and context.abort_signal.aborted:
             raise
-        runtime.report(error, {"type": "host", "callback": "env"})
+        runtime.report(error, {"kind": "host", "callback": "env"})
     prompt_input = PromptInput(
         conversation_id=conversation_id,
         agent=agent,
@@ -159,7 +159,7 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
         runtime.report(
             error,
             {
-                "type": "extension",
+                "kind": "extension",
                 **optional_extension(section_extension(agent, failed_section.key)),
             },
         )
@@ -368,7 +368,7 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
                 )
             except BaseException as error:
                 # A provider call such as cancelling a deferred response is a host callback.
-                runtime.report(error, {"type": "host", "callback": "models"})
+                runtime.report(error, {"kind": "host", "callback": "models"})
     conversation_id = runtime.conversation_id
     # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results.
     unstarted = (

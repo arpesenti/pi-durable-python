@@ -573,7 +573,7 @@ async def test_rejects_runtime_operations_after_the_invocation_ends() -> None:
     id = await start(opened["root"], Watcher)
     opened["harness"].resume()
     await opened["harness"].wait_for_task(id, context)
-    assert await watch_closed[0] == {"reason": "stopped"}
+    assert await watch_closed[0] == {"kind": "stopped"}
 
     async def later(tx: Any) -> None:
         (await tx.doc(Notes)).text = "after"
@@ -706,7 +706,7 @@ async def test_fails_the_harness_on_a_failed_reservation_commit(recovery: bool) 
     failure = RuntimeError("disk gone")
     storage.fail_next_commit(failure)
     opened["harness"].resume()
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert opened["reports"] == [failure]
     with pytest.raises(Exception) as error:
         await waiting
@@ -741,7 +741,7 @@ async def test_fails_the_harness_instead_of_running_a_task_again_when_its_fault_
     opened = await open_root([Throws], {"storage": storage})
     id = await start(opened["root"], Throws)
     opened["harness"].resume()
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert runs[0] == 1
     assert opened["reports"] == [failure]
     await opened["harness"].close(context)
@@ -1356,7 +1356,7 @@ async def test_close_seals_admission_before_signalling_handlers_and_stops_watche
     await opened["harness"].close(context)
     with pytest.raises(Exception, match="closed"):
         await state["from_listener"]
-    assert state["watch_end"] == {"reason": "session_closed"}
+    assert state["watch_end"] == {"kind": "session_closed"}
 
 
 async def test_writes_no_fault_when_close_seals_before_the_failed_phase_step() -> None:

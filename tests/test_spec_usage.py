@@ -155,7 +155,7 @@ def wake_host(wake: Wake) -> None:
 def report_to_a_breaker(error: BaseException, info: ReportInfo) -> None:
     """A host's ``on_report``: act on the typed info, not only the error."""
 
-    kind = info["type"]
+    kind = info["kind"]
     if kind == "task_faulted" and info.get("reason") == "restart_limit":
         _ = info["task"]["id"]
 

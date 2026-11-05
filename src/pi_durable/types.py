@@ -21,6 +21,7 @@ from typing import (
     Never,
     NotRequired,
     Protocol,
+    Required,
     TypeAlias,
     TypedDict,
     TypeVar,
@@ -119,6 +120,39 @@ MessageRecord: TypeAlias = dict[str, JsonValue]
 Op: TypeAlias = list[Any]
 """One Chord delta operation, represented as its JSON array."""
 JsonValueT_co = TypeVar("JsonValueT_co", covariant=True)
+
+
+# ── Discriminant spellings (the 1.5.0 expand, #33) ───────────────────────────
+#
+# Upstream 1.5.0 moves six tagged unions onto the tag key ``kind``. This is the expand half of
+# expand–migrate–contract: every reader of these unions takes either spelling, every writer emits
+# only ``kind``, and #37 deletes the retired spelling again. Each pair lives beside its union, and
+# ``to_*`` is the reader that takes either spelling and returns the one the port emits.
+#
+#   union                 retired spelling                              current spelling
+#   ``WatchEnd``          ``reason``                                    ``kind`` — spec-1.5.0.md:5397
+#   ``SessionEnd``        ``reason``                                    ``kind`` — spec-1.5.0.md:1378
+#   ``ReportInfo``        ``type``                                      ``kind`` — spec-1.5.0.md:680
+#   ``ReportFrom``        ``type``                                      ``kind`` — upstream src/types.ts:207
+#   ``DocumentCommitChange``  no tag: a retirement was ``value: null``  ``kind: "change" | "retire"``
+#                                                                         beside the ``type`` that stays
+#                                                                         — spec-1.5.0.md:1391
+#   ``WatchChange``       no tag: which keys are present                ``kind: "paths" | "overflow"
+#   (``env``)                                                                  | "failed"`` — upstream
+#                                                                            src/env/index.ts:127
+#
+# 1.5.0 leaves the tag key of these alone, read at the lines named, so nothing here accepts a
+# second spelling for them and no reader converts their keys:
+#
+#   ``StorageWrite.type``, and ``TableCommitChange`` as its subset  — spec-1.5.0.md:5965
+#   ``SubmissionRecord.type`` and ``.status``, ``SubmissionCreate``, ``SubmissionSettlement.status``
+#                                                                   — spec-1.5.0.md:195 and 201
+#   ``TaskState.status`` and ``TaskOutcome.status``                 — spec-1.5.0.md:2090 and 2081
+#   ``DocumentContent.kind``                                        — spec-1.5.0.md:5953
+#   ``DocumentScope.kind`` (the ``scope`` of ``DocumentRecord``)    — spec-1.5.0.md:1335
+#
+# ``harness/types.py`` carries the two report pairs and ``env/__init__.py`` the file-change pair,
+# each with the same note.
 
 
 # ── Identity, conversation, and entry records ──────────────────────────────
@@ -814,12 +848,27 @@ TableCommitChange: TypeAlias = ConversationWrite | EntryWrite | TaskWrite | Subm
 
 
 class DocumentCommittedChange(TypedDict):
+    """One creation or update: ``type: "document"`` with ``kind: "change"`` (spec §2)."""
+
     type: Literal["document"]
+    kind: Literal["change"]
     record: DocumentRecord
     conversationId: ConversationId | None
-    version: int | None
-    value: JsonObject | None
+    version: int
+    value: JsonObject
     ops: list[Op]
+
+
+class DocumentRetiredChange(TypedDict):
+    """The commit that retired the incarnation: ``type: "document"`` with ``kind: "retire"``.
+
+    A retirement carries no value, version, or operations — the tag says it (spec §2).
+    """
+
+    type: Literal["document"]
+    kind: Literal["retire"]
+    record: DocumentRecord
+    conversationId: ConversationId | None
 
 
 class DocumentCopiedChange(TypedDict):
@@ -829,7 +878,55 @@ class DocumentCopiedChange(TypedDict):
     source: DocumentCopySource
 
 
-DocumentCommitChange: TypeAlias = DocumentCommittedChange | DocumentCopiedChange
+DocumentCommitChange: TypeAlias = DocumentCommittedChange | DocumentRetiredChange | DocumentCopiedChange
+
+
+class DocumentCommitChangeLegacy(TypedDict):
+    """The pre-1.5.0 spelling of a document change: no ``kind``, and a retirement was told apart
+    by ``value: None`` and ``version: None``; #37 deletes it."""
+
+    type: Literal["document"]
+    record: DocumentRecord
+    conversationId: ConversationId | None
+    version: int | None
+    value: JsonObject | None
+    ops: list[Op]
+
+
+DocumentCommitChangeInput: TypeAlias = DocumentCommitChange | DocumentCommitChangeLegacy
+"""Either spelling of a committed document change a consumer may hand the port."""
+
+
+def to_document_commit_change(change: DocumentCommitChangeInput) -> DocumentCommitChange:
+    """The ``kind`` spelling of one committed document change (#33, #37).
+
+    The ``document.copy`` variant has no second tag, so it stands as written; a ``document`` change
+    without ``kind`` is a retirement exactly as 1.4.0 wrote one — its ``value`` is ``None``.
+    """
+
+    if "kind" in change:
+        return cast(DocumentCommitChange, change)
+    if change["type"] == "document.copy":
+        return change
+    retired = cast(DocumentCommitChangeLegacy, change)
+    if retired["value"] is None:
+        return DocumentRetiredChange(
+            type="document",
+            kind="retire",
+            record=retired["record"],
+            conversationId=retired["conversationId"],
+        )
+    return DocumentCommittedChange(
+        type="document",
+        kind="change",
+        record=retired["record"],
+        conversationId=retired["conversationId"],
+        version=cast(int, retired["version"]),
+        value=retired["value"],
+        ops=retired["ops"],
+    )
+
+
 CommitChange: TypeAlias = TableCommitChange | DocumentCommitChange
 
 
@@ -839,21 +936,50 @@ class CommitPublication(TypedDict):
 
 
 class WatchEnded(TypedDict):
-    reason: Literal["stopped", "cancelled", "session_closed", "retired"]
+    kind: Literal["stopped", "cancelled", "session_closed", "retired"]
 
 
 class WatchListenerErrorEnd(TypedDict):
-    reason: Literal["listener_error"]
+    kind: Literal["listener_error"]
     error: BaseException
 
 
 class WatchSessionFailedEnd(TypedDict):
-    reason: Literal["session_failed"]
+    kind: Literal["session_failed"]
     error: object
 
 
 WatchEnd: TypeAlias = WatchEnded | WatchListenerErrorEnd | WatchSessionFailedEnd
-"""Terminal result of one document watch."""
+"""Terminal result of one document watch, tagged by ``kind`` (spec §9.1)."""
+
+
+class WatchEndLegacy(TypedDict, total=False):
+    """The pre-1.5.0 spelling of a watch end, tagged by ``reason``; #37 deletes it.
+
+    ``error`` is the payload of ``listener_error`` and ``session_failed`` only; an end with another
+    tag settles without it, as :func:`to_watch_end` shows.
+    """
+
+    reason: Required[
+        Literal["stopped", "cancelled", "session_closed", "retired", "listener_error", "session_failed"]
+    ]
+    error: object
+
+
+WatchEndInput: TypeAlias = WatchEnd | WatchEndLegacy
+"""Either spelling of a watch end: a caller may hand the port the retired ``reason`` one."""
+
+
+def to_watch_end(end: WatchEndInput) -> WatchEnd:
+    """The ``kind`` spelling of a watch end, whichever spelling it arrived in (#33, #37)."""
+
+    if "reason" not in end:
+        return end
+    retired = cast(WatchEndLegacy, end)
+    tag = retired["reason"]
+    if tag in ("listener_error", "session_failed"):
+        return cast(WatchEnd, {"kind": tag, "error": retired.get("error")})
+    return cast(WatchEnd, {"kind": tag})
 
 
 class WatchHandle(Protocol, Generic[JsonValueT_co]):
@@ -1151,17 +1277,40 @@ class DocumentReader(Protocol):
 class SessionEndClosed(TypedDict):
     """The Session ended with ``close()``."""
 
-    reason: Literal["closed"]
+    kind: Literal["closed"]
 
 
 class SessionEndFailed(TypedDict):
     """The Session failed and closed itself; ``error`` is the first Storage error."""
 
-    reason: Literal["failed"]
+    kind: Literal["failed"]
     error: Any
 
 
 SessionEnd: TypeAlias = SessionEndClosed | SessionEndFailed
+"""Terminal result of one Session, tagged by ``kind`` (spec §4)."""
+
+
+class SessionEndLegacy(TypedDict, total=False):
+    """The pre-1.5.0 spelling of a session end, tagged by ``reason``; #37 deletes it."""
+
+    reason: Required[Literal["closed", "failed"]]
+    error: Any
+
+
+SessionEndInput: TypeAlias = SessionEnd | SessionEndLegacy
+"""Either spelling of a session end: a caller may hand the port the retired ``reason`` one."""
+
+
+def to_session_end(end: SessionEndInput) -> SessionEnd:
+    """The ``kind`` spelling of a session end, whichever spelling it arrived in (#33, #37)."""
+
+    if "reason" not in end:
+        return end
+    retired = cast(SessionEndLegacy, end)
+    if retired["reason"] == "failed":
+        return cast(SessionEnd, {"kind": "failed", "error": retired.get("error")})
+    return cast(SessionEnd, {"kind": "closed"})
 
 
 class Session(Protocol):

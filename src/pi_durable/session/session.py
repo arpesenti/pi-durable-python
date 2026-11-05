@@ -21,7 +21,7 @@ from ..documents import (
 )
 from ..errors import SessionFailed, StorageRequestError, is_failure
 from ..harness.context import read_context
-from ..harness.types import LISTENER, ContextView, ReportInfo, SetTimer, host_error
+from ..harness.types import LISTENER, ContextView, ReportInfoInput, SetTimer, host_error
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
 from ..json import JsonObject
 from ..timers import host_timers
@@ -42,6 +42,7 @@ from ..types import (
     EntryWithHead,
     Page,
     SessionEnd,
+    SessionEndInput,
     Storage,
     StorageWrite,
     StoredDocument,
@@ -49,6 +50,8 @@ from ..types import (
     SubmissionRecord,
     TaskQuery,
     TaskRecord,
+    to_document_commit_change,
+    to_session_end,
 )
 from .observation import (
     CommittedState,
@@ -310,7 +313,7 @@ class SessionImpl:
         except RuntimeError:
             return
         loop.create_task(self._close_after_failure())
-        self.report(error, {"type": "session_failed"})
+        self.report(error, {"kind": "session_failed"})
 
     async def _close_after_failure(self) -> None:
         try:
@@ -318,7 +321,7 @@ class SessionImpl:
         except Exception:
             pass
 
-    def report(self, error: BaseException, info: ReportInfo | None = None) -> None:
+    def report(self, error: BaseException, info: ReportInfoInput | None = None) -> None:
         """Internal: the Session's failure and listener errors, which never fail what ran them.
 
         ``info`` defaults to a listener. A plain Session has no external report sink.
@@ -480,21 +483,25 @@ class SessionImpl:
                     error = close_error
                     if self._failure is None:
                         self._failure = close_error
-                        self.report(close_error, {"type": "session_failed"})
+                        self.report(close_error, {"kind": "session_failed"})
                     raise
         except BaseException as caught:
             error = caught
         finally:
-            if not self._closed.done():
-                if self._failure is None:
-                    self._closed.set_result({"reason": "closed"})
-                else:
-                    self._closed.set_result({"reason": "failed", "error": self._failure})
+            self._settle_closed(
+                {"kind": "closed"} if self._failure is None else {"kind": "failed", "error": self._failure}
+            )
             if not self._closing.done():
                 if error is None:
                     self._closing.set_result(None)
                 else:
                     self._closing.set_exception(error)
+
+    def _settle_closed(self, end: SessionEndInput) -> None:
+        """Settle ``closed``, once, with the ``kind`` spelling of the end (#33 accepts either)."""
+
+        if not self._closed.done():
+            self._closed.set_result(to_session_end(end))
 
     def _notify_close(self) -> None:
         self._cancel_document_sweep()
@@ -561,24 +568,28 @@ class SessionImpl:
         publication: CommitPublication = {"seq": seq, "changes": changes}
         for state in list(self._states):
             for change in documents:
-                if change["type"] != "document" or change["record"]["id"] != state._record_id:
+                settled = to_document_commit_change(change)
+                if settled["type"] != "document" or settled["record"]["id"] != state._record_id:
                     continue
-                ops, version = observed_operations(state._observed_version, change)
+                ops, version = observed_operations(state._observed_version, settled)
                 # A migration-only base changes nothing for an observer of the new version.
                 if not ops:
                     continue
                 state._observed_version = version
                 # A retired incarnation never changes again: its observers pin nothing.
-                if change["value"] is None:
+                if settled["kind"] == "retire":
                     state._release_pin()
-                state._advance(change["value"], context)
+                    state._advance(None, context)
+                else:
+                    state._advance(settled["value"], context)
         for entry in list(self._watches):
             for change in documents:
-                if change["type"] != "document" or change["record"]["id"] != entry.record_id:
+                settled = to_document_commit_change(change)
+                if settled["type"] != "document" or settled["record"]["id"] != entry.record_id:
                     continue
-                if change["value"] is None:
+                if settled["kind"] == "retire":
                     entry.release()
-                entry.watch.advance(change, context)
+                entry.watch.advance(settled, context)
         for listener in list(self._internal_listeners):
             contained(partial(listener, publication, context), self.fail)
         for listener in list(self._commit_listeners):

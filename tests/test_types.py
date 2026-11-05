@@ -210,6 +210,7 @@ commit_change: CommitChange = {
 }
 document_commit_change: DocumentCommitChange = {
     "type": "document",
+    "kind": "change",
     "record": {
         "id": document_id,
         "kind": "test",
@@ -250,8 +251,8 @@ conversation_write: StorageWrite = {
     "type": "conversation",
     "value": {"id": conversation_id},
 }
-session_end_closed: SessionEnd = {"reason": "closed"}
-session_end_failed: SessionEnd = {"reason": "failed", "error": RuntimeError("disk gone")}
+session_end_closed: SessionEnd = {"kind": "closed"}
+session_end_failed: SessionEnd = {"kind": "failed", "error": RuntimeError("disk gone")}
 
 
 async def phase_handler(task: RunningTask, runtime: object, context: object) -> None:
@@ -342,8 +343,8 @@ def test_discriminators_select_the_expected_fields() -> None:
     assert delta_content["kind"] == "delta"
     assert conversation_document["fork"] == "asOf"
     assert completed_outcome["status"] == "completed"
-    assert session_end_closed["reason"] == "closed"
-    assert session_end_failed["reason"] == "failed"
+    assert session_end_closed["kind"] == "closed"
+    assert session_end_failed["kind"] == "failed"
     assert handler is phase_handler
     assert hooks == {"beforeTool": None}
 

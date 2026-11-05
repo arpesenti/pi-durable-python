@@ -25,6 +25,7 @@ from ..types import (
     ConversationRecord,
     EntryRecord,
     Storage,
+    to_document_commit_change,
 )
 from .agent import AgentDoc
 from .context import capture_context_bounds, derive_context
@@ -231,36 +232,37 @@ def advance_mount(
             entry_ops.append(["p", ["entries"], 0, kept, [entry]])
             entries = [entry, *entries[kept:]]
             continue
-        if change["type"] != "document" or change["conversationId"] != id:
+        if change["type"] != "document":
             continue
-        kind = change["record"]["kind"]
-        if kind not in MOUNTED_KINDS or "key" in change["record"]:
+        settled = to_document_commit_change(change)
+        if settled["type"] != "document" or settled["conversationId"] != id:
+            continue
+        kind = settled["record"]["kind"]
+        if kind not in MOUNTED_KINDS or "key" in settled["record"]:
             continue
         path = ["docs", kind]
         mounted = mount.docs.get(kind)
-        if change["value"] is None:
-            if mounted is None or mounted[0] != change["record"]["id"]:
+        if settled["kind"] == "retire":
+            if mounted is None or mounted[0] != settled["record"]["id"]:
                 continue
             del mount.docs[kind]
             docs = {current: value for current, value in docs.items() if current != kind}
             doc_ops.append(["d", path])
         elif (
             mounted is not None
-            and mounted[0] == change["record"]["id"]
-            and mounted[1] == change["version"]
+            and mounted[0] == settled["record"]["id"]
+            and mounted[1] == settled["version"]
         ):
             current = docs[kind]
             docs = {
                 **docs,
-                kind: cast(JsonObject, apply_immutable(current, change["ops"])),
+                kind: cast(JsonObject, apply_immutable(current, settled["ops"])),
             }
-            doc_ops.extend(_prefixed(op, path) for op in change["ops"])
+            doc_ops.extend(_prefixed(op, path) for op in settled["ops"])
         else:
-            if change["value"] is None or change["version"] is None:
-                continue
-            mount.docs[kind] = (change["record"]["id"], change["version"])
-            docs = {**docs, kind: change["value"]}
-            doc_ops.append(["s", path, change["value"]])
+            mount.docs[kind] = (settled["record"]["id"], settled["version"])
+            docs = {**docs, kind: settled["value"]}
+            doc_ops.append(["s", path, settled["value"]])
 
     ops = [*doc_ops, *entry_ops]
     before = mount.value

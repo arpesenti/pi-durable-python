@@ -226,7 +226,7 @@ async def test_folds_retirement_into_an_overflow_reset_and_then_closes() -> None
         deliveries.append((value, ops))
 
     watch.start(listener)
-    assert await watch.closed == {"reason": "retired"}
+    assert await watch.closed == {"kind": "retired"}
     assert deliveries == [(None, [["r", None]])]
 
 
@@ -290,7 +290,7 @@ async def test_preserves_commit_context_values_without_inheriting_producer_cance
     assert delivery_context.abort_signal is None
     parent_controller.abort("caller finished")
     stopped = watch.stop()
-    assert await stopped == {"reason": "stopped"}
+    assert await stopped == {"kind": "stopped"}
     assert delivery_context.abort_signal is None
     release.resolve()
 
@@ -332,7 +332,7 @@ async def test_delivers_retirement_and_does_not_follow_recreation() -> None:
         (await tx.doc(StateDoc)).value = 10
 
     await session.commit(replace, context)
-    assert await old_watch.closed == {"reason": "retired"}
+    assert await old_watch.closed == {"kind": "retired"}
     assert values == [None]
     assert old_watch.value is None
 
@@ -356,7 +356,7 @@ async def test_session_close_discards_retirement_buffered_before_start() -> None
 
     await session.commit(retire, context)
     await session.close(context)
-    assert await watch.closed == {"reason": "session_closed"}
+    assert await watch.closed == {"kind": "session_closed"}
     assert watch.value is baseline
     with pytest.raises(RuntimeError, match="stopped"):
         watch.start(lambda _value, _ops, _context: None)
@@ -384,7 +384,7 @@ async def test_session_close_discards_retirement_behind_an_in_flight_callback() 
 
     await session.commit(retire, context)
     await session.close(context)
-    assert await watch.closed == {"reason": "session_closed"}
+    assert await watch.closed == {"kind": "session_closed"}
     release.resolve()
     await flush()
     assert values[0] is not None and values[0]["value"] == 1
@@ -401,7 +401,7 @@ async def test_supports_idempotent_stop_and_rejects_repeated_or_late_start() -> 
     first = started.stop()
     second = started.stop()
     assert second is first
-    assert await first == {"reason": "stopped"}
+    assert await first == {"kind": "stopped"}
 
     stopped = await session.watch_doc(StateDoc, context)
     assert stopped is not None
@@ -461,7 +461,7 @@ async def test_cancels_future_delivery_without_aborting_an_in_flight_callback() 
     await set_value(session, 1)
     await entered.promise
     child.cancel()
-    assert await watch.closed == {"reason": "cancelled"}
+    assert await watch.closed == {"kind": "cancelled"}
     assert delivery_context.abort_signal is None
     release.resolve()
 
@@ -485,7 +485,7 @@ async def test_session_close_stops_future_delivery_without_joining_an_in_flight_
     await entered.promise
     await session.close(context)
     assert delivery_context.abort_signal is None
-    assert await watch.closed == {"reason": "session_closed"}
+    assert await watch.closed == {"kind": "session_closed"}
     release.resolve()
 
 
@@ -508,7 +508,7 @@ async def test_settles_listener_failure_on_only_the_affected_watch() -> None:
     healthy.start(healthy_listener)
     await set_value(session, 1)
     end = cast(dict[str, Any], await failed.closed)
-    assert end["reason"] == "listener_error"
+    assert end["kind"] == "listener_error"
     assert str(end["error"]) == "listener failed"
     await flush()
     assert healthy_calls == 1

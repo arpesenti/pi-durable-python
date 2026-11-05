@@ -43,6 +43,7 @@ from .types import (
     ConversationHandle,
     RegistryReader,
     RegistrySnapshot,
+    ReportFromInput,
     ReportInfo,
     ReportTask,
     Settings,
@@ -50,6 +51,7 @@ from .types import (
     TaskInspection,
     Wake,
     host_error,
+    to_report_from,
 )
 from .util import Waiters, closed_error, optional_extension, rejected, resolved, scan_all
 
@@ -464,7 +466,7 @@ class TaskScheduler:
             )
             self._report(
                 error,
-                {"type": "task_parked", **self._about_task(record)},
+                {"kind": "task_parked", **self._about_task(record)},
             )
         # Derive abort marks a crash left unapplied below cancelled owners, and finalize held outcomes.
         self._cascade_pending = True
@@ -1620,7 +1622,7 @@ class TaskScheduler:
             self._report(
                 RuntimeError(entry["message"]),
                 {
-                    "type": "task_faulted",
+                    "kind": "task_faulted",
                     **self._about_task(entry["record"]),
                     "reason": "restart_limit",
                 },
@@ -1669,7 +1671,7 @@ class TaskScheduler:
             self._report(
                 error,
                 {
-                    "type": "migration_failed",
+                    "kind": "migration_failed",
                     **self._about_task({**record, "extension": extension}),
                 },
             )
@@ -1756,7 +1758,7 @@ class TaskScheduler:
             except BaseException as error:
                 if not is_failure(error):
                     raise
-                self._report(error, {"type": "task_error", **self._about_task(invocation)})
+                self._report(error, {"kind": "task_error", **self._about_task(invocation)})
             finally:
                 self._end(invocation)
                 invocation.finish()
@@ -1843,7 +1845,7 @@ class TaskScheduler:
                 self._report(
                     _OldDefinitionError(current["id"], current["kind"], cause),
                     {
-                        "type": "task_outdated",
+                        "kind": "task_outdated",
                         **self._about_task(current),
                         "reason": cause,
                     },
@@ -1916,7 +1918,7 @@ class TaskScheduler:
         if "error" in fault:
             self._report(
                 fault["error"],
-                {"type": "task_faulted", **self._about_task(invocation), "reason": "threw"},
+                {"kind": "task_faulted", **self._about_task(invocation), "reason": "threw"},
             )
         return continued
 
@@ -2090,7 +2092,7 @@ class _HookRunner:
                 self._scheduler._report(
                     error,
                     {
-                        "type": "extension_error",
+                        "kind": "extension_error",
                         "extension": entry["extension"],
                         "task": report_task(self._invocation),
                     },
@@ -2396,24 +2398,27 @@ class _Runtime:
         self._check()
         return self._scheduler._now()
 
-    def report(self, error: BaseException, from_: Mapping[str, Any] | None = None) -> None:
+    def report(self, error: BaseException, from_: ReportFromInput | None = None) -> None:
         self._check()
         # The task's own failure names the task's extension; any other names whose code failed.
+        # The source arrives in either spelling (#33); the tag decides, not the presence of a key.
         task = report_task(self._invocation)
         if from_ is None:
-            info: ReportInfo = {"type": "task_error", **self._scheduler._about_task(self._invocation)}
-        elif from_.get("type") == "extension":
-            info = {
-                "type": "extension_error",
-                "task": task,
-                **optional_extension(cast(str | None, from_.get("extension"))),
-            }
+            info: ReportInfo = {"kind": "task_error", **self._scheduler._about_task(self._invocation)}
         else:
-            info = {
-                "type": "host_error",
-                "callback": cast(Any, from_.get("callback")),
-                "task": task,
-            }
+            source = to_report_from(from_)
+            if source["kind"] == "extension":
+                info = {
+                    "kind": "extension_error",
+                    "task": task,
+                    **optional_extension(source.get("extension")),
+                }
+            else:
+                info = {
+                    "kind": "host_error",
+                    "callback": cast(Any, source.get("callback")),
+                    "task": task,
+                }
         self._scheduler._report(error, info)
 
     async def _read(self, read: Callable[[], Awaitable[Any]], context: Context) -> Any:

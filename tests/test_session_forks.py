@@ -739,7 +739,7 @@ async def test_fails_the_session_on_a_rejected_fork_commit_which_leaves_no_effec
             lambda tx: tx.create_conversation({"ownership": {"kind": "ownerless"}}), context
         )
     assert failed.value.cause is rejection
-    assert await session.closed == {"reason": "failed", "error": rejection}
+    assert await session.closed == {"kind": "failed", "error": rejection}
     assert await storage.reopen().conversation(rejected_ids[0], context) is None
 
 

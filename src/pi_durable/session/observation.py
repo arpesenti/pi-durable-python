@@ -18,7 +18,13 @@ from ..context import BACKGROUND_CONTEXT, AbortSignal, Context, without_abort_si
 from ..delta import Op
 from ..errors import is_failure
 from ..json import JsonObject
-from ..types import DocumentCommittedChange, WatchEnd
+from ..types import (
+    DocumentCommitChangeInput,
+    WatchEnd,
+    WatchEndInput,
+    to_document_commit_change,
+    to_watch_end,
+)
 
 ObservedDocumentValue = JsonObject | None
 """One observed revision; ``None`` is the canonical retirement value."""
@@ -155,20 +161,25 @@ class CommittedState:
 
 def observed_operations(
     observed_version: int,
-    change: DocumentCommittedChange,
+    change: DocumentCommitChangeInput,
 ) -> tuple[list[Op], int]:
     """Return the operations one observer applies for a committed change, and its version.
 
     An observer hydrated under another definition version holds a differently shaped value, so it
-    receives the new value as a root replacement instead of operations for that shape.
+    receives the new value as a root replacement instead of operations for that shape. The change
+    arrives in either spelling (#33); the retirement is the ``kind`` tag, not a ``null`` value.
     """
 
-    if change["value"] is None:
+    settled = to_document_commit_change(change)
+    if settled["type"] != "document":
+        # A definition-free copy publishes no adopted value: an observer keeps what it holds.
+        return [], observed_version
+    if settled["kind"] == "retire":
         return RETIREMENT_OPERATIONS, observed_version
-    version = cast(int, change["version"])
+    version = settled["version"]
     if version == observed_version:
-        return change["ops"], observed_version
-    return [["r", change["value"]]], version
+        return settled["ops"], observed_version
+    return [["r", settled["value"]]], version
 
 
 class CommittedWatch:
@@ -255,7 +266,7 @@ class CommittedWatch:
     def stop(self) -> asyncio.Future[WatchEnd]:
         """Idempotently stop future callbacks and return this watch's terminal result."""
 
-        self._terminate({"reason": "stopped"})
+        self._terminate({"kind": "stopped"})
         return self._terminal
 
     def observe_cancellation(self, signal: AbortSignal) -> None:
@@ -269,26 +280,29 @@ class CommittedWatch:
             self.cancel()
 
     def cancel(self) -> None:
-        self._terminate({"reason": "cancelled"})
+        self._terminate({"kind": "cancelled"})
 
     def close_session(self, failure: BaseException | None = None) -> None:
         """End with ``session_closed``, or with ``session_failed`` and the error on failure."""
 
         if failure is None:
-            self._terminate({"reason": "session_closed"})
+            self._terminate({"kind": "session_closed"})
         else:
-            self._terminate({"reason": "session_failed", "error": failure})
+            self._terminate({"kind": "session_failed", "error": failure})
 
-    def advance(self, change: DocumentCommittedChange, context: Context) -> None:
+    def advance(self, change: DocumentCommitChangeInput, context: Context) -> None:
         """Queue the committed document change, skipping one this observer already holds."""
 
         if self._end is not None or self._retired:
             return
-        ops, version = observed_operations(self._observed_version, change)
+        settled = to_document_commit_change(change)
+        if settled["type"] != "document":
+            return
+        ops, version = observed_operations(self._observed_version, settled)
         if not ops:
             return
         self._observed_version = version
-        self.advance_frame(change["value"], ops, context)
+        self.advance_frame(None if settled["kind"] == "retire" else settled["value"], ops, context)
 
     def advance_frame(self, value: Any, ops: list[Op], context: Context) -> None:
         """Queue one exact committed frame for a view, graph, or event stream."""
@@ -335,22 +349,25 @@ class CommittedWatch:
                         raise
                     if self._end is None:
                         self._report(error)
-                        self._terminate({"reason": "listener_error", "error": error})
+                        self._terminate({"kind": "listener_error", "error": error})
                     break
                 if value is None:
-                    self._terminate({"reason": "retired"})
+                    self._terminate({"kind": "retired"})
                     break
         finally:
             self._running = False
             if self._end is None and self._pending:
                 self._schedule()
 
-    def _terminate(self, end: WatchEnd) -> None:
-        """End the watch, once: detach, drop pending frames, and settle ``closed``."""
+    def _terminate(self, end: WatchEndInput) -> None:
+        """End the watch, once: detach, drop pending frames, and settle ``closed``.
+
+        The end arrives in either spelling (#33); ``closed`` settles with the ``kind`` one alone.
+        """
 
         if self._end is not None:
             return
-        self._end = end
+        self._end = to_watch_end(end)
         self._pending.clear()
         if self._cancellation_remove is not None:
             remove = self._cancellation_remove
@@ -360,7 +377,7 @@ class CommittedWatch:
             self._detach()
         finally:
             if not self._closed.done():
-                self._closed.set_result(end)
+                self._closed.set_result(self._end)
 
 
 __all__ = [

@@ -892,4 +892,4 @@ async def test_storage_failure_fails_the_session_and_publishes_nothing() -> None
     with pytest.raises(SessionFailed):
         await session.commit(append, context)
     closed = await asyncio.wait_for(session.closed, 1)
-    assert closed["reason"] == "failed"
+    assert closed["kind"] == "failed"
