@@ -380,12 +380,20 @@ class SqliteStorage:
     async def _write_metadata(
         self, executor: SqliteExecutor, next_id: int, next_seq: int
     ) -> None:
-        await executor.run(
+        """Record the allocation the call is storing; the row count is the only witness it happened.
+
+        A commit whose ``next_seq`` write changed no row would store records under a sequence the
+        database hands out again, so the counted run's answer is checked rather than ignored.
+        """
+
+        changed = await executor.run_counted(
             f"UPDATE {self._schema.tables['durableMetadata']} SET next_id = ?, next_seq = ? "
             "WHERE singleton = 1",
             str(next_id),
             next_seq,
         )
+        if changed != 1:
+            raise RuntimeError("Durable SQLite metadata row did not change")
 
     async def mint_id(self) -> int:
         self._assert_open()

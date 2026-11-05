@@ -1,11 +1,15 @@
-"""Translated v1.3.0 ``jsonl-storage`` suite.
+"""Translated v1.3.0 ``jsonl-storage`` suite, plus the v1.5.0 ``JsonlStorage batches`` cases.
 
 Covers both conformance runs (fresh and across reopen) plus publication ordering, poisoning,
-reclamation, torn-tail truncation, and corruption detection.
+reclamation, torn-tail truncation, and corruption detection. The batched cases add the file
+backend's own half of the commit contract: one group appended as one write of every marker, a read
+started mid-append held off it, a torn marker recovered as the complete prefix before it, and the
+ID watermark rebuilt from what the files confirm.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -1278,6 +1282,186 @@ async def test_rejects_structurally_invalid_confirmed_document_content() -> None
 
     with pytest.raises(JsonlCorruptionError, match="Invalid document content"):
         await JsonlStorage.open(str(directory), PosixExecutionEnv(cwd=str(directory)), context)
+
+
+class _StalledJoinEnv(PosixExecutionEnv):
+    """A file system whose path resolutions stall, then fail, as a stalled mount's would."""
+
+    def __init__(self, *, cwd: str) -> None:
+        super().__init__(cwd=cwd)
+        self.stalling = False
+        self.reached = asyncio.Event()
+        self.unblock = asyncio.Event()
+
+    async def join_path(
+        self, parts: Sequence[str], join_context: Context
+    ) -> Result[str, FileError]:
+        if self.stalling:
+            self.reached.set()
+            await self.unblock.wait()
+            return err(FileError("unknown", "injected path resolution failure", parts[-1]))
+        return await super().join_path(parts, join_context)
+
+
+async def test_a_read_waiting_on_the_append_never_returns_what_a_failure_left_unstored() -> None:
+    """Memory runs ahead of the file mid-call, so a read waits for the append to settle."""
+
+    directory = _temp_directory("pi-durable-jsonl-waiting-read-")
+    env = _StalledJoinEnv(cwd=str(directory))
+    storage = await _open_storage(directory, env)
+    await _create_root(storage)
+    env.stalling = True
+    conversation_id = 100
+    document_id = 101
+    committing = asyncio.create_task(
+        storage.commit_batches(
+            [
+                [{"type": "conversation", "value": {"id": conversation_id}}],
+                [
+                    {
+                        "type": "document.create",
+                        "record": _session_document(document_id, "state"),
+                        "content": {"kind": "base", "version": 1, "value": {}},
+                    }
+                ],
+            ],
+            lambda index, seq: None,
+            context,
+        )
+    )
+    await env.reached.wait()
+    # Started while the batches are in memory and the append waits.
+    reading = asyncio.create_task(storage.conversation(conversation_id, context))
+    await asyncio.sleep(0)
+    env.unblock.set()
+
+    with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
+        await committing
+    with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
+        await reading
+
+    await storage.close(context)
+    reopened = await _open_storage(directory)
+    assert await reopened.conversation(conversation_id, context) is None
+
+
+async def test_a_reopened_directory_mints_above_an_id_only_a_sidecar_holds() -> None:
+    """Reopen rebuilds the ID watermark from what the files confirm, sidecars included."""
+
+    directory = _temp_directory("pi-durable-jsonl-mint-")
+    storage = await _open_storage(directory)
+    await _create_root(storage)
+    task_id = 9_000
+    entry_id = await storage.mint_id()
+    await storage.commit_batches(
+        [
+            [{"type": "task", "value": _pending_task(task_id)}],
+            [
+                {
+                    "type": "entry",
+                    "value": {
+                        "id": entry_id,
+                        "conversationId": ROOT_CONVERSATION_ID,
+                        "kind": "note",
+                    },
+                }
+            ],
+        ],
+        lambda index, seq: None,
+        context,
+    )
+    await storage.close(context)
+
+    reopened = await _open_storage(directory)
+    assert await reopened.task(task_id, context) is not None
+    assert await reopened.mint_id() > task_id
+
+
+@pytest.mark.parametrize("fsync", [False, True])
+async def test_a_group_appends_one_marker_write_and_a_torn_one_recovers_a_shorter_prefix(
+    fsync: bool,
+) -> None:
+    """One append per affected file, then all the markers in one write of ``main.jsonl``.
+
+    A torn marker is not a commit: reopening keeps the complete markers before it and drops that
+    batch's sidecar records as unconfirmed, so the sequence the group did not store is reused.
+    """
+
+    directory = _temp_directory("pi-durable-jsonl-group-")
+    env = InstrumentedEnv(cwd=str(directory))
+    storage = await _open_storage(directory, env, {"fsync": fsync})
+    await _create_root(storage)
+    document_id = await storage.mint_id()
+    await storage.commit(
+        [
+            {
+                "type": "document.create",
+                "record": _session_document(document_id),
+                "content": {"kind": "base", "version": 1, "value": {"n": 0}},
+            }
+        ],
+        context,
+    )
+    main_path = directory / "main.jsonl"
+    before = len(main_path.read_text())
+    entries = [await storage.mint_id() for _ in range(3)]
+    batches = [
+        [
+            {
+                "type": "entry",
+                "value": {"id": id, "conversationId": ROOT_CONVERSATION_ID, "kind": "note"},
+            },
+            {
+                "type": "document.change",
+                "id": document_id,
+                "content": {"kind": "delta", "version": 1, "ops": [["s", ["n"], index + 1]]},
+            },
+        ]
+        for index, id in enumerate(entries)
+    ]
+    env.clear()
+
+    # Reads wait for the append: a read started while it runs sees every batch durable.
+    committing = asyncio.create_task(storage.commit_batches(batches, lambda index, seq: None, context))
+    reading = asyncio.create_task(storage.entry(entries[2], context))
+    await asyncio.sleep(0)
+    assert await committing == {"stored": 3}
+    assert await reading is not None
+
+    sidecar = f"doc-{document_id}.jsonl"
+    flushed = [f"flush:{sidecar}"] if fsync else []
+    assert env.operations == [f"append:{sidecar}", *flushed, "append:main.jsonl"]
+    main = main_path.read_text()
+    markers = [line for line in main[before:].split("\n") if line != ""]
+    assert len(markers) == 3
+
+    await storage.close(context)
+    torn_at = len(main) - len(markers[2]) // 2
+    main_path.write_text(main[:torn_at])
+
+    reopened = await _open_storage(directory)
+    assert await reopened.entry(entries[0], context) is not None
+    assert await reopened.entry(entries[1], context) is not None
+    assert await reopened.entry(entries[2], context) is None
+    half = await reopened.document(document_id, "current", context)
+    assert half is not None and half["value"] == {"n": 2}
+    # The unconfirmed batch's sequences are reused, so the group's last seq was never taken.
+    assert (
+        await reopened.commit(
+            [
+                {
+                    "type": "document.change",
+                    "id": document_id,
+                    "content": {"kind": "delta", "version": 1, "ops": [["s", ["n"], 9]]},
+                }
+            ],
+            context,
+        )
+        == 5
+    )
+    again = await _open_storage(directory)
+    restored = await again.document(document_id, "current", context)
+    assert restored is not None and restored["value"] == {"n": 9}
 
 
 async def test_rejects_malformed_complete_main_and_sidecar_lines() -> None:

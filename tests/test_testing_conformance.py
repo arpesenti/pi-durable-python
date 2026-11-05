@@ -2,8 +2,9 @@
 
 The runner-independent cases are asserted through the public adapter, exactly as the upstream
 ``createExpectAssertions`` adapter is. The runner test drives ``register_storage_conformance``
-with a recording runner instead of Vitest's global ``describe``/``it``, and the last cases hold
-the suite's receipt-checking wrapper to its own contract.
+with a recording runner instead of Vitest's global ``describe``/``it``, the last cases hold the
+suite's receipt-checking wrapper to its own contract, and one case pins that every backend module
+registers the same list -- including its reopening provider -- rather than a suite of its own.
 """
 
 from __future__ import annotations
@@ -241,3 +242,22 @@ async def test_the_receipt_contract_is_checked_in_every_case(misuse: str, refusa
         with pytest.raises(AssertionError) as raised:
             await case.run()
         assert str(raised.value) == refusal
+
+
+def test_every_backend_runs_the_identical_shared_cases() -> None:
+    """One suite, every backend: the durable backends do not carry a bespoke fork of it.
+
+    The case lists are the ones the three backend modules register, fresh and across reopen, so a
+    receipt or refusal case dropped from one backend's run fails here rather than quietly.
+    """
+
+    import test_jsonl_storage
+    import test_memory_storage
+    import test_sqlite_storage
+
+    shared = [case.name for case in test_memory_storage.CASES]
+    assert shared
+    assert [case.name for case in test_sqlite_storage.CASES] == shared
+    assert [case.name for case in test_jsonl_storage.CASES] == shared
+    assert [case.name for case in test_sqlite_storage.REOPEN_CASES] == shared
+    assert [case.name for case in test_jsonl_storage.REOPEN_CASES] == shared

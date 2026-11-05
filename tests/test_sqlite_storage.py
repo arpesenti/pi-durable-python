@@ -2,7 +2,8 @@
 
 Covers both conformance runs (fresh and across reopen) plus persistence and sequence allocation,
 table prefixes, metadata corruption, document history, detach-on-replay, transaction rollback,
-index usage, revision reclamation, WAL checkpointing, page reuse, and bounded storage size.
+index usage, revision reclamation, WAL checkpointing, page reuse, bounded storage size, and a read
+that starts while a batched call holds the transaction open.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from pi_durable.errors import SessionFailed
 from pi_durable.ids import ROOT_CONVERSATION_ID, DocumentId, EntryId, Seq, TaskId
 from pi_durable.session.session import create_session
 from pi_durable.storage.sqlite import SqliteStorage
+from pi_durable.storage.sqlite.database import SqliteDatabase, SqliteExecutor, SqliteValue
 from pi_durable.storage.sqlite.posix import (
     PosixSqliteStorageOptions,
     open_posix_sqlite_database,
@@ -521,6 +523,103 @@ async def test_rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() 
         )
     finally:
         database.close()
+
+
+class _GatedCheckHandle:
+    """A transaction handle whose global-ID reads stall on a gate, to catch a call mid-flight."""
+
+    def __init__(self, handle: SqliteExecutor, owner: _GatedCheckDatabase) -> None:
+        self._handle = handle
+        self._owner = owner
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._handle.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._handle.run(sql, *params)
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._handle.run_counted(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        if self._owner.armed and "record_type FROM" in sql:
+            return self._owner.stall(self._handle, sql, params)
+        return self._handle.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._handle.all(sql, *params)
+
+
+class _GatedCheckDatabase:
+    """A database facade that can hold one batch's checks open, as a slow disk's lock would."""
+
+    def __init__(self, delegate: SqliteDatabase) -> None:
+        self._delegate = delegate
+        self.armed = False
+        self.reached = asyncio.Event()
+        self.unblock = asyncio.Event()
+
+    async def stall(
+        self, handle: SqliteExecutor, sql: str, params: tuple[SqliteValue, ...]
+    ) -> dict[str, Any] | None:
+        self.reached.set()
+        await self.unblock.wait()
+        return await handle.get(sql, *params)
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._delegate.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._delegate.run(sql, *params)
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._delegate.run_counted(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._delegate.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._delegate.all(sql, *params)
+
+    def transaction(self, callback: Callable[[SqliteExecutor], Awaitable[Any]]) -> Awaitable[Any]:
+        return self._delegate.transaction(lambda handle: callback(_GatedCheckHandle(handle, self)))
+
+    def close(self) -> Awaitable[None]:
+        return self._delegate.close()
+
+
+async def test_a_read_started_during_a_batch_call_observes_every_batch() -> None:
+    """One SQL transaction is one call: a reader concurrent with it sees none or all batches.
+
+    The shared suite's receipts are serial, so this is the contract's other half: a read begun
+    while the group is mid-transaction observes the last batch, never a prefix of the group.
+    """
+
+    directory = _temp_directory("pi-durable-sqlite-concurrent-")
+    path = directory / "storage.sqlite"
+    seed = await _open_storage(path)
+    await _create_root(seed)
+    entry_ids = [EntryId(await seed.mint_id()) for _ in range(3)]
+    await seed.close(context)
+
+    database = _GatedCheckDatabase(await open_posix_sqlite_database(str(path)))
+    storage = await SqliteStorage.open(database)
+    _open_storages.append(storage)
+    database.armed = True
+    batches: list[list[StorageWrite]] = [
+        [{"type": "entry", "value": _entry(id, ROOT_CONVERSATION_ID)}] for id in entry_ids
+    ]
+
+    committing = asyncio.create_task(storage.commit_batches(batches, lambda index, seq: None, context))
+    await database.reached.wait()
+    reading = asyncio.create_task(storage.entry(entry_ids[2], context))
+    await asyncio.sleep(0)
+    database.unblock.set()
+
+    assert await committing == {"stored": 3}
+    observed = await reading
+    assert observed is not None
+    assert observed["entry"]["id"] == entry_ids[2]
 
 
 async def test_reconstructs_recent_and_ancient_rewindable_points_after_reopen() -> None:

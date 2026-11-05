@@ -1,10 +1,14 @@
-"""Translated v1.5.0 batched ``Storage.commit()`` contract (#38).
+"""Translated v1.5.0 batched ``Storage.commit()`` contract (#38), over every backend (#40).
 
 The batch form lands beside the single-commit form: one call stores a group of commit batches, each
 an atomic commit with its own sequence checked against the state the batches before it left, and
 resolves with how many were stored and, when one was refused, the refusal. A refusal is a resolved
 outcome of Durable's own checks; an error of the database or driver is a rejected call that stores
 nothing the backend can roll back -- the two are told apart in every case below.
+
+The SQLite cases also hold the backend to the counted-run member 1.5.0 adds: the commit is the
+member's first caller, so an allocation statement that changed no row rejects the call instead of
+handing the same sequence out twice, and a driver written against the old member set fails loudly.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -382,6 +386,51 @@ async def test_a_database_error_during_a_check_rejects_the_call_and_stores_nothi
     assert await storage.entry(second_id, context) is None
 
 
+async def test_a_rejected_batch_call_leaves_the_storage_refusing_only_its_own_checks() -> None:
+    """The two outcomes stay told apart: after a rejected call, a refusal still keeps its prefix.
+
+    The failure the checks watch for must not go sticky -- a later group is judged on its own
+    database calls, so Durable's own rule still ends it as a resolved refusal.
+    """
+
+    directory = _temp_directory()
+    path = str(directory / "storage.sqlite")
+    seed = await SqliteStorage.open(await open_posix_sqlite_database(path))
+    root_id = await _create_root(seed)
+    rejected_id = EntryId(await seed.mint_id())
+    kept_id = EntryId(await seed.mint_id())
+    await seed.close(context)
+
+    failing = _FailingCheckDatabase(await open_posix_sqlite_database(path), fail_from=1)
+    storage = await SqliteStorage.open(failing)
+    _OPEN.append(storage)
+    receipts: list[tuple[int, Seq]] = []
+    with pytest.raises(RuntimeError, match="SQLite is locked"):
+        await storage.commit_batches(
+            [[{"type": "entry", "value": _entry(rejected_id, root_id)}]],
+            _receive(receipts),
+            context,
+        )
+    assert receipts == []
+    assert await storage.entry(rejected_id, context) is None
+
+    failing.fail_from = 1_000_000
+    refused = await storage.commit_batches(
+        [
+            [{"type": "entry", "value": _entry(kept_id, root_id)}],
+            [{"type": "conversation", "value": {"id": root_id}}],
+        ],
+        _receive(receipts),
+        context,
+    )
+
+    assert refused["stored"] == 1
+    assert "already belongs to conversation" in str(refused["refused"])
+    assert [index for index, _ in receipts] == [0]
+    assert await storage.entry(kept_id, context) is not None
+    assert await storage.entry(rejected_id, context) is None
+
+
 class _FailingMainEnv(PosixExecutionEnv):
     """A file system whose next ``main.jsonl`` append fails, as a full disk's would."""
 
@@ -692,6 +741,164 @@ async def test_the_counted_run_member_reports_the_rows_its_statement_changed() -
         return await handle.run_counted("INSERT INTO counted (n) VALUES (?), (?)", 1, 2)
 
     assert await database.transaction(insert) == 2
+
+
+async def _count(rows: int) -> int:
+    return rows
+
+
+class _DroppedAllocationHandle:
+    """A transaction handle that silently skips the metadata statement and reports no row changed."""
+
+    def __init__(self, handle: SqliteExecutor) -> None:
+        self._handle = handle
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._handle.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._handle.run(sql, *params)
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        if "durable_metadata" in sql:
+            return _count(0)
+        return self._handle.run_counted(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._handle.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._handle.all(sql, *params)
+
+
+class _DroppedAllocationDatabase:
+    """A database facade whose allocation statement changes no row: the count is the only witness."""
+
+    def __init__(self, delegate: SqliteDatabase) -> None:
+        self._delegate = delegate
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._delegate.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._delegate.run(sql, *params)
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._delegate.run_counted(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._delegate.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._delegate.all(sql, *params)
+
+    def transaction(self, callback: Callable[[SqliteExecutor], Awaitable[Any]]) -> Awaitable[Any]:
+        return self._delegate.transaction(lambda handle: callback(_DroppedAllocationHandle(handle)))
+
+    def close(self) -> Awaitable[None]:
+        return self._delegate.close()
+
+
+class _OldMemberSetHandle:
+    """A transaction handle carrying the pre-1.5.0 member set: no counted run at all."""
+
+    def __init__(self, handle: SqliteExecutor) -> None:
+        self._handle = handle
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._handle.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._handle.run(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._handle.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._handle.all(sql, *params)
+
+
+class _OldMemberSetDatabase:
+    """A custom driver written against the old ``SqliteExecutor``: it has no counted run."""
+
+    def __init__(self, delegate: SqliteDatabase) -> None:
+        self._delegate = delegate
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._delegate.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._delegate.run(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._delegate.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._delegate.all(sql, *params)
+
+    def transaction(self, callback: Callable[[SqliteExecutor], Awaitable[Any]]) -> Awaitable[Any]:
+        # The handle deliberately lacks the member, so it no longer satisfies the protocol.
+        return self._delegate.transaction(
+            lambda handle: callback(cast(SqliteExecutor, _OldMemberSetHandle(handle)))
+        )
+
+    def close(self) -> Awaitable[None]:
+        return self._delegate.close()
+
+
+async def test_the_commit_fails_when_its_allocation_statement_changed_no_row() -> None:
+    """A commit whose ``next_seq`` write changed nothing is an unknown outcome, not a stored call."""
+
+    directory = _temp_directory()
+    path = str(directory / "storage.sqlite")
+    seed = await SqliteStorage.open(await open_posix_sqlite_database(path))
+    root_id = await _create_root(seed)
+    first_id = EntryId(await seed.mint_id())
+    second_id = EntryId(await seed.mint_id())
+    await seed.close(context)
+
+    storage = await SqliteStorage.open(_DroppedAllocationDatabase(await open_posix_sqlite_database(path)))
+    _OPEN.append(storage)
+    receipts: list[tuple[int, Seq]] = []
+    with pytest.raises(RuntimeError, match="metadata"):
+        await storage.commit_batches(
+            [
+                [{"type": "entry", "value": _entry(first_id, root_id)}],
+                [{"type": "entry", "value": _entry(second_id, root_id)}],
+            ],
+            _receive(receipts),
+            context,
+        )
+
+    assert receipts == []
+    assert await storage.entry(first_id, context) is None
+    assert await storage.entry(second_id, context) is None
+
+
+async def test_a_driver_without_the_counted_run_member_fails_the_commit() -> None:
+    """A custom driver of the old member set is refused loudly, not left storing nothing silently."""
+
+    directory = _temp_directory()
+    path = str(directory / "storage.sqlite")
+    seed = await SqliteStorage.open(await open_posix_sqlite_database(path))
+    root_id = await _create_root(seed)
+    entry_id = EntryId(await seed.mint_id())
+    await seed.close(context)
+
+    storage = await SqliteStorage.open(
+        cast(SqliteDatabase, _OldMemberSetDatabase(await open_posix_sqlite_database(path)))
+    )
+    _OPEN.append(storage)
+    receipts: list[tuple[int, Seq]] = []
+    with pytest.raises(AttributeError, match="run_counted"):
+        await storage.commit_batches(
+            [[{"type": "entry", "value": _entry(entry_id, root_id)}]],
+            _receive(receipts),
+            context,
+        )
+
+    assert receipts == []
+    assert await storage.entry(entry_id, context) is None
 
 
 # ── The contract as declared ────────────────────────────────────────────────

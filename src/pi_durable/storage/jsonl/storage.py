@@ -1,12 +1,14 @@
 """Portable JSONL implementation of the storage contract, translated from v1.3.0.
 
-Commits are append-only main markers plus document and live-task sidecars. In-memory state is
-published only after the marker append succeeds; reopen replays confirmed records, truncates torn
-or unconfirmed tails, and reclaims records that a later base or retirement made unnecessary.
+Commits are append-only main markers plus document and live-task sidecars. A batched call applies
+each batch to memory as it passes and holds every read off that memory until its appends settle, so
+nothing a crash left unstored is ever observed; reopen replays confirmed records, truncates torn or
+unconfirmed tails, and reclaims records that a later base or retirement made unnecessary.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Callable, Sequence
@@ -297,6 +299,8 @@ class JsonlStorage:
         self._live_task_sidecars: set[int] = set()
         self._closed = False
         self._poison_error: JsonlStoragePoisonedError | None = None
+        # Settles once the group being appended is durable; its batches are in memory already.
+        self._writing: asyncio.Future[None] | None = None
 
     @staticmethod
     async def open(
@@ -357,8 +361,9 @@ class JsonlStorage:
 
         Each batch is prepared against the state the batches before it left, so the first batch
         refused leaves the ones before it stored and writes nothing of its own. A batch applies in
-        memory before the file has it, so a failure of the file after one applied poisons the storage
-        rather than leaving it serving memory the file never got.
+        memory before the file has it, so reads wait for the append to settle (``_readable``) and a
+        failure of the file after one applied poisons the storage rather than leaving it serving
+        memory the file never got.
         """
 
         self._assert_usable()
@@ -366,6 +371,8 @@ class JsonlStorage:
         encoded: list[_EncodedCommit] = []
         reclamations: dict[str, str] = {}
         refused: list[BaseException] = []
+        writing = asyncio.get_running_loop().create_future()
+        self._writing = writing
         try:
             for writes in batches:
                 try:
@@ -385,15 +392,16 @@ class JsonlStorage:
                 self._adopt_sidecar_state(prepared.writes)
                 encoded.append(commit)
             if encoded:
-                # Memory runs ahead of the file for the whole group. Upstream holds reads off it
-                # until the append settles (its ``readable()``); the port's reads are served from
-                # memory that no concurrent batch call is mid-way through, and the shared
-                # conformance pass that pins this for both backends is #40's.
                 await self._append(encoded, context)
         except Exception as error:
             if not seqs:
                 raise
             raise self._poison(error) from error
+        finally:
+            # Reads waiting on the append go on only now: none of them returns what is not stored.
+            self._writing = None
+            if not writing.done():
+                writing.set_result(None)
         # The markers are appended: the batches are durable. Reclaiming sidecars comes after.
         for index, seq in enumerate(seqs):
             receive(index, seq)
@@ -430,7 +438,7 @@ class JsonlStorage:
         return await self._store.mint_id()
 
     async def conversation(self, id: ConversationId, context: Context) -> ConversationRecord | None:
-        return await self._store.conversation(id, context)
+        return await (await self._readable()).conversation(id, context)
 
     async def scan_conversations(
         self,
@@ -439,7 +447,7 @@ class JsonlStorage:
         cursor: Cursor | None,
         context: Context,
     ) -> Page[ConversationRecord, Cursor]:
-        return await self._store.scan_conversations(query, limit, cursor, context)
+        return await (await self._readable()).scan_conversations(query, limit, cursor, context)
 
     @overload
     async def entry(self, id: EntryId, context: Context, /) -> EntryLookup | None: ...
@@ -462,10 +470,10 @@ class JsonlStorage:
         if context is None:
             if not isinstance(id_or_context, Context) and id_or_context is not None:
                 raise StorageRequestError("Storage.entry() requires an entry ID")
-            return await self._store.entry(id_from_number(id_or_conversation_id), id_or_context)
+            return await (await self._readable()).entry(id_from_number(id_or_conversation_id), id_or_context)
         if not _is_safe_int(id_or_context):
             raise StorageRequestError("Storage.entry() requires an entry ID")
-        return await self._store.entry(
+        return await (await self._readable()).entry(
             id_from_number(id_or_conversation_id),
             id_from_number(id_or_context),
             context,
@@ -477,7 +485,7 @@ class JsonlStorage:
         at_or_before_entry_id: EntryId | None,
         context: Context,
     ) -> EntryWithHead | None:
-        return await self._store.find_latest_head_marker(
+        return await (await self._readable()).find_latest_head_marker(
             conversation_id, at_or_before_entry_id, context
         )
 
@@ -488,10 +496,10 @@ class JsonlStorage:
         cursor: Cursor | None,
         context: Context,
     ) -> Page[EntryRecord, Cursor]:
-        return await self._store.scan_entries(query, limit, cursor, context)
+        return await (await self._readable()).scan_entries(query, limit, cursor, context)
 
     async def task(self, id: TaskId, context: Context) -> TaskRecord | None:
-        return await self._store.task(id, context)
+        return await (await self._readable()).task(id, context)
 
     async def scan_tasks(
         self,
@@ -500,10 +508,10 @@ class JsonlStorage:
         cursor: Cursor | None,
         context: Context,
     ) -> Page[TaskRecord, Cursor]:
-        return await self._store.scan_tasks(query, limit, cursor, context)
+        return await (await self._readable()).scan_tasks(query, limit, cursor, context)
 
     async def submission(self, id: SubmissionId, context: Context) -> SubmissionRecord | None:
-        return await self._store.submission(id, context)
+        return await (await self._readable()).submission(id, context)
 
     async def scan_submissions(
         self,
@@ -512,7 +520,7 @@ class JsonlStorage:
         cursor: Cursor | None,
         context: Context,
     ) -> Page[SubmissionRecord, Cursor]:
-        return await self._store.scan_submissions(query, limit, cursor, context)
+        return await (await self._readable()).scan_submissions(query, limit, cursor, context)
 
     async def submission_by_request(
         self,
@@ -520,7 +528,7 @@ class JsonlStorage:
         request_id: str,
         context: Context,
     ) -> SubmissionRecord | None:
-        return await self._store.submission_by_request(conversation_id, request_id, context)
+        return await (await self._readable()).submission_by_request(conversation_id, request_id, context)
 
     async def find_document(
         self,
@@ -528,7 +536,7 @@ class JsonlStorage:
         at: DocumentPoint,
         context: Context,
     ) -> DocumentRecord | None:
-        return await self._store.find_document(address, at, context)
+        return await (await self._readable()).find_document(address, at, context)
 
     async def document(
         self,
@@ -536,7 +544,7 @@ class JsonlStorage:
         at: DocumentPoint,
         context: Context,
     ) -> StoredDocument | None:
-        return await self._store.document(id, at, context)
+        return await (await self._readable()).document(id, at, context)
 
     async def scan_documents(
         self,
@@ -545,7 +553,7 @@ class JsonlStorage:
         cursor: Cursor | None,
         context: Context,
     ) -> Page[DocumentRecord, Cursor]:
-        return await self._store.scan_documents(query, limit, cursor, context)
+        return await (await self._readable()).scan_documents(query, limit, cursor, context)
 
     async def close(self, context: Context) -> None:
         if self._closed:
@@ -1016,6 +1024,13 @@ class JsonlStorage:
     async def _try_join(self, parts: Sequence[str], context: Context) -> str | None:
         path = await self._fs.join_path(parts, context)
         return None if isinstance(path, Err) else path.value
+
+    async def _readable(self) -> MemoryStorage:
+        """The state to read once no group is being appended: memory runs ahead of the file while one is."""
+
+        while self._writing is not None:
+            await self._writing
+        return self._store
 
     @property
     def _store(self) -> MemoryStorage:
