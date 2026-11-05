@@ -1,12 +1,13 @@
-"""Translated v1.4.0 ``harness-blocked`` suite: the crash-loop guard and parked tasks (spec §5.4).
+"""Translated v1.4.0 ``harness-blocked`` suite: the crash-loop guard (spec §5.4).
 
 Open counts every surviving ``running`` task as cut off and writes it back as ``pending`` with
 ``restarts`` one higher; a state the task commits that differs from its current one is progress and
 clears the count, while a close writes the tasks it stopped back as ``pending`` uncounted. At
-``settings.restart_limit`` the task is parked: blocked with reason ``restart_limit``, reported once
-as ``task_parked``, not active in ``wake()``, and run again by ``Harness.retry_task()``. An abort
-mark restarts the count and still runs the handler; an abort handler cut off that many times ends
-the task ``faulted``. The task graph publishes why a task cannot run and follows registry changes.
+``settings.restart_limit`` the task is parked: blocked with reason ``restart_limit``, not active in
+``wake()``, and run again by ``Harness.retry_task()`` — the parked state and its report are deleted
+by #49, which is the interim case below. An abort mark restarts the count and still runs the
+handler; an abort handler cut off that many times ends the task ``faulted``. The task graph
+publishes why a task cannot run and follows registry changes.
 """
 
 from __future__ import annotations
@@ -222,7 +223,18 @@ async def test_keeps_the_hosts_wake_active_until_opens_recovery_pass_has_landed(
     await inner.close(context)
 
 
-async def test_parks_a_task_cut_off_restart_limit_times_in_a_row_and_runs_it_again_on_retry() -> None:
+async def test_interim_parked_task_reports_nothing_until_49() -> None:
+    """Port-side interim case, NOT the upstream one: #49 deletes it.
+
+    Upstream v1.5.0 has no parked task at all. Its case here is
+    ``test/harness-blocked.test.ts:136``, "faults an extension's task cut off restartLimit times in
+    a row instead of running it again": the task ends ``faulted`` and the host gets one report,
+    ``{kind: "task_faulted", reason: "restart_limit"}`` with the message
+    ``Task <id> (<kind>) was cut off 3 times without progress``. The port still parks, and 1.5.0 has
+    no kind for a task that is blocked but not ended, so #34 deleted the old ``task_parked`` report
+    and there is nothing to assert about the report until #49 ends the task.
+    """
+
     path = _sqlite_path()
     state = {"crashing": True, "started": 0}
     registry = create_registry()
@@ -242,13 +254,8 @@ async def test_parks_a_task_cut_off_restart_limit_times_in_a_row_and_runs_it_aga
     harness = opened["harness"]
     record = await harness.get_task(id, context)
     assert record["restarts"] == 3
-    assert opened["infos"] == [
-        {
-            "kind": "task_parked",
-            "task": {"id": id, "kind": "test.crash-loop", "conversationId": 1},
-            "extension": "loop",
-        }
-    ]
+    # Nothing is reported for the parked task: see this case's docstring, and #49.
+    assert opened["infos"] == []
     inspection = await harness.inspect(context)
     found = next(task for task in inspection["tasks"] if task["record"]["id"] == id)
     assert found["state"] == {"kind": "blocked", "reason": "restart_limit"}

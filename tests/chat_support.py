@@ -442,7 +442,7 @@ async def open_chat(
         "registry": setup.registry,
         "settings": setup.settings,
         "now": setup.now,
-        "on_report": setup.reports.append,
+        "on_report": lambda report: setup.reports.append(report["error"]),
     }
     if env is not None:
         options["env"] = env

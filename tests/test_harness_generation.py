@@ -43,7 +43,7 @@ from pi_durable import (
 from pi_durable.context import AbortSignal
 from pi_durable.harness.agent import resolve_settings
 from pi_durable.harness.registry import create_registry
-from pi_durable.harness.types import HarnessSettings, RegistrySnapshot
+from pi_durable.harness.types import HarnessSettings, RegistrySnapshot, Report
 
 ERROR_503 = assistant_message((), stop_reason="error", error_message="503 Service Unavailable")
 
@@ -387,9 +387,9 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
     setup.faux.cancel_deferred = cancel_failed  # type: ignore[method-assign]
     infos: list[dict[str, Any]] = []
 
-    def on_report(error: BaseException, info: dict[str, Any] | None = None) -> None:
-        setup.reports.append(error)
-        infos.append(dict(info or {}))
+    def on_report(report: Report) -> None:
+        setup.reports.append(report["error"])
+        infos.append({key: value for key, value in report.items() if key != "error"})
 
     harness = await Harness.open(
         MemoryStorage(),

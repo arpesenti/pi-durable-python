@@ -45,6 +45,7 @@ from pi_durable.env.posix import PosixExecutionEnv
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
 from pi_durable.harness.types import (
+    Report,
     ReportFromInput,
     ReportInfoInput,
     ReportTask,
@@ -301,8 +302,13 @@ async def open_reporting_harness(tasks: Sequence[Any] = ()) -> dict[str, Any]:
         registry.install(define_extension({"name": "spelling", "tasks": list(tasks)}))
     reports: list[dict[str, Any]] = []
 
-    def on_report(error: BaseException, info: Mapping[str, Any] | None = None) -> None:
-        reports.append({"message": str(error), "info": dict(info or {})})
+    def on_report(report: Report) -> None:
+        reports.append(
+            {
+                "message": str(report["error"]),
+                "info": {key: value for key, value in report.items() if key != "error"},
+            }
+        )
 
     harness = await Harness.open(
         MemoryStorage(),
@@ -316,7 +322,7 @@ def test_a_report_info_written_with_the_retired_type_key_reads_as_the_same_info(
     task: ReportTask = {"id": TaskId(4), "kind": "spelling.reporter", "conversationId": ConversationId(1)}
     pairs: list[tuple[ReportInfoInput, ReportInfoInput]] = [
         ({"type": "listener_error"}, {"kind": "listener_error"}),
-        ({"type": "session_failed"}, {"kind": "session_failed"}),
+        ({"type": "storage_failed"}, {"kind": "storage_failed"}),
         ({"type": "host_error", "callback": "env"}, {"kind": "host_error", "callback": "env"}),
         ({"type": "task_error", "task": task}, {"kind": "task_error", "task": task}),
         (

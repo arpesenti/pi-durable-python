@@ -45,6 +45,7 @@ from .types import (
     RegistrySnapshot,
     ReportFromInput,
     ReportInfo,
+    ReportReason,
     ReportTask,
     Settings,
     SettledTask,
@@ -295,10 +296,20 @@ def _missing_migration(record: Mapping[str, Any], definition: Any) -> Exception:
     )
 
 
+def _outdated_reason(task: AnyTask | None, record: Mapping[str, Any]) -> ReportReason:
+    """Why the replacement definition cannot take a running task: it is gone, older than the task,
+    or newer without a migration (spec §10.1, the reason of a ``task_outdated`` report).
+    """
+
+    if task is None:
+        return "missing_task"
+    return "task_too_old" if task.definition.version < record["version"] else "migration_failed"
+
+
 class _OldDefinitionError(RuntimeError):
     """A task that keeps running under its old definition; ``cause`` names why it could not hand over."""
 
-    def __init__(self, task_id: TaskId, kind: str, cause: str) -> None:
+    def __init__(self, task_id: TaskId, kind: str, cause: ReportReason) -> None:
         super().__init__(f"Task {task_id} keeps running under its old {kind} definition")
         self.cause = cause
 
@@ -415,7 +426,8 @@ class TaskScheduler:
     async def open(self, context: Context) -> None:
         """Load live tasks and change surviving ``running`` tasks back to ``pending``, counting the restart.
 
-        A task that reaches the restart limit this way is parked and reported.
+        A task that reaches the restart limit this way is parked; 1.5.0 has no report for it, and #49
+        ends it instead, reported by its kind.
         """
 
         self._session.observe_commits(self._observe)
@@ -426,8 +438,6 @@ class TaskScheduler:
             self._kick()
 
         self._unsubscribe_registry = self._registry.subscribe(registry_changed)
-        limit = self._restart_limit()
-        parked: list[AnyTaskRecord] = []
 
         async def load(tx: Transaction) -> None:
             scans: list[list[AnyTaskRecord]] = []
@@ -452,22 +462,10 @@ class TaskScheduler:
                         )
                         # The count survives the write: with_state drops it only for an outcome.
                         tx.set_task(cast(AnyTaskRecord, {**pending, "restarts": restarts}))
-                        if restarts >= limit and not record.get("abortRequested"):
-                            parked.append(record)
                     if record["state"]["status"] == "waiting" and record["state"]["policy"] == "failFast":
                         self._fail_fast_checks.add(record["id"])
 
         await self._session.commit_with(load, context)
-        for record in parked:
-            restarts = int(record.get("restarts") or 0) + 1
-            error = RuntimeError(
-                f"Task {record['id']} ({record['kind']}) was cut off {restarts} times without "
-                "progress; it is parked until retry_task()"
-            )
-            self._report(
-                error,
-                {"kind": "task_parked", **self._about_task(record)},
-            )
         # Derive abort marks a crash left unapplied below cancelled owners, and finalize held outcomes.
         self._cascade_pending = True
         self._schedule_reconcile()
@@ -1834,7 +1832,7 @@ class TaskScheduler:
         state["snapshot"] = self._registry.snapshot()
         following = state["snapshot"].task(current["kind"])
         if following is not state["task"]:
-            cause = "missing_task" if following is None else "incompatible_task"
+            cause = _outdated_reason(following, current)
             if following is not None and can_reserve(following, current):
                 tx.set_task(
                     with_state(current, {"status": "pending", "checkpoint": current["state"]["checkpoint"]})

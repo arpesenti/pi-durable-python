@@ -1,16 +1,19 @@
-"""Translated v1.4.0 ``harness-reports`` suite: typed reports (spec §10.1).
+"""Translated v1.5.0 ``harness-reports`` suite: one typed report per failure (spec §10.1).
 
-``on_report(error, info)`` says what happened: a failed Session, a faulted or parked task, a failed
-migration, a running task that kept an outdated definition, a task's own failure, an extension's
-code, a host callback, or a listener. Every task report carries the task — ID, kind, conversation —
-and names the extension whose code failed, when known.
+``on_report(report)`` receives a single :class:`Report`: the fields of a ``ReportInfo`` tagged by
+``kind``, beside the ``error``. A failed Session, a faulted task, a task crashes interrupted, a
+failed migration, a running task that kept an outdated definition, a task's own failure, an
+extension's code, a host callback, or a listener each say what happened in its ``kind``. Every task
+report carries the task — ID, kind, conversation — and names the extension whose code failed, when
+known. The port reports against every host-callback name it can reach; the telemetry member
+upstream adds is excluded (ADR 0003) and asserted absent here rather than silently omitted.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, get_args, get_type_hints
 
 from chat_support import FauxModels, assistant_message, chat_setup
 from session_support import ControlledStorage, context
@@ -28,9 +31,16 @@ from pi_durable import (
     wrap_tool,
 )
 from pi_durable.harness.registry import create_registry
-from pi_durable.harness.types import Registry
+from pi_durable.harness.types import (
+    HostCallback,
+    Registry,
+    Report,
+    ReportInfo,
+    ReportKind,
+    ReportReason,
+)
 
-Report = dict[str, Any]
+ReportEntry = dict[str, Any]
 
 
 async def open_harness(
@@ -43,10 +53,16 @@ async def open_harness(
     registry: Registry = values.get("registry") or create_registry()
     if tasks:
         registry.install(define_extension({"name": "test", "tasks": list(tasks)}))
-    reports: list[Report] = []
+    reports: list[ReportEntry] = []
 
-    def on_report(error: BaseException, info: Mapping[str, Any] | None = None) -> None:
-        reports.append({"message": str(error), "info": dict(info or {})})
+    def on_report(report: Report) -> None:
+        # One object, split the way the upstream suite splits it: the message, and the info beside it.
+        reports.append(
+            {
+                "message": str(report["error"]),
+                "info": {key: value for key, value in report.items() if key != "error"},
+            }
+        )
 
     harness = await Harness.open(
         values.get("storage") or MemoryStorage(),
@@ -62,7 +78,7 @@ async def open_harness(
     return {"harness": harness, "registry": registry, "reports": reports}
 
 
-def info_of(reports: Sequence[Report], message: str) -> Report:
+def info_of(reports: Sequence[ReportEntry], message: str) -> Report:
     return next(report["info"] for report in reports if report["message"] == message)
 
 
@@ -138,7 +154,7 @@ async def test_name_the_extension_whose_definition_ran_also_after_another_one_re
     gate.resolve()
     await harness.wait_for_task(id, context)
 
-    def faulted(report: Report) -> bool:
+    def faulted(report: ReportEntry) -> bool:
         return report["info"]["kind"] == "task_faulted"
 
     await eventually(lambda: any(faulted(report) for report in opened["reports"]))
@@ -166,10 +182,18 @@ async def test_names_the_extension_of_a_failing_section_or_hook_and_of_a_failing
             {"name": "hooks", "hooks": [hook(GenerationTask, {"afterResponse": broken_hook})]}
         )
     )
-    reports: list[Report] = []
+    reports: list[ReportEntry] = []
 
     def build_env(_target: Any, _context: Any) -> Any:
         raise RuntimeError("env")
+
+    def on_report(report: Report) -> None:
+        reports.append(
+            {
+                "message": str(report["error"]),
+                "info": {key: value for key, value in report.items() if key != "error"},
+            }
+        )
 
     harness = await Harness.open(
         MemoryStorage(),
@@ -177,9 +201,7 @@ async def test_names_the_extension_of_a_failing_section_or_hook_and_of_a_failing
             "models": setup.models,
             "registry": setup.registry,
             "env": build_env,
-            "on_report": lambda error, info=None: reports.append(
-                {"message": str(error), "info": dict(info or {})}
-            ),
+            "on_report": on_report,
         },
         context,
     )
@@ -187,7 +209,7 @@ async def test_names_the_extension_of_a_failing_section_or_hook_and_of_a_failing
         context, {"agent": {"model": {"provider": "faux", "modelId": "faux-1"}}}
     )
     await (await root.submit({"type": "input", "content": "hi"}, context)).wait(context)
-    generation = {"id": None, "kind": "pi.generation", "conversationId": root.id}
+    generation = {"kind": "pi.generation", "conversationId": root.id}
     env = info_of(reports, "env")
     assert env["kind"] == "host_error"
     assert env["callback"] == "env"
@@ -285,4 +307,97 @@ async def test_tell_extension_listener_wake_and_timer_failures_from_a_failed_ses
     except Exception:
         pass
     await harness.closed
-    assert info_of(reports, "disk gone") == {"kind": "session_failed"}
+    assert info_of(reports, "disk gone") == {"kind": "storage_failed"}
+
+
+async def test_one_report_carries_the_error_beside_the_kind_rather_than_beside_an_argument() -> None:
+    """The host's sink is handed one object: a callback of one parameter, and the error itself."""
+
+    async def run(_task: Any, runtime: Any, _ctx: Any) -> None:
+        raise RuntimeError("broken")
+
+    Faulty = define_task(
+        {
+            "name": "test.one-report",
+            "version": 1,
+            "initial": lambda _input: {"phase": "run"},
+            "phases": {"run": run},
+            "abort": lambda _task, _runtime, _ctx: None,
+        }
+    )
+    registry = create_registry()
+    registry.install(define_extension({"name": "test", "tasks": [Faulty]}))
+    received: list[Report] = []
+
+    def on_report(report: Report) -> None:
+        # Declared with one parameter: were the error and the info still two arguments, this call
+        # would raise TypeError, the report would be dropped, and nothing would be collected.
+        received.append(report)
+
+    harness = await Harness.open(
+        MemoryStorage(), {"models": FauxModels(), "registry": registry, "on_report": on_report}, context
+    )
+    root = await harness.root(context)
+    id = await root.commit(
+        lambda tx: tx.create_task(Faulty, None, {"ownership": {"kind": "conversation"}}), context
+    )
+    harness.resume()
+    await harness.wait_for_task(id, context)
+    await eventually(lambda: len(received) == 1)
+    report = received[0]
+    assert isinstance(report, Mapping)
+    # The error is carried in the report, and is the exception the phase raised, not its message.
+    assert isinstance(report["error"], RuntimeError)
+    assert str(report["error"]) == "broken"
+    assert {key: value for key, value in report.items() if key != "error"} == {
+        "kind": "task_faulted",
+        "task": {"id": id, "kind": "test.one-report", "conversationId": root.id},
+        "extension": "test",
+        "reason": "threw",
+    }
+    await harness.close(context)
+
+
+def test_the_report_kinds_are_the_set_the_vendored_specification_carries() -> None:
+    """Spec §10.1: the kinds, and the reason fields each of them explains."""
+
+    assert get_args(ReportKind) == (
+        "storage_failed",
+        "task_faulted",
+        "task_interrupted",
+        "migration_failed",
+        "task_outdated",
+        "task_error",
+        "extension_error",
+        "host_error",
+        "listener_error",
+    )
+    # The reasons, grouped as spec §10.1 groups them under each kind.
+    reasons: dict[str, tuple[str, ...]] = {
+        "task_faulted": ("threw", "restart_limit"),
+        "task_interrupted": ("restart_limit", "interrupted"),
+        "task_outdated": ("missing_task", "task_too_old", "migration_failed"),
+    }
+    assert {reason for group in reasons.values() for reason in group} == set(get_args(ReportReason))
+    # A task crashes interrupted carries its restart count; the report is its info plus the error.
+    assert "restarts" in get_type_hints(ReportInfo)
+    assert "error" in get_type_hints(Report)
+    assert "task_parked" not in get_args(ReportKind)
+    assert "session_failed" not in get_args(ReportKind)
+
+
+def test_the_host_callbacks_are_the_exhaustive_set_the_port_can_report_against() -> None:
+    """Spec §10.1 names the host callbacks by their ``HarnessOptions`` name; ADR 0003 excludes one."""
+
+    assert get_args(HostCallback) == (
+        "now",
+        "settings",
+        "registry",
+        "env",
+        "models",
+        "setTimer",
+        "onWake",
+    )
+    # Upstream's ninth member is a telemetry adapter's throw while a commit is published; the port
+    # carries no telemetry adapter, so no report can ever be made against it (ADR 0003).
+    assert "telemetry" not in get_args(HostCallback)

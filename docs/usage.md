@@ -291,8 +291,8 @@ Details worth knowing:
   commits itself that differs from its current one is progress and clears the count; a close is not
   a crash, so the tasks it stops come back `pending` uncounted. At `settings.restart_limit` (default
   `5`, `math.inf` never parks) the task is **parked**: `inspect()` and the task graph show
-  `{"kind": "blocked", "reason": "restart_limit"}`, it is reported once as `task_parked`, it is not
-  active in `harness.wake()`, and `harness.retry_task(id, context)` runs it again. An abort mark
+  `{"kind": "blocked", "reason": "restart_limit"}`, it is not active in `harness.wake()`, and
+  `harness.retry_task(id, context)` runs it again. An abort mark
   starts the count over and still runs a parked task's abort handler; an abort handler cut off that
   many times ends the task `faulted` with detail `{"reason": "restart_limit"}`.
 
@@ -319,23 +319,23 @@ reopening the Harness; `api.models` in tools and hooks reads the current value a
 Harness starts paused; `resume()` (or the first submission) enables scheduling, and `close(context)`
 seals admission and joins the handlers.
 
-`on_report(error, info)` receives failures that do not fail the calling operation, plus the error
-that fails the Session. `info` is a `ReportInfo` whose `type` says what happened:
+`on_report(report)` receives one `Report` per failure that does not fail the calling operation,
+plus the error that fails the Session: the fields of a `ReportInfo` tagged by `kind`, beside the
+`error` itself.
 
-| `type` | Meaning |
+| `kind` | Meaning |
 | --- | --- |
-| `session_failed` | The error failed the Session, which closes. |
+| `storage_failed` | The error failed the Session, which closes. |
 | `task_faulted` | A task ended `faulted`: a phase threw (`reason: "threw"`), or its abort handler was cut off (`reason: "restart_limit"`). |
-| `task_parked` | The restart limit parked a task. |
+| `task_interrupted` | Crashes ended a built-in task: it ended itself at the restart limit (`reason: "restart_limit"`), or a run ended because the host kept stopping while the model answered (`reason: "interrupted"`), with the task's `restarts`. |
 | `migration_failed` | A task's migration threw; the task is blocked. |
-| `task_outdated` | A running task keeps its old definition, which is missing (`missing_task`) or cannot take it (`incompatible_task`). |
+| `task_outdated` | A running task keeps its old definition, which is missing (`missing_task`), older than the task (`task_too_old`), or newer without a `migrate` (`migration_failed`). |
 | `task_error` | A task's own `runtime.report()`, or a failure in running it. |
 | `extension_error` | A hook, section, wrapper, or a tool's invalid structured output, with the extension's name. |
-| `host_error` | A host callback threw: `now`, `settings`, `registry`, `env`, `models`, `set_timer`, or `on_wake`. |
+| `host_error` | A host callback threw: `now`, `settings`, `registry`, `env`, `models`, `set_timer`, or `on_wake`. The port reports against no other callback name: upstream's `telemetry` member is excluded (ADR 0003). |
 | `listener_error` | A commit, close, watch, view, or document listener threw. |
 
-Every task report carries `task` (its ID, kind, and conversation), and `extension` when known. A
-one-argument callback still works: the Harness inspects its arity.
+Every task report carries `task` (its ID, kind, and conversation), and `extension` when known.
 
 ### Timers and wakeups
 

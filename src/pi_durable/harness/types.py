@@ -394,10 +394,12 @@ AfterFailedRun = Literal["keep", "continue", "withdraw"]
 
 # ── Reports, timers, and wakeups ────────────────────────────────────────────
 #
-# 1.5.0 retags `ReportInfo` and `ReportFrom` from `type` to `kind`. The ledger of what this
-# release retags, and of the unions it leaves alone, is at the top of `types.py`: both spellings
-# are accepted on input (`to_report_info`, `to_report_from`), only `kind` is emitted, and #37
-# deletes the retired spelling again.
+# 1.5.0 retags `ReportInfo` and `ReportFrom` from `type` to `kind`, and says what happened in new
+# words: `storage_failed` and `task_interrupted` join the kinds, and the host is handed one `Report`
+# — the fields of a `ReportInfo` beside the `error` — rather than an error and a description. The
+# ledger of what this release retags, and of the unions it leaves alone, is at the top of
+# `types.py`: both spellings are accepted on input (`to_report_info`, `to_report_from`), only
+# `kind` is emitted, and #37 deletes the retired spelling again.
 
 
 class ReportTask(TypedDict):
@@ -411,7 +413,12 @@ class ReportTask(TypedDict):
 
 
 HostCallback = Literal["now", "settings", "registry", "env", "models", "setTimer", "onWake"]
-"""A host callback, by its ``HarnessOptions`` name."""
+"""A host callback, by its ``HarnessOptions`` name.
+
+The set is exhaustive over what the port can report a callback against. Upstream's ninth member,
+``telemetry``, is not carried: the port has no telemetry adapter for a published commit to throw
+in, so nothing can be reported against it (ADR 0003).
+"""
 
 
 def host_error(callback: HostCallback) -> ReportInfo:
@@ -431,10 +438,10 @@ DEFAULT_AFTER_FAILED_RUN: AfterFailedRun = "keep"
 """Default ``settings.after_failed_run``: a failed run leaves its queued inputs queued."""
 
 
-ReportType = Literal[
-    "session_failed",
+ReportKind = Literal[
+    "storage_failed",
     "task_faulted",
-    "task_parked",
+    "task_interrupted",
     "migration_failed",
     "task_outdated",
     "task_error",
@@ -442,11 +449,25 @@ ReportType = Literal[
     "host_error",
     "listener_error",
 ]
-"""What a report to ``on_report`` is about (spec §10.1)."""
+"""What a report to ``on_report`` is about (spec §10.1).
+
+``storage_failed`` is the error that failed the Session; ``task_interrupted`` says crashes ended a
+built-in task at the restart limit, or a run whose request kept being cut off.
+"""
 
 
-ReportReason = Literal["threw", "restart_limit", "missing_task", "incompatible_task"]
-"""Why a task faulted (``threw``, ``restart_limit``) or kept an outdated definition."""
+ReportReason = Literal[
+    "threw",
+    "restart_limit",
+    "interrupted",
+    "missing_task",
+    "task_too_old",
+    "migration_failed",
+]
+"""Why a task faulted (``threw``, ``restart_limit``), was interrupted by crashes (``restart_limit``,
+``interrupted``), or kept an outdated definition (``missing_task``, ``task_too_old``,
+``migration_failed``).
+"""
 
 
 class ReportInfo(TypedDict):
@@ -454,16 +475,30 @@ class ReportInfo(TypedDict):
 
     ``kind`` says what happened. A task report carries ``task`` (its ID, kind, and conversation);
     ``extension`` names the extension whose code failed, when known. ``reason`` explains a
-    ``task_faulted`` or ``task_outdated`` report, ``callback`` names the failing host callback, and
-    ``conversationId`` a wrapper failure outside a task.
+    ``task_faulted``, ``task_interrupted`` or ``task_outdated`` report, and ``restarts`` is the
+    task's restart count when an interruption ended it. ``callback`` names the failing host
+    callback, and ``conversationId`` a wrapper failure outside a task.
     """
 
-    kind: ReportType
+    kind: ReportKind
     task: NotRequired[ReportTask]
     extension: NotRequired[str]
     reason: NotRequired[ReportReason]
+    restarts: NotRequired[int]
+    """The task's ``restarts`` when crashes ended it: a ``task_interrupted`` report only."""
+
     callback: NotRequired[HostCallback]
     conversationId: NotRequired[ConversationId]
+
+
+class Report(ReportInfo):
+    """One report to ``HarnessOptions.on_report``: what it is about, and the error (spec §10.1).
+
+    A host learns of a failure that does not fail its calling operation, and of the Session's own
+    failure, through this one object: the fields of a :class:`ReportInfo` beside the ``error``.
+    """
+
+    error: BaseException
 
 
 class ReportInfoLegacy(TypedDict, total=False):
@@ -472,10 +507,11 @@ class ReportInfoLegacy(TypedDict, total=False):
     1.5.0 moved only the tag key: every field of the current spelling is carried the same way here.
     """
 
-    type: Required[ReportType]
+    type: Required[ReportKind]
     task: ReportTask
     extension: str
     reason: ReportReason
+    restarts: int
     callback: HostCallback
     conversationId: ConversationId
 
@@ -906,7 +942,10 @@ class HarnessOptions(TypedDict, total=False):
     on_wake: Callable[[Wake], Any]
     """Replaces the timer for sleeping tasks; a host arms its own wakeup and calls ``resume()``."""
 
-    on_report: Callable[..., Any]
+    on_report: Callable[[Report], Any]
+    """Receives one :class:`Report` per failure that does not fail its caller, and for the error that
+    fails the Session: the ``ReportInfo`` fields tagged by ``kind``, beside ``error``.
+    """
 
 
 T = TypeVar("T")
@@ -959,11 +998,12 @@ __all__ = [
     "PromptSection",
     "QueueMode",
     "Registry",
+    "Report",
     "ReportFrom",
     "ReportInfo",
+    "ReportKind",
     "ReportReason",
     "ReportTask",
-    "ReportType",
     "RegistryReader",
     "RegistrySnapshot",
     "RewindableConversationDocFamilyToken",
