@@ -37,12 +37,17 @@ Two upstream details are spelled differently here, for reasons of the host rathe
 * A JavaScript promise may reject with a non-error value; a Python future may not. The cases that
   reject with ``undefined`` and ``null`` therefore reject with a :class:`RejectedValue` carrying that
   value, and the assertions name the carrier rather than the raw value.
+* ``Promise.allSettled`` and ``promise.catch()`` await outcomes that are certain to settle; with no
+  ``pytest-timeout`` installed here, the randomized case bounds the same two waits
+  (:func:`_all_settled`) so a commit that is owed an outcome and never gets one fails that case by name
+  instead of wedging the suite.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+import math
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 import pytest
@@ -59,7 +64,7 @@ from session_support import (
 from pi_durable import define_doc
 from pi_durable.session.session import SessionImpl
 from pi_durable.session.transaction import Transaction
-from pi_durable.types import CommitPublication, ConversationId, Seq
+from pi_durable.types import CommitPublication, ConversationId, Seq, StorageWrite
 
 Note = define_doc(
     {
@@ -1048,6 +1053,178 @@ async def test_leaves_the_parts_after_a_throwing_adoption_unpublished() -> (
     assert await notes(storage, [a, b, c, d]) == [1, 1, 1, 1]
 
 
+# --------------------------------------------------------------------------- #
+# The randomized interleavings oracle: upstream's last describe (:948-:1017).   #
+# --------------------------------------------------------------------------- #
+
+
+def random_stream(seed: int) -> Callable[[], float]:
+    """Upstream's generator (:950): a linear congruential step taken in double precision.
+
+    JavaScript evaluates ``state * 1_103_515_245 + 12_345`` as a double, which rounds once the product
+    passes 2**53. Ported with Python ints -- which round nothing -- the same expression diverges from
+    upstream's sequence at the second draw, and the five pinned seeds would then drive a different run
+    than the one upstream runs. ``math.fmod`` is the ``%`` JavaScript applies to the rounded product.
+    """
+
+    state = float(seed)
+
+    def draw() -> float:
+        nonlocal state
+        state = math.fmod(state * 1_103_515_245 + 12_345, 2_147_483_648)
+        return state / 2_147_483_648
+
+    return draw
+
+
+_OUTCOME_DEADLINE = 20.0
+
+
+async def _all_settled(tasks: list[asyncio.Task[Any]], seed: int, owed: str) -> list[bool]:
+    """Whether each task resolved -- awaiting every one of them, whichever way it settles.
+
+    Upstream's ``Promise.allSettled`` and ``promise.catch()`` cannot hang, because every promise settles.
+    Here an outcome that never arrives is one of the failures the case exists to catch, and
+    ``pytest-timeout`` is not installed, so the wait is bounded and its failure names the seed, the
+    invariant and the commits still owed an outcome rather than wedging the suite.
+    """
+
+    done, pending = await asyncio.wait(tasks, timeout=_OUTCOME_DEADLINE)
+    if pending:
+        stuck = ", ".join(str(tasks.index(task)) for task in sorted(pending, key=lambda t: tasks.index(t)))
+        raise AssertionError(f"seed {seed}: {owed} -- commits {stuck} delivered no outcome")
+    return [not task.cancelled() and task.exception() is None for task in tasks]
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [1, 7, 42, 1_234, 99_991],
+    ids=["seed-1", "seed-7", "seed-42", "seed-1234", "seed-99991"],
+)
+async def test_stores_publishes_and_reads_only_what_an_order_of_the_commits_implies(seed: int) -> None:
+    """Upstream: "stores, publishes, and reads only what an order of the commits implies (seed N)".
+
+    ``session-group-commit.test.ts:959``, executed once per seed of ``[1, 7, 42, 1234, 99991]`` (:958).
+
+    What the seed randomises, in draw order: the latency of every storage call (``floor(next() * 3)``
+    ms, so how long each call is in flight and which commits are admitted behind it); on the even seeds
+    only, the index of the one commit whose batch the storage refuses, which is where the Session fails
+    and everything behind it stops being stored (the odd seeds refuse nothing, and the Session is
+    closed cleanly); which of the four conversations each commit increments, four draws at ``< 0.4``
+    apiece; and how far the submission loop runs before it stops to await one commit's outcome
+    (``< 0.3``) or to let the loop turn (``< 0.5``).
+
+    What it asserts is not those five outcomes but the property every order they can produce has to
+    satisfy: the group commit is exactly-once over Storage and read-consistent over the line. A commit
+    resolved exactly when its log entry is durable in a Session reopened over that storage; every
+    callback read each note it touched as the number of the *stored* commits before it that touched it,
+    so an increment an unpublished commit wrote was never seen and a stored one was never missed; and
+    what storage holds for each note is the stored commits replayed in line order. Resolving without
+    storing, storing without publishing, reading an increment no stored commit wrote, and losing a job's
+    outcome each break one of the three, whichever order the seed produced.
+    """
+
+    next_random = random_stream(seed)
+    storage, session, ids, _ = await open_group_commits(4)
+    log = ids[0]
+    storage.latency = lambda: math.floor(next_random() * 3)
+    # The even seeds refuse exactly one commit's batch, by the index its log entry carries; the odd
+    # seeds draw nothing here and refuse nothing at all (index -1 matches no commit).
+    refuse_at = math.floor(next_random() * 60) if seed % 2 == 0 else -1
+
+    def refusing(writes: Sequence[StorageWrite]) -> bool:
+        """Upstream's predicate: the one batch holding the log entry whose index this seed refuses."""
+
+        for write in writes:
+            if write["type"] != "entry":
+                continue
+            data = write["value"].get("data")
+            if isinstance(data, dict) and data.get("index") == refuse_at:
+                return True
+        return False
+
+    storage.refuse = refusing
+    # Per commit, in line order: the notes it increments, and the values its callback read for them.
+    plans: list[list[ConversationId]] = []
+    reads: list[list[int] | None] = []
+    outcomes: list[asyncio.Task[Any]] = []
+    for index in range(60):
+        touched = [id for id in ids if next_random() < 0.4]
+        plans.append(touched)
+        reads.append(None)
+
+        async def change(
+            tx: Any,
+            index: int = index,
+            touched: tuple[ConversationId, ...] = tuple(touched),
+        ) -> None:
+            values: list[int] = []
+            for id in touched:
+                note = await tx.doc(Note, id)
+                seen = cast(int, note["n"])
+                values.append(seen)
+                note["n"] = seen + 1
+            reads[index] = values
+            await tx.append_entry(log, {"kind": "log", "data": {"index": index}})
+
+        outcome = session.commit(change, context)
+        _swallow(outcome)
+        outcomes.append(outcome)
+        pause = next_random()
+        if pause < 0.3:
+            # Upstream awaits the commit's own outcome here (``outcome.catch(() => {})``), so the
+            # submission loop stops until it settles and the commits behind it get the line.
+            await _all_settled([outcome], seed, f"commit {index}, awaited mid-submission")
+        elif pause < 0.5:
+            await flush()
+    stored = await _all_settled(outcomes, seed, "every commit the loop admitted")
+    if refuse_at >= 0:
+        # The refused batch fails the Session: upstream waits for that end, rather than closing over it,
+        # because what is durable is read back from storage, not from the Session that failed.
+        done, _ = await asyncio.wait({session.closed}, timeout=_OUTCOME_DEADLINE)
+        if not done:
+            raise AssertionError(
+                f"seed {seed}: refusing commit {refuse_at}'s batch fails the Session, but it never ended"
+            )
+    else:
+        await session.close(context)
+    reopened = SessionImpl(storage.reopen())
+    page = await reopened.commit(lambda tx: tx.scan_entries({"conversationId": log}, 1_000), context)
+    logged = {cast(int, entry["data"]["index"]) for entry in page["items"]}
+    # Outcomes match storage: a commit resolved exactly when its log entry is stored.
+    for index, ok in enumerate(stored):
+        assert (index in logged) == ok, (
+            f"seed {seed}: commit {index} {'resolved' if ok else 'rejected'} while its log entry is "
+            f"{'stored' if index in logged else 'absent'} -- a commit owes its caller an outcome exactly "
+            "when Storage made its batch durable"
+        )
+    # Each callback read every earlier stored increment of what it touched, and nothing else.
+    for index, values in enumerate(reads):
+        if values is None:
+            continue
+        for position, id in enumerate(plans[index]):
+            expected = sum(1 for earlier in range(index) if stored[earlier] and id in plans[earlier])
+            assert values[position] == expected, (
+                f"seed {seed}: commit {index} read {id}'s note as {values[position]} while {expected} "
+                f"stored commit{'s' if expected != 1 else ''} before it touch{'es' if expected == 1 else ''} "
+                "it -- a callback reads what the stored commits wrote, never an unpublished increment "
+                "and never one that was dropped"
+            )
+    # Storage equals the stored commits replayed in order.
+    for id in ids:
+        increments = sum(1 for index, touched in enumerate(plans) if stored[index] and id in touched)
+        value = await reopened.snapshot(Note, id, context)
+        assert (0 if value is None else cast(int, value["n"])) == increments, (
+            f"seed {seed}: {id}'s note is {0 if value is None else value['n']} after {increments} "
+            f"stored commit{'s' if increments != 1 else ''} touched it -- storage is the stored commits "
+            "replayed in line order, no more and no less"
+        )
+    assert session.line_sizes == {"outstanding": 0, "unpublished": 0}, (
+        f"seed {seed}: the line did not return to zero once every outcome was delivered: {session.line_sizes}"
+    )
+    await reopened.close(context)
+
+
 def _swallow(future: asyncio.Future[Any]) -> None:
     """Nobody awaits this one: its rejection must not be reported as unhandled."""
 
@@ -1082,8 +1259,9 @@ async def _error_of(promise: Any) -> BaseException | None:
 #
 # Upstream ``test/session-group-commit.test.ts`` declares 34 cases and executes 40: two cases run once
 # per value of ``[undefined, null]`` (:514, :538) and one runs once per seed (1, 7, 42, 1234, 99991).
-# This module translates 23 of them -- 21 from this file plus the two ``session-adoption.test.ts:128``
-# cases carried above -- and the remaining 19 executed cases are named here rather than stubbed:
+# This module translates 24 of the 34 declared cases -- 22 from this file, which execute 28 times, plus
+# the two ``session-adoption.test.ts:128`` cases carried above -- and the other 12 declared cases, which
+# are the other 12 executions, are named here rather than stubbed:
 #
 # Deferred commits and held changes are #47 (``persistence`` exists in this port's types and nothing
 # consumes it, there is no deadline, and no held-changes buffer), so these are not translated and no
@@ -1109,11 +1287,8 @@ async def _error_of(promise: Any) -> BaseException | None:
 #   :635  "fails the Session for a throw in the read caches' write-through, and leaves the later
 #         parts unpublished"
 #
-# NOT TRANSLATED, and named here so the gap lives in the file that would carry it: the randomized
-# interleavings oracle runs one case five times (seeds 1, 7, 42, 1_234, 99_991), generating commits,
-# reads and scans against an oracle of what the order implies. The port has no randomized-oracle harness
-# for any suite yet, and inventing one inside #42 would be a testing decision, not an implementation
-# one. Its owner is #58, which is where the harness belongs:
-#
-#   :959  "stores, publishes, and reads only what an order of the commits implies (seed N)" x 5 seeds
+# Translated by #58, so it is named here only for the record: the randomized interleavings oracle at
+# :959 runs once per seed of 1, 7, 42, 1_234, 99_991, and each seed is one case above. Its generator is
+# :func:`random_stream`, beside the case rather than in a shared harness, because no other suite in this
+# port randomises yet -- when one does, the generator moves next to the support that asks for it.
 #
