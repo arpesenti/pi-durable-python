@@ -100,7 +100,7 @@ class Submissions:
         self._start_run = start_run
         self._waiters: Waiters[SubmissionId, SettledSubmissionRecord] = Waiters()
         self._closed = False
-        session.observe_commits(self._observe)
+        session.observe_stored_commits(self._observe)
         session.subscribe_close(self._close)
 
     async def submit(

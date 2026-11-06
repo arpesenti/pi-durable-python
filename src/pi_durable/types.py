@@ -50,6 +50,8 @@ __all__ = [
     "ROOT_CONVERSATION_ID",
     "CheckpointInfo",
     "CommitChange",
+    "CommitObservation",
+    "CommitObserver",
     "CommitPublication",
     "ContextEdit",
     "ConversationId",
@@ -79,6 +81,8 @@ __all__ = [
     "JoinPolicy",
     "JsonObject",
     "JsonValue",
+    "Observation",
+    "Observer",
     "Page",
     "PhaseHandler",
     "RunningTask",
@@ -1079,6 +1083,51 @@ class DocumentObserver(Protocol):
     async def watch_doc(self, token: Any, *args: Any) -> DocumentWatch | None: ...
 
 
+class Observer(Protocol):
+    """A host's synchronous mirror of committed state, attached on the Session's mutation line.
+
+    ``advance`` gets the very call the matching watch gets — a :data:`WatchCall` for a document, a
+    conversation view, or the task graph — unfolded, one per change, at the publication that made
+    it; ``end`` comes once and nothing follows it. An observer mirrors state rather than rendering
+    it, so its ``advance`` records and returns: it never awaits, calls the Session, or throws. A
+    throw, or a returned awaitable that rejects, is reported, detaches the observer, and ends it
+    ``listener_error`` (spec §9.1).
+    """
+
+    def advance(self, call: WatchCall[Any], context: Context) -> None: ...
+
+    def end(self, end: WatchEnd) -> None: ...
+
+
+class CommitObserver(Protocol):
+    """A host's synchronous observer of stored commits (``Session.observe_commits()``).
+
+    ``advance`` gets one :class:`CommitPublication` per stored commit — exactly what Storage made
+    durable — in a microtask of its publication, and ``end`` gets the Session's own close after the
+    last publication (spec §9.1).
+    """
+
+    def advance(self, publication: CommitPublication, context: Context) -> None: ...
+
+    def end(self, end: WatchEnd) -> None: ...
+
+
+class Observation(Protocol[JsonValueT_co]):
+    """An attached :class:`Observer`: the value it attached at, which every later ``advance``
+    reaches from, and how to detach it. The detach is idempotent: no call follows it."""
+
+    @property
+    def value(self) -> JsonValueT_co: ...
+
+    def detach(self) -> None: ...
+
+
+class CommitObservation(Protocol):
+    """An attached :class:`CommitObserver`. The detach is idempotent: no call follows it."""
+
+    def detach(self) -> None: ...
+
+
 # ── Queries and pages ───────────────────────────────────────────────────────
 
 ScanOrder: TypeAlias = Literal["ascending", "descending"]
@@ -1431,13 +1480,13 @@ class Session(Protocol):
     @property
     def closed(self) -> asyncio.Future[SessionEnd]: ...
 
-    def subscribe_commits(self, listener: Any) -> Any: ...
+    def observe_commits(self, observer: CommitObserver) -> CommitObservation: ...
 
     def subscribe_close(self, listener: Any) -> Any: ...
 
     async def snapshot(self, token: Any, *args: Any) -> JsonObject | None: ...
 
-    async def document_state(self, token: Any, *args: Any) -> Any: ...
+    async def observe_doc(self, token: Any, *args: Any) -> Observation[Any] | None: ...
 
     async def watch_doc(self, token: Any, *args: Any) -> Any: ...
 

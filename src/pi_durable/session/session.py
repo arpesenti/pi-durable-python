@@ -27,6 +27,8 @@ from ..json import JsonObject
 from ..timers import host_timers
 from ..types import (
     CommitChange,
+    CommitObservation,
+    CommitObserver,
     CommitPublication,
     CommitPublicationScope,
     CommitReceipt,
@@ -36,13 +38,16 @@ from ..types import (
     Cursor,
     DocumentAddress,
     DocumentCommitChange,
+    DocumentCommittedChange,
     DocumentPoint,
     DocumentQuery,
     DocumentRecord,
+    DocumentRetiredChange,
     EntryLookup,
     EntryQuery,
     EntryRecord,
     EntryWithHead,
+    Observer,
     Page,
     PublishingStorage,
     SessionEnd,
@@ -55,9 +60,13 @@ from ..types import (
     TaskRecord,
 )
 from .observation import (
-    CommittedState,
+    ENDED,
+    AttachedObservation,
+    AttachedObserver,
     CommittedWatch,
-    observed_operations,
+    GuardedObserver,
+    contained,
+    session_closed_error,
 )
 from .transaction import LoadedDocument, Transaction, TransactionScope
 
@@ -129,15 +138,17 @@ def _record_address_id(record: DocumentRecord) -> str:
 
 @dataclass(slots=True)
 class _WatchAttachment:
-    """One watch subscribed to a document address, and the incarnation it currently pins.
+    """One follower of a document address — a watch or an observer — and the incarnation it pins.
 
-    A watch follows its address, so a retirement unpins what it held and a document created at that
-    address later is pinned again for the same watch (spec §9.2).
+    Both followers follow the address rather than one incarnation, so a retirement unpins what the
+    attachment held and a document created at that address later is pinned again for the same
+    attachment (spec §9.2). The follower decides what it does with the change: a watch folds it
+    behind its listener, an observer mirrors it synchronously.
     """
 
     address_id: str
     record_id: DocumentId | None
-    watch: CommittedWatch
+    follower: CommittedWatch | AttachedObserver
     release: Callable[[], None] | None
 
 
@@ -156,37 +167,6 @@ class DocumentCacheSizes(TypedDict):
     idle: int
     attached: int
     sweeps: int
-
-
-class DocumentState(CommittedState):
-    """Disposable, read-only committed state bound to one document incarnation."""
-
-    __slots__ = ("_observed_version", "_record_id", "_session")
-
-    def __init__(
-        self,
-        session: SessionImpl,
-        record_id: DocumentId,
-        value: JsonObject,
-        observed_version: int,
-        release: Callable[[], None],
-    ) -> None:
-        super().__init__(value, release, session.report)
-        self._session = session
-        self._record_id = record_id
-        self._observed_version = observed_version
-
-    @property
-    def value(self) -> JsonObject | None:
-        return cast(JsonObject | None, self._value)
-
-    def dispose(self) -> None:
-        """Idempotently stop future deliveries; the last value remains readable."""
-
-        if self._disposed:
-            return
-        super().dispose()
-        self._session._detach_state(self)
 
 
 class _SessionHost:
@@ -240,9 +220,11 @@ class SessionImpl:
         self._sweep_jobs = 0
         self._sweep_tasks: set[asyncio.Task[None]] = set()
         self._document_timers_unavailable = False
-        self._states: list[DocumentState] = []
         self._watches: list[_WatchAttachment] = []
-        self._commit_listeners: list[Callable[[CommitPublication, Context], Any]] = []
+        # Host observers of one document address each, following the address as a watch does.
+        self._observers: list[_WatchAttachment] = []
+        # Host observers of every stored commit (`observe_commits`), ended at the close's last publication.
+        self._commit_observers: list[GuardedObserver] = []
         # The Session's own components follow every commit; a throw leaves their state behind storage.
         self._internal_listeners: list[Callable[[CommitPublication, Context], Any]] = []
         self._close_listeners: list[Callable[[], Any]] = []
@@ -543,14 +525,17 @@ class SessionImpl:
             except Exception as close_error:
                 self.report(close_error)
             async with self._line:
-                self._commit_listeners.clear()
+                # After the last publication: every commit admitted before the seal has settled, so
+                # a commit observer's end follows the last publication it was handed.
+                commit_observers, self._commit_observers = self._commit_observers, []
+                closed = self._failure if self._failure is not None else session_closed_error()
+                for observer in commit_observers:
+                    observer.close_session(closed)
                 self._internal_listeners.clear()
                 self._documents.clear()
                 self._idle_documents.clear()
                 self._attached_documents.clear()
-                for state in list(self._states):
-                    state._close_session()
-                self._states.clear()
+                self._observers.clear()
                 try:
                     await self._storage.close(without_abort_signal(BACKGROUND_CONTEXT))
                 except BaseException as close_error:
@@ -581,8 +566,6 @@ class SessionImpl:
         self._cancel_document_sweep()
         for task in list(self._sweep_tasks):
             task.cancel()
-        for state in list(self._states):
-            state._close_session()
         listeners = self._close_listeners
         self._close_listeners = []
         for listener in listeners:
@@ -590,17 +573,37 @@ class SessionImpl:
         watches = self._watches
         self._watches = []
         for entry in watches:
-            entry.watch.close_session(self._failure)
+            entry.follower.close_session(self._failure)
+        observers = self._observers
+        self._observers = []
+        # One close, one error: an observer follows the Session through its close, so the close ends
+        # it `failed` — the `ended` kind stays for an observed owner that ended (spec §9.1).
+        closed = self._failure if self._failure is not None else session_closed_error()
+        for entry in observers:
+            entry.follower.close_session(closed)
 
-    def subscribe_commits(
-        self,
-        listener: Callable[[CommitPublication, Context], Any],
-    ) -> Callable[[], None]:
+    def observe_commits(self, observer: CommitObserver) -> CommitObservation:
+        """Attach a synchronous observer of every stored commit (spec §9.1).
+
+        Its ``advance`` is handed exactly what Storage made durable, one microtask from the commit's
+        publication, and its ``end`` gets the Session's close after its last publication. The
+        detach is idempotent: no call and no end follows it.
+        """
+
         self.assert_usable()
-        self._commit_listeners.append(listener)
-        return lambda: self._commit_listeners.remove(listener) if listener in self._commit_listeners else None
+        guarded = GuardedObserver(
+            observer,
+            lambda: (
+                self._commit_observers.remove(guarded)
+                if guarded in self._commit_observers
+                else None
+            ),
+            lambda error: self.report(error, LISTENER),
+        )
+        self._commit_observers.append(guarded)
+        return AttachedObservation(None, guarded)
 
-    def observe_commits(
+    def observe_stored_commits(
         self,
         listener: Callable[[CommitPublication, Context], Any],
     ) -> Callable[[], None]:
@@ -627,10 +630,10 @@ class SessionImpl:
         context: Context,
     ) -> None:
         if (
-            not self._commit_listeners
-            and not self._internal_listeners
-            and not self._states
+            not self._internal_listeners
+            and not self._commit_observers
             and not self._watches
+            and not self._observers
         ):
             return
         changes: list[CommitChange] = [
@@ -640,21 +643,8 @@ class SessionImpl:
         ]
         changes.extend(documents)
         publication: CommitPublication = {"seq": seq, "changes": changes}
-        for state in list(self._states):
-            for settled in documents:
-                if settled["type"] != "document" or settled["record"]["id"] != state._record_id:
-                    continue
-                ops, version = observed_operations(state._observed_version, settled)
-                # A migration-only base changes nothing for an observer of the new version.
-                if not ops:
-                    continue
-                state._observed_version = version
-                # A retired incarnation never changes again: its observers pin nothing.
-                if settled["kind"] == "retire":
-                    state._release_pin()
-                    state._advance(None, context)
-                else:
-                    state._advance(settled["value"], context)
+        for entry in list(self._observers):
+            self._advance_observer(entry, documents, writes, context)
         for entry in list(self._watches):
             for settled in documents:
                 if (
@@ -673,17 +663,82 @@ class SessionImpl:
                     if entry.release is not None:
                         entry.release()
                     entry.record_id = settled["record"]["id"]
-                    entry.release = self._pin_document(
-                        entry.address_id, settled["record"]["id"]
-                    )
-                entry.watch.advance_document(settled, context)
+                    entry.release = self._pin_document(entry.address_id, settled["record"]["id"])
+                watch = cast(CommittedWatch, entry.follower)
+                watch.advance_document(settled, context)
         for listener in list(self._internal_listeners):
             contained(partial(listener, publication, context), self.fail)
-        for listener in list(self._commit_listeners):
-            contained(
-                partial(listener, publication, context),
-                lambda error: self.report(error, LISTENER),
-            )
+        for observer in list(self._commit_observers):
+            # A commit observer mirrors what Storage made durable, in line order, and in no
+            # particular order with the watch listeners. It is read at delivery: an observer that an
+            # earlier advance detached — its own or another observer's — takes nothing of the commit
+            # it was attached for (§9.1).
+            if observer.attached:
+                observer.advance(publication, context)
+
+    def _follow_address(
+        self,
+        entry: _WatchAttachment,
+        settled: DocumentCommittedChange | DocumentRetiredChange,
+    ) -> None:
+        """Move one attachment's pin to the incarnation its address now holds.
+
+        A watch and an observer follow their address the same way: while it is absent nothing is
+        pinned for them, and a document created at it later is pinned again for the same attachment.
+        """
+
+        if settled["kind"] == "retire":
+            if entry.release is not None:
+                entry.release()
+            entry.release = None
+            entry.record_id = None
+        elif entry.record_id != settled["record"]["id"]:
+            if entry.release is not None:
+                entry.release()
+            entry.record_id = settled["record"]["id"]
+            entry.release = self._pin_document(entry.address_id, settled["record"]["id"])
+
+    def _advance_observer(
+        self,
+        entry: _WatchAttachment,
+        documents: list[DocumentCommitChange],
+        writes: list[StorageWrite],
+        context: Context,
+    ) -> None:
+        """Hand one observer every change of this commit at its address, unfolded and in line order.
+
+        The observer may detach in one of its own calls, or throw and be detached by the guard: what
+        is left of the commit then reaches neither it nor a pin taken for it. A commit that makes the
+        owner task of a task document terminal is the one case an observer ends on its own: its
+        retirement is the task document's last change, and the end follows it on the same publication
+        (spec §9.1).
+        """
+
+        follower = cast(AttachedObserver, entry.follower)
+        for change in documents:
+            # A call of this same commit may have detached the observer, its own or another
+            # observer's: the rest of the commit then reaches neither it nor a pin taken for it.
+            if not follower.attached:
+                return
+            if (
+                change["type"] != "document"
+                or _record_address_id(change["record"]) != entry.address_id
+            ):
+                continue
+            self._follow_address(entry, change)
+            follower.advance_document(change, context)
+            if not follower.attached:
+                return
+        owner = follower.owner_task_id
+        if owner is None:
+            return
+        for write in writes:
+            if write["type"] != "task":
+                continue
+            record = write["value"]
+            if record["id"] == owner and record["state"]["status"] == "terminal":
+                follower.end(ENDED)
+                return
 
     # ── Document cache ─────────────────────────────────────────────────────
 
@@ -738,10 +793,6 @@ class SessionImpl:
         self._install(loaded)
         return loaded
 
-    def _detach_state(self, state: DocumentState) -> None:
-        if state in self._states:
-            self._states.remove(state)
-
     async def unload_documents(self) -> None:
         """Drop every loaded document value; later access cold-loads from Storage."""
 
@@ -786,31 +837,64 @@ class SessionImpl:
         _validate_document(definition, loaded)
         return loaded.value
 
-    async def document_state(self, token: AnyDocToken, *args: Any) -> DocumentState | None:
-        self.assert_usable()
+    async def observe_doc(self, token: AnyDocToken, *args: Any) -> AttachedObservation | None:
+        """Attach a synchronous observer of one document address (spec §9.1).
+
+        The attachment is atomic on the mutation line: it takes the committed revision with no
+        commit between the read and the attachment, so a commit queued behind the attachment is
+        already in the value the observation hands back, and every later change at the address
+        reaches the observer in line order. An absent address attaches nothing and answers ``None``.
+        The detach is idempotent and unpins the document.
+        """
+
         definition = token.definition
         resolved = resolve_address(definition, args)
-        context = args[resolved.next_argument]
-        async with self._line:
-            self._assert_healthy()
-            loaded = await self._load_document(definition, resolved.id, resolved.address, context)
-            if loaded is None:
-                return None
-            _validate_document(definition, loaded)
-            # Close seals admission while the load was underway: no observer, and so no pin, remains.
-            self.assert_usable()
-            release = self._pin_document(loaded.address_id, loaded.record["id"])
-            state = DocumentState(
-                self, loaded.record["id"], loaded.value, loaded.value_version, release
-            )
-            self._states.append(state)
-            return state
+        observer = cast(Observer, args[resolved.next_argument])
+        context = args[resolved.next_argument + 1]
+        return await self._attach_document(
+            definition,
+            resolved,
+            context,
+            lambda loaded: self._attach_observer(definition, loaded, observer),
+            lambda observation: observation.detach(),
+        )
 
     async def watch_doc(self, token: AnyDocToken, *args: Any) -> CommittedWatch | None:
-        self.assert_usable()
         definition = token.definition
         resolved = resolve_address(definition, args)
         context = args[resolved.next_argument]
+        signal = context.abort_signal
+
+        def create(loaded: LoadedDocument) -> CommittedWatch:
+            watch = self._attach_watch(definition, loaded)
+            if signal is not None:
+                watch.observe_cancellation(signal)
+            return watch
+
+        return await self._attach_document(
+            definition,
+            resolved,
+            context,
+            create,
+            lambda watch: watch.abort_acquisition(),
+        )
+
+    async def _attach_document(
+        self,
+        definition: DocDefinition,
+        resolved: Any,
+        context: Context,
+        attach: Callable[[LoadedDocument], Any],
+        cancel: Callable[[Any], None],
+    ) -> Any:
+        """Load one document on the line and attach one follower to its address.
+
+        One acquisition serves a watch and an observer alike, which differ only in what they build
+        from the loaded document and in how an acquisition cancelled while it waited on the line
+        undoes itself: a watch aborts its acquisition, an observation detaches (spec §9.2).
+        """
+
+        self.assert_usable()
         signal = context.abort_signal
         cancelled = signal is not None and signal.aborted
         remove_listener: Callable[[], None] | None = None
@@ -837,13 +921,11 @@ class SessionImpl:
                 raise_if_cancelled()
                 if loaded is None:
                     return None
-                watch = self._attach_watch(definition, loaded)
+                attached = attach(loaded)
             if cancelled:
-                watch.abort_acquisition()
+                cancel(attached)
                 raise_if_cancelled()
-            if signal is not None:
-                watch.observe_cancellation(signal)
-            return watch
+            return attached
         finally:
             if remove_listener is not None:
                 remove_listener()
@@ -855,8 +937,13 @@ class SessionImpl:
         release = self._pin_document(loaded.address_id, loaded.record["id"])
 
         def detach() -> None:
-            self._watches = [entry for entry in self._watches if entry.watch is not watch]
-            release()
+            self._watches = [
+                held for held in self._watches if held.follower is not watch
+            ]
+            # What is unpinned is what the address holds now, not what it held at acquisition.
+            release_now, attachment.release = attachment.release, None
+            if release_now is not None:
+                release_now()
 
         watch = CommittedWatch(
             loaded.value,
@@ -865,10 +952,47 @@ class SessionImpl:
             loaded.value_version,
             loaded.record["id"],
         )
-        self._watches.append(
-            _WatchAttachment(loaded.address_id, loaded.record["id"], watch, release)
+        attachment = _WatchAttachment(
+            loaded.address_id, loaded.record["id"], watch, release
         )
+        self._watches.append(attachment)
         return watch
+
+    def _attach_observer(
+        self, definition: DocDefinition, loaded: LoadedDocument, observer: Observer
+    ) -> AttachedObservation:
+        """Follow one address with a host observer, pinned the way a watch of it is pinned."""
+
+        _validate_document(definition, loaded)
+        # Close seals admission while the load was underway: no observer, and so no pin, remains.
+        self.assert_usable()
+        release = self._pin_document(loaded.address_id, loaded.record["id"])
+
+        def detach() -> None:
+            self._observers = [
+                held for held in self._observers if held.follower is not follower
+            ]
+            # What is unpinned is what the address holds now, not what it held at attachment.
+            release_now, attachment.release = attachment.release, None
+            if release_now is not None:
+                release_now()
+
+        scope = loaded.record["scope"]
+        owner_task_id = scope["taskId"] if scope["kind"] == "task" else None
+        follower = AttachedObserver(
+            observer,
+            detach,
+            self.report,
+            loaded.value,
+            loaded.value_version,
+            loaded.record["id"],
+            owner_task_id,
+        )
+        attachment = _WatchAttachment(
+            loaded.address_id, loaded.record["id"], follower, release
+        )
+        self._observers.append(attachment)
+        return AttachedObservation(loaded.value, follower)
 
     async def snapshot_as_of(self, token: AnyDocToken, *args: Any) -> JsonObject | None:
         self.assert_usable()
@@ -1288,30 +1412,6 @@ async def _await_with_context(awaitable: Awaitable[Any], context: Context) -> An
     raise AssertionError("unreachable")
 
 
-def contained(callback: Callable[[], Any], on_error: Callable[[BaseException], None]) -> None:
-    """Run a host callback without failing its caller; a throw or rejection goes to ``on_error``."""
-
-    try:
-        result = callback()
-        if not hasattr(result, "__await__"):
-            return
-        future = asyncio.ensure_future(result)
-
-        def settle(done: asyncio.Future[Any]) -> None:
-            if done.cancelled():
-                return
-            try:
-                error = done.exception()
-            except BaseException as caught:
-                error = caught
-            if error is not None:
-                on_error(error)
-
-        future.add_done_callback(settle)
-    except BaseException as error:
-        on_error(error)
-
-
 def _abort_error(signal: Any) -> BaseException:
     reason = signal.reason
     if isinstance(reason, BaseException):
@@ -1323,7 +1423,6 @@ def _abort_error(signal: Any) -> BaseException:
 
 __all__ = [
     "DocumentCacheSizes",
-    "DocumentState",
     "SessionImpl",
     "contained",
     "create_session",

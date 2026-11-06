@@ -186,7 +186,7 @@ from .harness.types import (
 from .harness.usage import UsageDoc, UsageState
 from .harness.view import ConversationView, ConversationWindow
 from .providers import Model, Models
-from .session.session import DocumentState, SessionImpl, create_session
+from .session.session import SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
 from .types import DocumentReader, PhaseHandler, Session, SessionEnd, Tx
@@ -252,7 +252,6 @@ __all__ = [
     "DocFamilyToken",
     "DocToken",
     "DocumentReader",
-    "DocumentState",
     "Entry",
     "EntryLoader",
     "EnvTarget",

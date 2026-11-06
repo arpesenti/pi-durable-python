@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from session_support import observe_commits
 from storage_support import expect
 
 from pi_durable.context import BACKGROUND_CONTEXT, Context
@@ -1001,7 +1002,7 @@ async def test_storage_failure_fails_the_session_and_publishes_nothing() -> None
     storage, _path = await _create_storage()
     session = create_session(storage)
     publications: list[Any] = []
-    session.subscribe_commits(lambda publication, _context: publications.append(publication))
+    observe_commits(session, lambda publication, _context: publications.append(publication))
 
     async def create(tx: Any) -> Any:
         return await tx.create_conversation({"ownership": {"kind": "ownerless"}})

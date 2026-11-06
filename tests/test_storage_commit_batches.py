@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from session_support import observe_commits
 
 from pi_durable import MemoryStorage
 from pi_durable.context import BACKGROUND_CONTEXT as context
@@ -659,7 +660,7 @@ class _ReportingSession(SessionImpl):
 async def test_a_storage_that_owns_a_publication_scope_gets_it_inside_the_commit() -> None:
     storage = _PublishingStorage()
     session = SessionImpl(storage, lambda: 1_000, lambda: 600_000)
-    session.subscribe_commits(
+    observe_commits(session, 
         lambda publication, _context: storage.events.append(f"publish:{storage.open_batches}")
     )
 
@@ -702,7 +703,7 @@ async def test_a_publication_scope_that_throws_is_reported_and_the_commit_is_sti
         published.append(publication["seq"])
         storage.events.append(f"publish:{storage.open_batches}")
 
-    session.subscribe_commits(on_publication)
+    observe_commits(session, on_publication)
 
     async def create(tx: Any) -> None:
         await tx.create_conversation({"ownership": {"kind": "ownerless"}})

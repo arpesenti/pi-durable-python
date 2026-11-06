@@ -5,7 +5,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from session_support import ControlledStorage, context, flush
+from session_support import (
+    ControlledStorage,
+    context,
+    flush,
+    observe_commits_as_host,
+)
 from task_support import aborted, deferred, eventually, open_tasks
 
 from pi_durable import LiveDoc, MemoryStorage
@@ -407,7 +412,7 @@ async def test_fails_it_for_a_throw_in_its_own_commit_listeners() -> None:
     storage = ControlledStorage()
     opened = await started(storage)
     bug = RuntimeError("listener bug")
-    opened["harness"].observe_commits(lambda publication, _context: _raise(bug))
+    opened["harness"].observe_stored_commits(lambda publication, _context: _raise(bug))
     # The commit itself is durable and resolves; the Session fails behind it.
     assert await opened["root"].commit(
         lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
@@ -530,7 +535,7 @@ async def test_reports_a_listener_or_on_report_whose_promise_rejects_without_an_
         raise RuntimeError("async listener")
 
     opened = await started(MemoryStorage())
-    opened["harness"].subscribe_commits(async_throw)
+    observe_commits_as_host(opened["harness"], async_throw)
     opened["harness"].subscribe_close(async_throw)
     await opened["root"].commit(
         lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
@@ -548,7 +553,7 @@ async def test_reports_a_listener_or_on_report_whose_promise_rejects_without_an_
         {"models": {}, "registry": registry, "on_report": async_throw},
         context,
     )
-    rejecting.subscribe_commits(lambda publication, _context: _raise(RuntimeError("sync listener")))
+    observe_commits_as_host(rejecting, lambda publication, _context: _raise(RuntimeError("sync listener")))
     again = await rejecting.root(context)
     await again.commit(lambda tx: tx.append_entry(again.id, {"kind": "note"}), context)
     await rejecting.close(context)
@@ -565,8 +570,8 @@ async def test_reports_a_throwing_commit_or_close_listener_and_runs_the_others()
     def close_listener() -> None:
         raise RuntimeError("close listener")
 
-    opened["harness"].subscribe_commits(commit_listener)
-    opened["harness"].subscribe_commits(lambda publication, _context: seen.append("commit"))
+    observe_commits_as_host(opened["harness"], commit_listener)
+    observe_commits_as_host(opened["harness"], lambda publication, _context: seen.append("commit"))
     opened["harness"].subscribe_close(close_listener)
     opened["harness"].subscribe_close(lambda: seen.append("close"))
     assert await opened["root"].commit(

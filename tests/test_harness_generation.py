@@ -23,7 +23,7 @@ from chat_support import (
     usage,
 )
 from harness_support import add_section
-from session_support import ControlledStorage, context, document_changes
+from session_support import ControlledStorage, context, document_changes, observe_commits
 from task_support import eventually
 
 from pi_durable import (
@@ -74,7 +74,7 @@ def live_publications(harness: Any) -> list[dict[str, Any]]:
             if change["record"]["kind"] == "pi.live" and change["value"] is not None:
                 values.append(change["value"])
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     return values
 
 

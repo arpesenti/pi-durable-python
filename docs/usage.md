@@ -96,8 +96,8 @@ asyncio.run(main())
 ```
 
 Writes go through `tx.doc(...)`; reads go through `session.snapshot()` (a copy),
-`session.document_state()` (a disposable state that delivers later commits), or
-`session.watch_doc()` (every committed frame, exact and ordered). A retirement
+`session.observe_doc()` (a synchronous mirror of each publication, attached on the line), or
+`session.watch_doc()` (every committed frame, coalesced behind one listener). A retirement
 (`tx.retire_doc()`) ends an incarnation; the next write starts a fresh one from `initial`.
 
 <!-- example -->
@@ -115,23 +115,38 @@ CounterDoc = define_doc(
 )
 
 
+class CounterObserver:
+    """Mirrors the counter as storage commits it."""
+
+    def __init__(self) -> None:
+        self.seen: list[int] = []
+
+    def advance(self, call: dict, _context: object) -> None:
+        if call["kind"] == "value" and not call["retired"]:
+            self.seen.append(call["value"]["count"])
+
+    def end(self, _end: dict) -> None:
+        return None
+
+
 async def main() -> None:
     session = create_session(MemoryStorage())
     await session.commit(lambda tx: tx.doc(CounterDoc), BACKGROUND_CONTEXT)
 
-    state = await session.document_state(CounterDoc, BACKGROUND_CONTEXT)
-    assert state is not None
-    seen: list[int] = []
-    # The listener runs with the acquisition value first, then once per committed change.
-    state.subscribe(lambda value, context, delivery: seen.append(value["count"]))
+    observer = CounterObserver()
+    observation = await session.observe_doc(CounterDoc, observer, BACKGROUND_CONTEXT)
+    assert observation is not None
+    # Attached on the line: the value of the observation is the current revision, and every later
+    # change reaches the observer in line order, before the commit that made it resumes.
+    print(observation.value["count"])  # 0
 
     async def count_to_five(tx):
         (await tx.doc(CounterDoc)).count = 5
 
     await session.commit(count_to_five, BACKGROUND_CONTEXT)
-    print(seen)  # [0, 5]
+    print(observer.seen)  # [5]
 
-    state.dispose()
+    observation.detach()
     await session.close(BACKGROUND_CONTEXT)
 
 
@@ -367,7 +382,8 @@ wait for does. A task no definition can take is not active either: only a regist
 `harness.root()` creates or returns the root conversation; `create_conversation({"ownership": ...})`
 starts another; `fork()` copies a conversation at an entry. Each returns a stateless handle bound to
 the Harness: `submit`, `commit`, `entries`, `context`, `agent`, `configure`, `fork`, `compact`,
-`reset`, `abort`, `wait_for_idle`, and `watch`.
+`reset`, `abort`, `wait_for_idle`, and `watch`; the view is also mirrored synchronously by
+`harness.observe_conversation(id, observer, context)`.
 
 <!-- example -->
 ```python
@@ -375,6 +391,16 @@ import asyncio
 
 from pi_durable import Harness, MemoryStorage, UserEntry, create_registry
 from pi_durable.context import BACKGROUND_CONTEXT
+
+
+class GraphObserver:
+    """Takes the task graph as storage commits it; the example only reads what it was handed."""
+
+    def advance(self, _call: dict, _context: object) -> None:
+        return None
+
+    def end(self, _end: dict) -> None:
+        return None
 
 
 async def main() -> None:
@@ -398,9 +424,10 @@ async def main() -> None:
         fork_view = await fork.context(BACKGROUND_CONTEXT)
         print([message["role"] for message in fork_view["messages"]])  # ['user']
 
-        graph = await harness.task_graph(BACKGROUND_CONTEXT)
+        graph = await harness.observe_task_graph(GraphObserver(), BACKGROUND_CONTEXT)
+        assert graph is not None
         print(sorted(graph.value))  # ['tasks']
-        graph.dispose()
+        graph.detach()
     finally:
         await harness.close(BACKGROUND_CONTEXT)
 
@@ -476,12 +503,14 @@ Only a blocking compaction makes the run wait; a background one runs beside it. 
 
 ### Observation
 
-- `conversation.watch(context, window)` exposes the conversation view: one consumer's `window` over
-  the transcript — the newest 50 entries by default, then appends, dropping the oldest past 100 —
-  plus the built-in documents, advanced only by committed publications. `ConversationTranscript`
-  pages a client past that window.
-- `harness.task_graph()` and `harness.watch_task_graph()` expose every live task, its waits, and
-  the conversations it owns.
+- `conversation.watch(context, window)` and
+  `harness.observe_conversation(id, observer, context, window)` expose the conversation view: one
+  consumer's `window` over the transcript — the newest 50 entries by default, then appends, dropping
+  the oldest past 100 — plus the built-in documents, advanced only by committed publications. The
+  observer mirrors each publication synchronously on the line; the watch folds its changes behind
+  one listener. `ConversationTranscript` pages a client past that window.
+- `harness.observe_task_graph(observer, context)` and `harness.watch_task_graph()` expose every
+  live task, its waits, and the conversations it owns.
 - `watch_events(harness, conversation_id, context)` returns the experimental `AgentEventStream`
   that translates committed publications into coding-agent-shaped events.
 

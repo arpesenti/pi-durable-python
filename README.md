@@ -96,9 +96,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Snapshots, document states, and watches are disposable reads: `snapshot()` copies the committed
-value, `document_state()` subscribes to later commits, and `watch_doc()` delivers every committed
-frame. `MemoryStorage` is the reference backend; SQLite and JSONL live in
+Snapshots, watches, and observers are the three reads of committed state: `snapshot()` copies the
+value once, `watch_doc()` folds every committed frame into a coalesced listener, and
+`observe_doc()` mirrors each publication synchronously on the line, the way an adapter that has to
+stay in step with storage needs. `MemoryStorage` is the reference backend; SQLite and JSONL live in
 `pi_durable.storage.sqlite` and `pi_durable.storage.jsonl`.
 
 ### A conversation
@@ -113,6 +114,20 @@ import asyncio
 
 from pi_durable import Harness, MemoryStorage, UserEntry, create_registry
 from pi_durable.context import BACKGROUND_CONTEXT
+
+
+class ViewObserver:
+    """Keeps the newest committed view, the way an adapter that renders it would."""
+
+    def __init__(self) -> None:
+        self.value: dict = {}
+
+    def advance(self, call: dict, _context: object) -> None:
+        if call["kind"] == "value" and not call["retired"]:
+            self.value = call["value"]
+
+    def end(self, _end: dict) -> None:
+        return None
 
 
 async def main() -> None:
@@ -135,8 +150,19 @@ async def main() -> None:
         view = await conversation.context(BACKGROUND_CONTEXT)
         print([message["role"] for message in view["messages"]])  # ['user']
 
-        watch = await conversation.watch(BACKGROUND_CONTEXT)
-        print([entry["kind"] for entry in watch.value["entries"]])  # ['pi.user']
+        observer = ViewObserver()
+        observation = await harness.observe_conversation(
+            conversation.id, observer, BACKGROUND_CONTEXT
+        )
+        assert observation is not None
+        print([entry["kind"] for entry in observation.value["entries"]])  # ['pi.user']
+        # The observer is attached on the line: the value it was handed is the current one, and
+        # every later publication reaches it before its caller resumes.
+        observation.detach()
+
+        # The same view, folded behind one listener, with a window of its own.
+        watch = await conversation.watch(BACKGROUND_CONTEXT, {"min": 5, "max": 10})
+        assert watch.value["entries"] == observation.value["entries"]
         await watch.stop()
     finally:
         await harness.close(BACKGROUND_CONTEXT)

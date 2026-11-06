@@ -17,7 +17,7 @@ from typing import Any, cast
 
 import pytest
 from chat_support import all_entries, assistant_message, chat_setup, open_chat
-from session_support import context, flush
+from session_support import Mirror, context, flush, observe_commits
 from task_support import deferred, eventually, with_signal
 
 from pi_durable import (
@@ -58,7 +58,6 @@ async def fresh(conversation: Any, window: Any = None) -> Any:
     value = watch.value
     await watch.stop()
     return value
-
 
 async def committed(harness: Any, conversation: Any, record_value: Any, size: int) -> Any:
     """The view as committed state defines it, read without any mount: the newest ``size`` entries,
@@ -118,7 +117,7 @@ def touches(harness: Any, conversation: Any) -> dict[str, int]:
         if touched:
             counter["count"] += 1
 
-    harness.subscribe_commits(listener)
+    observe_commits(harness, listener)
     return counter
 
 
@@ -259,6 +258,38 @@ async def test_keeps_head_markers_in_place_a_summary_and_a_reset_are_appended_en
     await harness.close(context)
 
 
+async def test_gives_a_rebuilt_mount_the_entries_its_predecessor_never_held() -> None:
+    """The observing half of #45's window (spec §9.3).
+
+    A mount is dropped when its last consumer detaches, so an observer attached afterwards is built
+    from what Storage holds rather than from what the previous mount happened to keep. The window is
+    the transcript in ID order, with a head marker where it was written — the summary points back at
+    an entry the dropped mount never carried.
+    """
+
+    opened = await open_chat(MemoryStorage(), chat_setup())
+    harness, root = opened["harness"], opened["root"]
+    old = await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "old"}), context)
+    await root.reset(None, context)
+    recorded = await record(root)
+    frames = recorded["frames"]
+    await root.commit(
+        lambda tx: tx.append_entry(root.id, {"kind": "summary", "head": old["id"]}), context
+    )
+    await drained()
+    assert kinds(frames[0]["value"]) == ["old", "pi.reset", "summary"]
+    await recorded["stop"]()
+    # Nothing consumes the mount now; a fresh read and a fresh observer both take it from Storage.
+    assert kinds(await fresh(root)) == ["old", "pi.reset", "summary"]
+    mirror = Mirror()
+    observation = await harness.observe_conversation(root.id, mirror, context)
+    assert observation is not None
+    assert kinds(observation.value) == ["old", "pi.reset", "summary"]
+    assert observation.value["entries"][-1]["head"] == old["id"]
+    observation.detach()
+    await harness.close(context)
+
+
 async def test_shows_a_forks_inherited_entries_in_id_order_its_head_markers_in_place() -> None:
     opened = await open_chat(MemoryStorage(), chat_setup())
     harness, root = opened["harness"], opened["root"]
@@ -340,11 +371,15 @@ async def test_folds_undelivered_commits_into_one_call_whose_ops_reach_the_newes
     await harness.close(context)
 
 
-async def test_keeps_watches_of_one_conversation_independent_and_remounts_after_the_last_one_detaches(
-) -> None:
+async def test_keeps_observers_and_watches_independent_and_remounts_after_the_last_detaches() -> None:
     opened = await open_chat(MemoryStorage(), chat_setup())
     harness, root = opened["harness"], opened["root"]
+    state = Mirror()
+    state_observation = await harness.observe_conversation(root.id, state, context)
+    state.value = state_observation.value
     kept = await record(root)
+    recorded = await record(root)
+    frames = recorded["frames"]
     recorded = await record(root)
     frames = recorded["frames"]
     await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "one"}), context)
@@ -354,10 +389,13 @@ async def test_keeps_watches_of_one_conversation_independent_and_remounts_after_
     assert len(frames) == 1
     await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "two"}), context)
     await drained()
-    last = kept["frames"][-1]["value"]
-    assert kinds(last) == ["one", "two"]
+    last_watch = kept["frames"][-1]["value"]
+    assert kinds(last_watch) == ["one", "two"]
+    assert kinds(state.value) == ["one", "two"]
+    last = state.value
     await kept["stop"]()
-    # No observer is left, so the mount was dropped: a new observer builds a new revision.
+    state_observation.detach()
+    # No consumer is left, so the mount was dropped: a new one builds a new revision.
     rebuilt = await fresh(root)
     assert rebuilt == last
     assert rebuilt is not last
@@ -373,7 +411,8 @@ async def test_ends_watches_at_close_and_rejects_later_acquisition() -> None:
     assert watch.value["entries"] == []
     with pytest.raises(Exception, match="closed"):
         await root.watch(context)
-
+    with pytest.raises(Exception, match="closed"):
+        await harness.observe_conversation(root.id, Mirror(), context)
 
 async def test_rejects_an_acquisition_cancelled_or_closed_while_it_waits_for_the_session_line() -> None:
     opened = await open_chat(MemoryStorage(), chat_setup())
@@ -420,6 +459,13 @@ async def test_shares_one_mount_between_concurrent_observers_and_isolates_a_fail
     assert failing.value == shared.value
     assert failing.value["docs"] is shared.value["docs"]
     await shared.stop()
+    mirror = Mirror()
+    observation = await harness.observe_conversation(root.id, mirror, context)
+    # An observer of the same mount is handed the same revision, over the same documents.
+    assert observation is not None
+    assert observation.value == failing.value
+    assert observation.value["docs"] is failing.value["docs"]
+    observation.detach()
 
     async def listener(_call: Any, _context: Any) -> None:
         raise RuntimeError("listener failed")

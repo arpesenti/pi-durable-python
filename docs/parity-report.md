@@ -63,6 +63,7 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-sleep` | `test_harness_sleep.py` |
 | `harness-scheduler-retention` | `test_harness_scheduler_retention.py` |
 | `harness-storage-failure` | `test_harness_storage_failure.py` |
+| `harness-observers` | `test_harness_observers.py` |
 | `harness-structured-output` | `test_harness_structured_output.py` |
 | `harness-structured` | `test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_structured_cycles.py` |
 | `harness-submissions` | `test_harness_submissions.py`, `test_harness_inbox.py` |
@@ -80,7 +81,8 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `session-document-retention` | `test_session_document_retention.py` |
 | `session-documents` | `test_session_documents.py` |
 | `session-forks` | `test_session_forks.py` |
-| `session-states` | `test_session_states.py` |
+| `session-observers` | `test_session_observers.py` |
+| `session-states` | `test_session_observers.py`, `test_session_document_retention.py`, `test_session_checkpoints_migrations.py` (upstream 1.5.0 deletes the state getters this suite tested; where each of its guarantees is proved now is itemised in "Cases completed in this audit") |
 | `session-tables` | `test_session_tables.py` |
 | `session-watches` | `test_session_watches.py` |
 | `spec-usage` | `test_spec_usage.py` (compile-checked examples, as upstream) |
@@ -286,3 +288,57 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `task_parked` report #34 deleted has no replacement yet.
   `test_harness_blocked.py::test_interim_parked_task_reports_nothing_until_49` is the port-side
   interim case that stands in for the upstream one until #49 replaces it.
+- **The state getters' suite, translated rather than dropped.** Upstream 1.5.0 deletes
+  `documentState()`, `ConversationHandle.viewState()`, the task-graph state getter, and
+  `subscribeCommits()`, so `test_session_states.py` went with them. Each guarantee it carried is
+  proved again on the seams that replaced them:
+  - an absent address attaches nothing → `test_session_observers.py::test_returns_none_for_an_absent_address_and_attaches_nothing`;
+  - the value at attachment, one call per stored publication with its own operations, and the line's
+    atomicity → `test_starts_at_the_committed_value_and_advances_at_each_stored_publication_with_its_ops`
+    and `test_attaches_atomically_on_the_line_a_commit_queued_before_it_is_in_its_value`;
+  - independent attachments, and nothing after a detach → `test_gets_nothing_after_detach_which_is_idempotent_and_unpins_the_document`
+    and `test_gets_nothing_of_the_commit_when_another_observer_detached_it_first`;
+  - the delivered value is the object the publication and the snapshot carry, unfrozen and uncopied →
+    `test_hands_the_very_committed_value_the_publication_and_the_snapshot_carry`;
+  - a fork copy hydrated cold for an observer → `test_hydrates_a_definition_free_fork_copy_for_an_observer`;
+  - a migration shown whole, and a document cached by an older token →
+    `test_session_checkpoints_migrations.py::test_sends_observers_of_an_older_shape_a_root_replacement`
+    and `test_session_document_retention.py::test_keeps_a_reloaded_newer_version_cached_while_an_older_observer_is_attached`;
+  - continuing after the cache is emptied → `test_continues_from_the_value_it_holds_once_the_cache_is_emptied`;
+  - the close's seal, and a commit that settles behind it →
+    `test_takes_nothing_from_a_commit_that_settles_after_the_close_sealed_it`;
+  - a retired incarnation held by nothing →
+    `test_session_document_retention.py::test_keeps_no_value_of_a_document_retired_for_good_while_an_observer_is_attached`.
+  Two of its cases need no proving any more: the `Delivery(kind, sequence)` counter was a property of
+  the deleted state subscription — an observer is handed a `WatchCall`, which carries no sequence —
+  and the retirement's `null` value was superseded by #43, which made a retirement a value call with
+  the last value and `retired` set, so the observer half is `test_follows_a_conversation_documents_address_through_a_retirement_into_its_recreation`
+  and the watch half lives in `test_session_watches.py`.
+- **The task document's watch, ended by its owner, is #54's.** Seven upstream `harness-observers`
+  cases wait on it and are named, with their reasons, in `EXCLUDED_WATCH_CASES` in
+  `tests/test_harness_observers.py`: `:290`, `:331`, `:352`, `:373`, `:386`, `:417`, and `:441`. All
+  seven need a task document's *watch* to be retired and ended by the commit that ends its owning task
+  — unbuilt Session behaviour under Chord's `endAfterDelivery`, held by no `PARITY.md` row and no
+  ticket while #44 ran. The one case of that family that observes rather than watches,
+  `:308` — "an observer gets the retirement, then its end, at the publication of the commit that ends
+  the task" — is implemented for real here, so `ended` is reachable for an observed owner that ended.
+  `:441` is held with them because it is gated on the same `watch.closed == {kind: ended}`; the half
+  of it that is about the delivered change is held by the watch suite's snapshot case and, for an
+  observer, by `test_hands_the_very_committed_value_the_publication_and_the_snapshot_carry`.
+- **Two cases here have no upstream counterpart and are named for what they prove.**
+  `test_harness_observers.py::test_catches_an_entry_dropped_by_the_first_page` is the observing face
+  of #45's window drop: upstream proves a drop only from a watch, and the bounded window is #45's
+  surface, so the observer is proved to take the same drop — the entry its window opened on leaves its
+  value by one splice, and the same change moves the `before` marker — and to be handed exactly the
+  calls the watch of the same mount is handed. Its sibling in `test_harness_view.py`,
+  `test_gives_a_rebuilt_mount_the_entries_its_predecessor_never_held`, replaced this ticket's earlier
+  case for the flat active-range mount, which #45's window superseded: it now proves on the observer
+  seam that a mount dropped with its last consumer is rebuilt from Storage, head marker and all.
+- **A retired value's garbage collection is measured through the cache.** Upstream's "keeps no value
+  of a document retired for good, while still attached" keeps only a `WeakRef` of the value and
+  expects the collector to take it. CPython cannot take a weak reference to the plain `dict` a
+  document value is, so the same guarantee is measured where the Session itself holds the value:
+  `document_cache_sizes` empty in
+  `test_session_document_retention.py::test_keeps_no_value_of_a_document_retired_for_good_while_an_observer_is_attached`.
+  Where an object *can* be weakly held — the host's own observer — the upstream collection case is
+  translated directly: `test_keeps_no_detached_observer_alive`.

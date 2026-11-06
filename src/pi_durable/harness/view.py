@@ -22,7 +22,11 @@ from ..context import Context, without_abort_signal
 from ..delta import Op, apply_immutable
 from ..ids import ConversationId, DocumentId, EntryId
 from ..json import JsonObject
-from ..session.observation import CommittedWatch
+from ..session.observation import (
+    AttachedObservation,
+    CommittedWatch,
+    GuardedObserver,
+)
 from ..session.session import SessionImpl, contained
 from ..types import (
     CommitPublication,
@@ -30,6 +34,7 @@ from ..types import (
     Cursor,
     EntryQuery,
     EntryRecord,
+    Observer,
     Storage,
     watch_value_call,
 )
@@ -150,11 +155,40 @@ class ConversationViews:
         self._storage = storage
         self._mounts: dict[ConversationId, Mount] = {}
         self._closed = False
-        session.observe_commits(self._on_publication)
+        session.observe_stored_commits(self._on_publication)
         session.subscribe_close(self._on_close)
 
     def report(self, error: BaseException) -> None:
         self._session.report(error)
+
+    async def observe(
+        self,
+        id: ConversationId,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> AttachedObservation:
+        """A synchronous observer of the view, with a window of its own, attached atomically on the
+        Session line.
+
+        The observer mirrors what a watch of the same mount is handed, unfolded and at the
+        publication; aborting ``context`` while the attachment waits on the line attaches nothing
+        (spec §9.3).
+        """
+
+        attached: list[ConversationView] = []
+
+        def create(
+            current: ConversationView,
+            release: Callable[[], None],
+            _storage: Storage,
+            views: ConversationViews,
+        ) -> GuardedObserver:
+            attached.append(current)
+            return GuardedObserver(observer, release, views.report)
+
+        guarded = await self.attach(id, window, create, context)
+        return AttachedObservation(attached[0], guarded)
 
     async def watch(
         self, id: ConversationId, context: Context, window: ConversationWindow | None = None
@@ -327,7 +361,6 @@ async def _scan_up_to(
         if cursor is None:
             break
     return entries
-
 
 def _watch_observer(
     value: ConversationView,

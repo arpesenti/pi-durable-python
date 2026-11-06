@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from session_support import context, flush
+from session_support import attached_graph, context, flush
 from task_support import aborted, aborted_with, completed, eventually, open_tasks
 
 from pi_durable import MemoryStorage, define_extension, define_task
@@ -128,7 +128,7 @@ async def test_sleeps_without_an_invocation_and_resumes_at_its_checkpoint_once_d
         MemoryStorage(), [Nap], {"now": lambda: clock[0], "on_wake": wakes.append}
     )
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     id = await _start_nap(harness, Nap)
     harness.resume()
     await eventually(_sleeping(harness, id))

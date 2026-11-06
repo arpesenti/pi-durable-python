@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from chat_support import chat_setup, open_chat
-from session_support import context
+from session_support import context, observe_commits
 from tool_support import DONE, add_hooks, add_tool, all_entries, calls, codes
 from tool_support import tool as make_tool
 
@@ -126,13 +126,19 @@ async def test_stores_exactly_what_callers_get_without_the_models_output_and_kee
 
     def capture(publication: Any, _listener_context: Any) -> None:
         for change in publication["changes"]:
-            if change["type"] != "document" or change["record"]["kind"] != "pi.tool.nested-call":
+            # A retirement of the nested-call document is a document change too, and it has no
+            # value: only a change that carries one can hold a result.
+            if (
+                change["type"] != "document"
+                or change["kind"] != "change"
+                or change["record"]["kind"] != "pi.tool.nested-call"
+            ):
                 continue
             value = cast(dict[str, Any] | None, change["value"])
             if value is not None and "result" in value and change["ops"]:
                 stored.append(value["result"])
 
-    harness.subscribe_commits(capture)
+    observe_commits(harness, capture)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
     await harness.wait_for_idle(context)

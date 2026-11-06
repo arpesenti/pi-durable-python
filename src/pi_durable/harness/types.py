@@ -52,6 +52,7 @@ from ..types import (
     InputUnansweredRecord,
     MessageRecord,
     NextTaskState,
+    Observer,
     Page,
     SubmissionRecord,
     TaskOutcome,
@@ -887,6 +888,12 @@ class Conversation(Protocol):
 
     async def watch(self, context: Context, window: ConversationWindow | None = None) -> Any: ...
 
+    async def observe(
+        self,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> Any: ...
 
 ConversationWatch: TypeAlias = WatchHandle[Any]
 """A serialized coalesced watch of one conversation's view."""

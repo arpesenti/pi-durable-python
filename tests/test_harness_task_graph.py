@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from session_support import ControlledStorage, context, flush
+from session_support import ControlledStorage, Mirror, attached_graph, context, flush, graph_of
 from task_support import (
     aborted,
     aborted_with,
@@ -123,14 +123,18 @@ async def test_follows_every_live_task_through_statuses_owner_edges_and_owned_co
     root = await harness.root(context)
     seen: list[TaskGraph] = []
 
-    async def observe() -> Any:
-        opened_graph = await harness.task_graph(context)
-        opened_graph.subscribe(
-            lambda value, _context, delivery: seen.append(value)
-            if delivery.kind == "update"
-            else None
-        )
-        return opened_graph
+    class Revisions(Mirror):
+        """A mirror that also keeps every revision the mount published while it was attached."""
+
+        def advance(self, call: Any, _context: Any = None) -> None:
+            super().advance(call, _context)
+            if call["kind"] == "value" and not call["retired"]:
+                seen.append(call["value"])
+
+    async def observe() -> Mirror:
+        graph = Revisions()
+        graph.bind(await harness.observe_task_graph(graph, context))
+        return graph
 
     graph = await observe()
     assert graph.value == {"tasks": {}}
@@ -285,8 +289,8 @@ async def test_builds_from_committed_tasks_shows_surviving_tasks_as_pending_and_
         await eventually(
             lambda: _all_running(first["harness"])
         )
-        running = await first["harness"].task_graph(context)
-        assert statuses(running.value) == {
+        running = await graph_of(first["harness"], context)
+        assert statuses(running) == {
             f"test.graph-work#{foreground}": "running",
             f"test.graph-work#{background}": "running",
         }
@@ -386,7 +390,7 @@ async def test_lists_owned_conversations_in_id_order_whatever_order_one_commit_c
     opened = await open_tasks(MemoryStorage(), [Spawner])
     harness = opened["harness"]
     root = await harness.root(context)
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
 
     async def create(tx: Any) -> TaskId:
         entry = await tx.append_entry(root.id, {"kind": "note"})
@@ -404,7 +408,7 @@ async def test_lists_owned_conversations_in_id_order_whatever_order_one_commit_c
     advanced = graph.value
     assert advanced["tasks"][str(id)]["conversations"] == sorted(created)
     graph.dispose()
-    rebuilt = await harness.task_graph(context)
+    rebuilt = await attached_graph(harness, context)
     assert rebuilt.value == advanced
     rebuilt.dispose()
     gate.resolve()
@@ -441,10 +445,10 @@ async def test_registers_nothing_for_an_acquisition_cancelled_while_it_waits_for
     with pytest.raises(RuntimeError, match="cancelled"):
         await cancelled
     # No observer kept the mount: each new observer builds a new revision.
-    first = await harness.task_graph(context)
+    first = await attached_graph(harness, context)
     value = first.value
     first.dispose()
-    second = await harness.task_graph(context)
+    second = await attached_graph(harness, context)
     assert second.value is not value
     assert second.value == value
     second.dispose()
@@ -480,16 +484,22 @@ async def test_publishes_no_revision_for_a_commit_that_changes_no_node_and_share
         lambda tx: tx.create_task(Memo, None, {"ownership": {"kind": "conversation"}}),
         context,
     )
-    first = await harness.task_graph(context)
-    second = await harness.task_graph(context)
-    assert second.value is first.value
     updates: list[str] = []
 
-    def listener(value: Any, _context: Any, delivery: Any) -> None:
-        if delivery.kind == "update":
-            updates.append(value["tasks"].get(str(id), {}).get("state", {}).get("status", "gone"))
+    class Recorded(Mirror):
+        """A graph mirror naming the watched task's status in every revision it is handed."""
 
-    first.subscribe(listener)
+        def advance(self, call: Any, _context: Any = None) -> None:
+            super().advance(call, _context)
+            if call["kind"] == "value":
+                updates.append(
+                    call["value"]["tasks"].get(str(id), {}).get("state", {}).get("status", "gone")
+                )
+
+    first = Recorded()
+    first.bind(await harness.observe_task_graph(first, context))
+    second = await attached_graph(harness, context)
+    assert second.value is first.value
     harness.resume()
     await reached.promise
     await flush()
@@ -503,7 +513,7 @@ async def test_publishes_no_revision_for_a_commit_that_changes_no_node_and_share
     first.dispose()
     second.dispose()
     # No observer is left, so the mount was dropped: a new observer builds a new revision.
-    rebuilt = await harness.task_graph(context)
+    rebuilt = await attached_graph(harness, context)
     assert rebuilt.value == last
     assert rebuilt.value is not last
     rebuilt.dispose()
@@ -549,7 +559,7 @@ async def test_publishes_a_sleeping_state_and_a_derived_blocked_reason() -> None
 
     sleeping, missing = await root.commit(create, context)
     harness.resume()
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     await eventually(
         lambda: graph.value["tasks"].get(str(sleeping), {}).get("state", {}).get("status")
         == "sleeping"

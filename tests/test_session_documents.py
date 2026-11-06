@@ -11,6 +11,7 @@ from session_support import (
     create_conversation,
     document_changes,
     flush,
+    observe_commits,
     open_test_session,
 )
 
@@ -839,7 +840,7 @@ async def test_delivers_complete_publications_synchronously_after_adoption() -> 
     _storage, session, publications, conversation_id = await setup_live()
     published = len(publications)
     delivered: list[Any] = []
-    unsubscribe = session.subscribe_commits(
+    unsubscribe = observe_commits(session, 
         lambda _publication, listener_context: delivered.append(listener_context)
     )
 

@@ -85,6 +85,25 @@ The `pi.compaction` entry a compaction places: the wrapped summary text as a use
 `head` naming the cut and `data.reason` naming what started the compaction.
 _Avoid_: checkpoint, digest
 
+**Observer**:
+One host's synchronous mirror of committed state — a document, a conversation view, the task graph,
+or every stored commit — attached atomically on the Session's mutation line and handed the very
+`WatchCall` a watch of the same address receives, each change unfolded and in line order rather than
+folded into a coalesced delivery. `advance(call, context)` runs as part of the commit that made the
+change, so a host that awaits its own commit finds the observer already advanced; `end(end)` says why
+it stopped. A state observer ends `ended` only when the owner it observes ended — the task of a task
+document, after that document's retirement — and `failed` when its Session closed, carrying the error
+that failed it or a session-closed error. A commit observer mirrors `CommitPublication`s instead:
+exactly what Storage made durable, and nothing an earlier advance detached away. `detach()` is
+idempotent and nothing reaches the observer after it.
+_Avoid_: watch (that is the coalesced, stoppable face of the same value), subscription, polling loop
+
+**Observation**:
+What an attachment hands back: the value as it stood at the moment the observer was admitted on the
+line, and the idempotent `detach()` that ends the host's interest in it. A detached observation leaves
+no pin behind, and an observation of an address whose owner ended is handed `None` next time.
+_Avoid_: handle, snapshot, cursor
+
 **Watch**:
 One serialized observation of a committed value, held by a `WatchHandle`: `value`, `start`, `stop`,
 and `closed`. Its one listener takes a `WatchCall` — `value`, `ops`, `retired` — shared by document,

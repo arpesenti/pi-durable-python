@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any, cast
 
-from session_support import context
+from session_support import context, observe_commits
 from task_support import aborted, deferred, eventually
 from tool_support import (
     DONE,
@@ -309,13 +309,19 @@ async def test_aborts_the_nested_calls_a_caller_left_running_when_it_returns() -
 
     def capture(publication: Any, _listener_context: Any) -> None:
         for change in publication["changes"]:
-            if change["type"] != "document" or change["record"]["kind"] != "pi.tool.nested-call":
+            # A retirement of the nested-call document is a document change too, and it has no
+            # value: only a change that carries one can hold a result.
+            if (
+                change["type"] != "document"
+                or change["kind"] != "change"
+                or change["record"]["kind"] != "pi.tool.nested-call"
+            ):
                 continue
             value = cast(dict[str, Any] | None, change["value"])
             if value is not None and "result" in value:
                 stored.append(value["result"])
 
-    harness.subscribe_commits(capture)
+    observe_commits(harness, capture)
     harness.resume()
     settled = await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
     assert settled["status"] == "done"
@@ -537,13 +543,19 @@ async def test_loses_the_running_output_of_a_nested_call_without_progress_when_i
 
     def capture(publication: Any, _listener_context: Any) -> None:
         for change in publication["changes"]:
-            if change["type"] != "document" or change["record"]["kind"] != "pi.tool.nested-call":
+            # A retirement of the nested-call document is a document change too, and it has no
+            # value: only a change that carries one can hold a result.
+            if (
+                change["type"] != "document"
+                or change["kind"] != "change"
+                or change["record"]["kind"] != "pi.tool.nested-call"
+            ):
                 continue
             value = cast(dict[str, Any] | None, change["value"])
             if value is not None and "result" in value:
                 stored.append(value["result"])
 
-    harness.subscribe_commits(capture)
+    observe_commits(harness, capture)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
     await harness.wait_for_idle(context)

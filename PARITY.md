@@ -56,8 +56,8 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `defineDoc` | value | `define_doc` | test_session_definitions.py, test_session_documents.py, test_session_states.py, test_session_tables.py | tested |
-| `defineDocFamily` | value | `define_doc_family` | test_session_definitions.py, test_session_documents.py, test_session_states.py, test_session_tables.py | tested |
+| `defineDoc` | value | `define_doc` | test_session_definitions.py, test_session_documents.py, test_session_observers.py, test_session_tables.py | tested |
+| `defineDocFamily` | value | `define_doc_family` | test_session_definitions.py, test_session_documents.py, test_session_observers.py, test_session_tables.py | tested |
 
 ### `./entries.ts` → `pi_durable.entries`
 
@@ -319,7 +319,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `createSession` | value | `create_session` | test_session_tables.py, test_session_states.py | tested |
+| `createSession` | value | `create_session` | test_session_tables.py, test_session_observers.py | tested |
 | `contained` | value | `contained` | test_harness_storage_failure.py | tested |
 
 ### `./storage/memory.ts` → `pi_durable.storage.memory`
@@ -341,8 +341,8 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `ROOT_CONVERSATION_ID` | value | `ROOT_CONVERSATION_ID` | test_ids.py | tested |
 | `CheckpointInfo` | type | `CheckpointInfo` | test_types.py | tested |
 | `CommitChange` | type | `CommitChange` | test_types.py | tested |
-| `CommitObservation` | type | `CommitObservation` | — | planned (1.5.0: the idempotent `detach()` of an attached commit observer; #44) |
-| `CommitObserver` | type | `CommitObserver` | — | planned (1.5.0: `advance(publication, context)` / `end(end)` replaces the `subscribe_commits()` listener; #44) |
+| `CommitObservation` | type | `CommitObservation` | test_session_observers.py | tested (the idempotent `detach()` of an attached commit observer, and the close that ends it `failed` after its last publication; #44) |
+| `CommitObserver` | type | `CommitObserver` | test_session_observers.py, test_harness_storage_failure.py, test_harness_reports.py | tested (`advance(publication, context)` / `end(end)` replaces the `subscribe_commits()` listener: exactly what Storage made durable, handed on the line after the Session's own followers, a throw reported and the observer detached; #44) |
 | `CommitOptions` | type | `CommitOptions` | — | planned (1.5.0: the `persistence` mark one commit takes; #47) |
 | `CommitPersistence` | type | `CommitPersistence` | — | planned (1.5.0: `{kind: "immediate"}` or `{kind: "deferred", within_ms?}`; #47) |
 | `CommitPublication` | type | `CommitPublication` | test_types.py | tested (1.5.0 keeps the shape and narrows when it is published; #42) |
@@ -356,10 +356,10 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `ConversationQuery` | type | `ConversationQuery` | test_types.py, test_storage_protocol.py | tested |
 | `ConversationRecord` | type | `ConversationRecord` | test_types.py, test_storage_protocol.py | tested |
 | `Cursor` | type | `Cursor` | test_types.py, test_storage_protocol.py | tested |
-| `DocDefinition` | type | `DocDefinition` | test_session_definitions.py, test_session_states.py | tested |
+| `DocDefinition` | type | `DocDefinition` | test_session_definitions.py, test_session_observers.py | tested |
 | `DocFamilyDefinition` | type | `DocFamilyDefinition` | test_session_definitions.py | tested |
-| `DocFamilyToken` | type | `DocFamilyToken` | test_session_definitions.py, test_session_states.py | tested |
-| `DocToken` | type | `DocToken` | test_session_definitions.py, test_session_documents.py, test_session_states.py | tested |
+| `DocFamilyToken` | type | `DocFamilyToken` | test_session_definitions.py, test_session_observers.py | tested |
+| `DocToken` | type | `DocToken` | test_session_definitions.py, test_session_documents.py, test_session_observers.py | tested |
 | `DocumentAddress` | type | `DocumentAddress` | test_types.py, test_storage_protocol.py | tested |
 | `DocumentCommitChange` | type | `DocumentCommitChange` | test_types.py, test_discriminant_spellings.py | tested |
 | `DocumentContent` | type | `DocumentContent` | test_types.py | tested |
@@ -372,7 +372,6 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `DocumentReader` | type | `DocumentReader` | test_harness_prompt.py | tested |
 | `DocumentRecord` | type | `DocumentRecord` | test_types.py | tested |
 | `DocumentSemantics` | type | `DocumentSemantics` | test_types.py | tested |
-| `DocumentState` | type | `DocumentState` | test_session_states.py, test_session_document_retention.py | tested |
 | `DocumentWatch` | type | `DocumentWatch` | test_session_watches.py, test_session_checkpoints_migrations.py | tested |
 | `Entry` | type | `Entry` | test_entries.py | tested |
 | `EntryDraft` | type | `EntryDraft` | test_entries.py, test_types.py | tested |
@@ -386,8 +385,8 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
 | `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes; #43) |
 | `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
-| `Observation` | type | `Observation` | — | planned (1.5.0: an attached `Observer` — its value at attachment and its `detach()`; #44) |
-| `Observer` | type | `Observer` | — | planned (1.5.0: the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph; #44) |
+| `Observation` | type | `Observation` | test_session_observers.py, test_harness_observers.py | tested (an attached `Observer` — the value at attachment, the idempotent `detach()`, and no pin left behind; #44) |
+| `Observer` | type | `Observer` | test_session_observers.py, test_harness_observers.py | tested (the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph: attached atomically on the line, every change unfolded in line order, `ended` by the owner it observes and `failed` by the close; #44) |
 | `Page` | type | `Page` | test_types.py, test_storage_protocol.py | tested |
 | `PhaseHandler` | type | `PhaseHandler` | test_types.py | tested |
 | `Report` | type | `Report` | test_harness_reports.py | tested (`on_report` takes one of these: the `ReportInfo` fields tagged by `kind`, plus the `error`; #34) |
@@ -652,7 +651,7 @@ SQLite backend and migrations.
 | 3.3 Access and creation | planned (the Chord state getters are gone and observer attachment and windowed conversation watches replace them; #44, #45) |
 | 3.4 Mutation ownership | planned (the admission, pending-batch, receipt and publication states of group commit, and what a held deferred commit does and does not show; #42, #47) |
 | 3.5 Bases and checkpoints | planned (a held deferred commit runs its predicate once against the stored count and stores its base with the held operations; #47) |
-| 3.6 Versions and migrations | planned (`documentState()` leaves the access-driven migration list with #44. `pi.live` is version 3 and stored versions 1 and 2 migrate in place, the persisted version constants are read at their definition sites, and the SQLite schema and JSONL format stand still: test_harness_live_migrations.py, #36) |
+| 3.6 Versions and migrations | planned (`documentState()` left the access-driven migration list with #44: what migrates is now what an observer is shown whole. `pi.live` is version 3 and stored versions 1 and 2 migrate in place, the persisted version constants are read at their definition sites, and the SQLite schema and JSONL format stand still: test_harness_live_migrations.py, #36) |
 | 3.7 Forks | planned (fork metadata hydrates watches and mounted views only; the document-state path is gone; #44) |
 | 4 Transactions and storage ownership | planned (group commit: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound, and outcomes in line order — see the vendored group-commit document; #42) |
 | 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
@@ -680,11 +679,11 @@ SQLite backend and migrations.
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the live status and in what `compaction_start` and `compaction_end` report: test_harness_compaction.py, test_harness_events.py; #36) |
 | 9 Document observation and Chord | tested |
-| 9.1 Watches | planned (the observer's `advance`/`end`, which #44 holds. `WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes; the conversation view's getter is already gone — upstream `Conversation` exposes only `watch(context, window?)` — and the document and task-graph getters remain #44's) |
+| 9.1 Watches | tested (`WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35; and the `Observer` beside it — `advance(call, context)` / `end(end)` attached atomically on the line, its detach idempotent, `ended` only by an observed owner that ended and `failed` by the Session's close, with the commit observer handed exactly what Storage stored: test_session_observers.py, test_harness_observers.py. Supersedes the 1.4.0 Document state section, whose state getters #44 deleted) || 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
 | 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
 | 9.3 Conversation view | planned (1.5.0: the entry window with `before`, the `ConversationWindow` bounds, and `ConversationTranscript` are tested in test_harness_view.py and test_conversation_transcript.py; the per-observer window is #44's, the agent event stream renders through the view until #46 deletes it, and upstream `test/harness-view-run.test.ts` — a run as the view shows it — awaits #47 and #48) |
 | 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
-| 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |
+| 9.5 Task graph view | tested (translated in test_harness_task_graph.py; the graph observer of #44 mirrors each publication on the line, a blocked reason re-derived with no commit, in test_harness_observers.py; #46 re-keys this row to the vendored 9.4) |
 | 10 Storage contract | tested (`commit_batches(batches, receive, context)` is the protocol's only commit call — per-batch checks against the state the earlier batches left, one durability receipt per stored batch delivered before the call settles, and the refusal a resolved outcome beside a rejection that stores nothing — with the optional `publishing()` scope and the narrowed `mint_id()` monotonicity across reopen: test_storage_commit_batches.py over the memory, SQLite and JSONL backends, and no backend carries the retired single-write signature; #38, #41. The conformance suite carries the receipt contract itself — the group stored in order against the state its earlier batches left, the prefix a refusal keeps, a later batch its own actions refuse, a copy resolved against its predecessors, receipts checked one per stored batch by the wrapper every case runs through, and every case seeded through `commit_writes`; #39, #41. The durable backends' own depth landed with #40, which also pins that every backend module registers the same case list) |
 | 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged observer ends; #42, #44. The tagged watch ends landed with #35) |
 | 11 Backends | tested |
@@ -773,8 +772,7 @@ request, cap and failure classification, background and blocking thresholds, ove
 and its retry, fork and inbox interactions, recovery across reopen, concurrent summaries, the
 one-compaction rule, and the older-head-marker edits. Its `compaction_start`/`compaction_end`
 ordering, late-joiner snapshots, and kept-entry view assertions now run through `watch_events` and
-the windowed `watch(context, window)` in the same file, alongside the same committed state checked
-through `pi.live`, the task outcome, submissions, and the context view.
+the windowed `watch(context, window)` in the same file, alongside the same committed state checkedthrough `pi.live`, the task outcome, submissions, and the context view.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
@@ -880,7 +878,7 @@ orchestrator/worker/reviewer, diamond, and longer-cycle) are translated in
 | Definition constructors | identity functions; they check nothing | `define_*` constructors validate a required non-empty name (and a task's version) eagerly; `section` and the registry check section rules |
 | `snapshotAsOf` on a latest-only document | rejected by the TypeScript overloads | rejected at runtime with `TypeError` |
 | Context cutoff | `context(context, { at })` and `context(conversationId, context, { at })` | `context(conversation_id, context, at=...)`; `Conversation.context()` and `TaskRuntime.context()` accept the cutoff as a keyword mapping |
-| Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `DocumentState.subscribe(listener)` delivers `(value, context, Delivery(kind, sequence))`; `CommittedWatch` frames carry `(value, ops, context)` |
+| Document observation | Chord `AttachedReplicatedState`/`ReplicatedStateSource` | `Observer.advance(call, context)` / `Observer.end(end)` mirrors a watch's own `WatchCall` shapes synchronously, and `CommitObserver` replaces the 1.4.0 `subscribe_commits()` listener; both are attached through `observe_doc()`, `observe_conversation()`, `observe_task_graph()`, and `observe_commits()` |
 | Promise-returning watcher methods | `stop()` returns the one common promise | `CommittedWatch.stop()` and `closed` return the one common `asyncio.Future`, so each is identity-stable and awaiting a cancellation does not cancel it |
 | Task result branding | `TaskId<Result>` carries the result type | `TaskId` is a `NewType`; the task record carries the result |
 | Hook map extraction | `HooksOf<K>` conditionally extracts a task's hook map | `HooksOf` is an `Any` alias; Python cannot conditionally extract it from a generic task token, and `hook()` accepts the mapping directly |
@@ -899,7 +897,7 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | Entry draft validation and immutable record construction | `pi_durable.types` | tested (`test_entries.py`) |
 | Session test constructor and failure latch | `pi_durable.session.session` | tested (`test_session_tables.py`, `test_harness_storage_failure.py`) |
 | Internal commit observers and contained host callbacks | `pi_durable.session.session` | tested (`test_harness_storage_failure.py`) |
-| Mutable document drafts backed by strict-JSON copies | `pi_durable.session.drafts` | tested (`test_session_states.py`, `test_session_tables.py`) |
+| Mutable document drafts backed by strict-JSON copies | `pi_durable.session.drafts` | tested (`test_session_observers.py`, `test_session_tables.py`) |
 | Chord-compatible JSON operation applier | `pi_durable.delta` | tested (`test_memory_storage.py`) |
 | Serialized committed document watches | `pi_durable.session.observation` | tested (`test_session_watches.py`, `test_session_checkpoints_migrations.py`) |
 | Document cache sizes, retention normalization, and the suite default | `pi_durable.session.session` | tested (`test_session_document_retention.py`) |

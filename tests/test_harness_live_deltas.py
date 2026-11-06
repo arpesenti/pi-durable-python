@@ -11,7 +11,7 @@ import asyncio
 from typing import Any, cast
 
 from chat_support import all_entries, assistant_message, chat_setup, open_chat, slow_message
-from session_support import context, document_changes
+from session_support import context, document_changes, observe_commits
 
 from pi_durable import LiveDoc, MemoryStorage
 from pi_durable.types import CommitReceipt, Seq
@@ -25,7 +25,7 @@ def live_commit_ops(harness: Any) -> list[list[Any]]:
             if change["record"]["kind"] == "pi.live" and change["ops"]:
                 commits.append(list(change["ops"]))
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     return commits
 
 
@@ -101,7 +101,7 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs(
             if change["value"] is not None:
                 values[publication["seq"]] = change["value"]
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
 
@@ -415,7 +415,7 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs_
             if change["value"] is not None:
                 values[publication["seq"]] = change["value"]
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
 

@@ -23,7 +23,7 @@ from chat_support import (
     slow_message,
     text_of,
 )
-from session_support import context, document_changes, flush
+from session_support import context, document_changes, flush, observe_commits
 from task_support import aborted, deferred, eventually
 from tool_support import DONE, add_tool, tool
 
@@ -118,7 +118,7 @@ def partials_of(harness: Any) -> list[Any]:
             if change["record"]["kind"] == "pi.live" and message is not None:
                 partials.append(message)
 
-    harness.subscribe_commits(observer)
+    observe_commits(harness, observer)
     return partials
 
 
@@ -660,7 +660,7 @@ async def test_rebuilds_a_sliding_tail_window_from_output_trims_and_appends() ->
             ):
                 outputs.append(output)
 
-    harness.subscribe_commits(observer)
+    observe_commits(harness, observer)
     listener = await listen(harness, root)
     stream, events = listener["stream"], listener["events"]
     harness.resume()

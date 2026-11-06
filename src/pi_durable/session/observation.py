@@ -9,23 +9,27 @@ the last value and no operations, and a document created at that address later a
 watch as a root replacement. A watch ends five ways, and only those: ``stopped`` by its own
 ``stop()``, ``aborted`` by the acquisition context's abort signal, ``ended`` or ``failed`` by its
 Session, and ``listener_error`` by the error its listener raised. Termination drops every reference
-the watch holds into its Session and its listener, keeping only its last value. A state publishes
-every later revision in order through its listeners and keeps its last value at close.
+the watch holds into its Session and its listener, keeping only its last value. An observer of the
+same address, view mount, or graph mount is handed the very calls a watch is handed, unfolded and
+synchronously, on the mutation line: it mirrors state for a host that follows the Session rather
+than rendering it, and its detach — idempotent, like a watch's ``stop()`` — leaves nothing pinned.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import Any, cast
+from functools import partial
+from typing import Any, Protocol, cast
 
 from ..context import BACKGROUND_CONTEXT, AbortSignal, Context, without_abort_signal
 from ..delta import Op, PendingOps
 from ..errors import is_failure
-from ..ids import DocumentId
+from ..ids import DocumentId, TaskId
 from ..types import (
+    CommitObserver,
     DocumentCommitChange,
+    Observer,
     WatchCall,
     WatchEnd,
     WatchValueCall,
@@ -40,137 +44,54 @@ class _Unchanged:
 UNCHANGED = _Unchanged()
 """The marker of a delivery that brings no new value: a retirement keeps the last one."""
 
+SESSION_CLOSED = "session closed"
+"""What a Session close ends a synchronous observer with: an adapter follows the next Session.
+
+A watch gets ``ended`` at the close of the Session it rode; an observer mirrors state for a host
+that survives the close and reopens, so it gets ``failed`` with this error, and ``ended`` stays what
+an observed owner that ended carries — a task document's task (#44, decision "Slice 8 S1").
+"""
+
+ENDED: WatchEnd = {"kind": "ended"}
+"""The end of an observer whose observed owner ended."""
+
+
+def session_closed_error() -> RuntimeError:
+    """The error one Session close ends its observers with, made fresh for that close."""
+
+    return RuntimeError(SESSION_CLOSED)
+
+
+def contained(callback: Callable[[], Any], on_error: Callable[[BaseException], None]) -> None:
+    """Run a host callback without failing its caller; a throw or rejection goes to ``on_error``."""
+
+    try:
+        result = callback()
+        if not hasattr(result, "__await__"):
+            return
+        future = asyncio.ensure_future(cast(Awaitable[Any], result))
+
+        def settle(done: asyncio.Future[Any]) -> None:
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except BaseException as caught:
+                error = caught
+            if error is not None:
+                on_error(error)
+
+        future.add_done_callback(settle)
+    except BaseException as error:
+        on_error(error)
+
+
 RETIREMENT_OPERATIONS: list[Op] = [["r", None]]
 """Canonical terminal update for a retired document incarnation.
 
 Only an attached :class:`CommittedState` applies it; a 1.5.0 watch is never given ``None``, because
 Durable has no value for an absent document (spec §9.1).
 """
-
-
-@dataclass(slots=True)
-class Delivery:
-    """One state delivery: hydration at sequence 0, then one per committed update."""
-
-    kind: str
-    sequence: int
-
-
-class CommittedState:
-    """Disposable, read-only committed state over one immutable value.
-
-    A document state binds it to one incarnation; a conversation view or task graph binds it to
-    the Harness's mount. Subscribing delivers the acquisition revision immediately and then every
-    later committed revision, in order, without another read.
-    """
-
-    __slots__ = (
-        "_closed",
-        "_disposed",
-        "_listeners",
-        "_release",
-        "_released",
-        "_report",
-        "_sequence",
-        "_value",
-    )
-
-    def __init__(
-        self,
-        value: Any,
-        release: Callable[[], None],
-        report: Callable[[BaseException], None] | None = None,
-    ) -> None:
-        self._value = value
-        self._release = release
-        self._report = report
-        self._released = False
-        self._sequence = 0
-        self._listeners: list[Callable[[Any, Context, Delivery], Any]] = []
-        self._disposed = False
-        self._closed = False
-
-    @property
-    def value(self) -> Any:
-        return self._value
-
-    def subscribe(self, listener: Callable[[Any, Context, Delivery], Any]) -> Callable[[], None]:
-        """Subscribe; hydration is delivered immediately with sequence 0."""
-
-        if self._disposed:
-            raise RuntimeError("State is disposed")
-        self._listeners.append(listener)
-        self._deliver(listener, self._value, BACKGROUND_CONTEXT, Delivery("hydrate", self._sequence))
-
-        def unsubscribe() -> None:
-            try:
-                self._listeners.remove(listener)
-            except ValueError:
-                pass
-
-        return unsubscribe
-
-    def dispose(self) -> None:
-        """Idempotently stop future deliveries; the last value remains readable."""
-
-        if self._disposed:
-            return
-        self._disposed = True
-        self._listeners.clear()
-        self._release_pin()
-
-    def _release_pin(self) -> None:
-        """Release the observer once; a retired incarnation keeps its last value but pins nothing."""
-
-        if self._released:
-            return
-        self._released = True
-        self._release()
-
-    def advance(self, call: WatchCall[Any], context: Context) -> None:
-        """Publish one committed revision to every listener; a state reads only its value."""
-
-        if call["kind"] != "value":
-            return
-        self._advance(call["value"], context)
-
-    def _advance(self, value: Any, context: Context) -> None:
-        if self._disposed or self._closed:
-            return
-        self._value = value
-        self._sequence += 1
-        delivery = Delivery("update", self._sequence)
-        for listener in list(self._listeners):
-            self._deliver(listener, value, without_abort_signal(context), delivery)
-
-    def close_session(self, _failure: BaseException | None = None) -> None:
-        """An observer's Session-close callback; the last value and this state remain."""
-
-        self._close_session()
-
-    def _close_session(self) -> None:
-        """Keep the last value at the Session's seal and receive no commit that settles later."""
-
-        if self._closed:
-            return
-        self._closed = True
-        self._listeners.clear()
-        self._release_pin()
-
-    def _deliver(
-        self,
-        listener: Callable[[Any, Context, Delivery], Any],
-        value: Any,
-        context: Context,
-        delivery: Delivery,
-    ) -> None:
-        try:
-            result = listener(value, context, delivery)
-            if hasattr(result, "__await__"):
-                asyncio.ensure_future(cast(Awaitable[Any], result))
-        except Exception as error:
-            if self._report is not None:
-                self._report(error)
 
 
 def observed_operations(
@@ -464,11 +385,251 @@ class CommittedWatch:
                 self._closed.set_result(self._end)
 
 
+class _SyncObserver(Protocol):
+    """What the guard calls on a host's observer, whichever of the two shapes it is.
+
+    A state observer (:class:`~pi_durable.types.Observer`) and a commit observer
+    (:class:`~pi_durable.types.CommitObserver`) differ only in what ``advance`` is handed; the guard
+    serves both, and ``advance`` is typed ``Any`` because a host that hands back an awaitable has its
+    rejection read as its throw, exactly as :func:`contained` reads one.
+    """
+
+    def advance(self, call: Any, context: Context) -> Any: ...
+
+    def end(self, end: WatchEnd) -> None: ...
+
+
+class GuardedObserver:
+    """One host observer behind the rule every synchronous observer runs under (spec §9.1).
+
+    A throw from ``advance`` — or an awaitable it returns that rejects — is reported, detaches the
+    observer, and ends it ``listener_error``, so it never reaches the commit underway. Nothing
+    reaches the observer after its detach or its end, and from then on this object keeps neither the
+    host's observer nor its report sink. ``call`` is the :data:`~pi_durable.types.WatchCall` a state
+    observer mirrors or the :class:`~pi_durable.types.CommitPublication` a commit observer mirrors.
+    """
+
+    __slots__ = ("_detached", "_detach", "_observer", "_pending", "_report")
+
+    def __init__(
+        self,
+        observer: Observer | CommitObserver,
+        detach: Callable[[], None],
+        report: Callable[[BaseException], None],
+    ) -> None:
+        self._observer: _SyncObserver | None = observer
+        self._detach: Callable[[], None] | None = detach
+        self._report: Callable[[BaseException], None] | None = report
+        self._detached = False
+        self._pending = 0
+
+    @property
+    def attached(self) -> bool:
+        """Whether the observer is still attached: a caller stops handing it work once it is not."""
+
+        return not self._detached
+
+    def advance(self, call: Any, context: Context) -> None:
+        """Hand the observer one call, synchronously; its own throw is contained here."""
+
+        if self._detached:
+            return
+        observer = self._observer
+        assert observer is not None
+        try:
+            result = observer.advance(call, context)
+        except BaseException as error:
+            if not is_failure(error):
+                raise
+            self._fault(error)
+            return
+        if hasattr(result, "__await__"):
+            # A rejected awaitable is the observer's throw, after the fact (§9.1). It settles on the
+            # loop, so the report sink stays reachable until it does: a close that detaches the
+            # observer meanwhile must not swallow the report that call is owed.
+            self._pending += 1
+            contained(lambda: result, self._rejected)
+
+    def end(self, end: WatchEnd) -> None:
+        """End the observer, once; its detach runs first and nothing reaches it afterwards."""
+
+        released = self._release()
+        if released is None:
+            return
+        observer, report = released
+        contained(partial(observer.end, end), report)
+
+    def detach(self) -> None:
+        """Idempotently detach the observer; no call and no end follows it."""
+
+        self._release()
+
+    def close_session(self, failure: BaseException | None = None) -> None:
+        """End the observer as the close of its Session ends it: ``failed``, never ``ended``.
+
+        A failed Session ends the observer with the error that failed it; a clean close ends it
+        with a session-closed error, because the host's adapter follows the next Session (§9.1).
+        """
+
+        self.end(
+            {"kind": "failed", "error": failure if failure is not None else session_closed_error()}
+        )
+
+    def _rejected(self, error: BaseException) -> None:
+        """Handle the rejection of an awaitable the observer returned, which settles after the call."""
+
+        self._pending -= 1
+        self._fault(error)
+
+    def _fault(self, error: BaseException) -> None:
+        """Report the observer's throw, then detach it and end it ``listener_error``, once."""
+
+        report = self._report
+        if report is not None:
+            report(error)
+        released = self._release()
+        if released is None:
+            return
+        observer, released_report = released
+        contained(
+            partial(observer.end, {"kind": "listener_error", "error": error}),
+            released_report,
+        )
+
+    def _release(self) -> tuple[_SyncObserver, Callable[[BaseException], None]] | None:
+        """Detach once, and hand back what the observer was attached with, or ``None`` if already gone.
+
+        The report sink goes with it, except while a call the observer was handed is still awaiting:
+        whatever that call settles to is still owed its report.
+        """
+
+        if self._detached:
+            return None
+        self._detached = True
+        observer, self._observer = self._observer, None
+        detach, self._detach = self._detach, None
+        report = self._report
+        if self._pending == 0:
+            self._report = None
+        assert observer is not None
+        if detach is not None:
+            detach()
+        return (observer, report if report is not None else _unreported)
+
+
+class AttachedObserver(GuardedObserver):
+    """The Session's attachment of one host observer to one document address (spec §9.1, §9.2).
+
+    Like a watch it follows the address rather than one incarnation and is handed the same
+    :data:`~pi_durable.types.WatchCall` shapes; unlike a watch it is handed every change unfolded
+    and synchronously, and it ends ``ended`` when the owner of the address ends — the task of a task
+    document, after the retirement that ends it — rather than living until it is stopped.
+    """
+
+    __slots__ = ("_observed_version", "_owner_task_id", "_record_id", "_value")
+
+    def __init__(
+        self,
+        observer: Observer,
+        detach: Callable[[], None],
+        report: Callable[[BaseException], None],
+        value: Any,
+        observed_version: int,
+        record_id: DocumentId,
+        owner_task_id: TaskId | None = None,
+    ) -> None:
+        super().__init__(observer, detach, report)
+        self._value: Any = value
+        self._observed_version = observed_version
+        self._record_id: DocumentId | None = record_id
+        self._owner_task_id = owner_task_id
+
+    @property
+    def value(self) -> Any:
+        """The revision the observer is at: what every later call reaches from."""
+
+        return self._value
+
+    @property
+    def owner_task_id(self) -> TaskId | None:
+        """The task whose end ends this observer, for an address owned by a task."""
+
+        return self._owner_task_id
+
+    def advance_document(self, change: DocumentCommitChange, context: Context) -> None:
+        """Deliver one committed change at the followed address, unfolded and in line order.
+
+        A retirement of the followed incarnation is a call with the last value this observer was
+        given and no operations, and a change of another definition version — or of a new
+        incarnation at the address — is shown whole, because the observer's value does not have that
+        shape. The observer may detach in its own call, or throw and be detached: what is left of
+        the commit is not its business, which the caller checks through :attr:`attached`.
+        """
+
+        if not self.attached:
+            return
+        if change["type"] != "document":
+            return
+        if change["kind"] == "retire":
+            # Only the retirement of the incarnation followed is a change: Durable has no value for
+            # an absent document, so the call keeps the last value and carries no operations.
+            if change["record"]["id"] != self._record_id:
+                return
+            self._record_id = None
+            # The retirement hands back the last value and the observer keeps none of it: an absent
+            # address has no value to mirror, and a retired one keeps nothing cached for it.
+            last = self._value
+            self._value = None
+            self.advance(watch_value_call(last, [], True), context)
+            return
+        record_id = change["record"]["id"]
+        value = change["value"]
+        if record_id != self._record_id or change["version"] != self._observed_version:
+            self._record_id = record_id
+            self._observed_version = change["version"]
+            self._value = value
+            self.advance(watch_value_call(value, [["r", value]]), context)
+            return
+        if not change["ops"]:
+            # A migration-only base changes nothing for an observer already at that version.
+            return
+        self._value = value
+        self.advance(watch_value_call(value, change["ops"]), context)
+
+
+class AttachedObservation:
+    """What attaching an observer hands back: the value at attachment, and how to detach it.
+
+    Built outside the attaching closure and holding nothing but the value and the guard, so a
+    detached observation keeps neither the Session nor the host's observer alive.
+    """
+
+    __slots__ = ("_guarded", "value")
+
+    def __init__(self, value: Any, guarded: GuardedObserver) -> None:
+        self.value = value
+        self._guarded = guarded
+
+    def detach(self) -> None:
+        """Idempotently detach the observer this observation attached."""
+
+        self._guarded.detach()
+
+
+def _unreported(_error: BaseException) -> None:
+    """The sink of an observer whose report was already spent: its own end throw is dropped."""
+
+
 __all__ = [
-    "CommittedState",
+    "ENDED",
+    "SESSION_CLOSED",
+    "AttachedObserver",
+    "AttachedObservation",
     "CommittedWatch",
-    "Delivery",
+    "GuardedObserver",
     "RETIREMENT_OPERATIONS",
     "UNCHANGED",
+    "contained",
     "observed_operations",
+    "session_closed_error",
 ]

@@ -16,7 +16,7 @@ from dataclasses import replace
 from typing import Any, get_args, get_type_hints
 
 from chat_support import FauxModels, assistant_message, chat_setup
-from session_support import ControlledStorage, context
+from session_support import ControlledStorage, context, observe_commits_as_host
 from task_support import completed, deferred, eventually
 
 from pi_durable import (
@@ -279,7 +279,7 @@ async def test_tell_extension_listener_wake_and_timer_failures_from_a_failed_ses
     def broken_listener(_publication: Any, _context: Any) -> None:
         raise RuntimeError("listener")
 
-    harness.subscribe_commits(broken_listener)
+    observe_commits_as_host(harness, broken_listener)
     root = await harness.root(context)
     await root.agent(context)
     await root.commit(

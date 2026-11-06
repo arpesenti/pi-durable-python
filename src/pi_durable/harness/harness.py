@@ -18,6 +18,7 @@ from ..types import (
     ConversationRecord,
     EntryDraft,
     EntryRecord,
+    Observer,
     Page,
     Storage,
     SubmissionRecord,
@@ -276,6 +277,13 @@ class ConversationHandleImpl:
     async def watch(self, context: Context, window: ConversationWindow | None = None) -> Any:
         return await self._harness._views.watch(self.id, context, window)
 
+    async def observe(
+        self,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> Any:
+        return await self._harness._views.observe(self.id, observer, context, window)
 
 class Harness(SessionImpl):
     """Durable agent harness over one Session."""
@@ -631,11 +639,28 @@ class Harness(SessionImpl):
                 add_usage_state(total, state)
         return total
 
-    async def task_graph(self, context: Context) -> Any:
-        """Return the task-graph mount as a disposable read-only state."""
+    async def observe_conversation(
+        self,
+        id: ConversationId,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> Any:
+        """Attach a synchronous observer of one conversation's view, with a window of its own
+        (spec §9.3).
+
+        The attachment is atomic on the Session line: the observation's value is the current
+        revision and every later change reaches the observer in line order, unfolded.
+        """
 
         self.assert_usable()
-        return await self._graph.state(context)
+        return await self._views.observe(id, observer, context, window)
+
+    async def observe_task_graph(self, observer: Observer, context: Context) -> Any:
+        """Attach a synchronous observer of the Session-wide task-graph mount (spec §9.5)."""
+
+        self.assert_usable()
+        return await self._graph.observe(observer, context)
 
     async def watch_task_graph(self, context: Context) -> Any:
         """Return the task-graph mount through its serialized coalesced watch."""

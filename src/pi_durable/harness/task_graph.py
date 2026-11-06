@@ -18,11 +18,16 @@ from ..context import BACKGROUND_CONTEXT, Context, without_abort_signal
 from ..delta import Op
 from ..ids import ConversationId, TaskId
 from ..json import JsonValue
-from ..session.observation import CommittedState, CommittedWatch
+from ..session.observation import (
+    AttachedObservation,
+    CommittedWatch,
+    GuardedObserver,
+)
 from ..session.session import SessionImpl, contained
 from ..types import (
     CommitPublication,
     JoinPolicy,
+    Observer,
     Storage,
     TaskOutcome,
     TaskRecord,
@@ -126,7 +131,7 @@ class TaskGraphView:
         )
         self._mount: GraphMount | None = None
         self._closed = False
-        session.observe_commits(self._on_publication)
+        session.observe_stored_commits(self._on_publication)
         if subscribe_blocked is not None:
             subscribe_blocked(self._refresh_blocked)
         session.subscribe_close(self._on_close)
@@ -134,10 +139,25 @@ class TaskGraphView:
     def report(self, error: BaseException) -> None:
         self._session.report(error)
 
-    async def state(self, context: Context) -> CommittedState:
-        """A disposable read-only state of the graph."""
+    async def observe(self, observer: Observer, context: Context) -> AttachedObservation:
+        """A synchronous observer of the graph, attached atomically on the Session line.
 
-        return await self._attach(_state_observer, context)
+        It mirrors what a watch of the mount is handed — including a blocked-reason change derived
+        outside any commit — unfolded, in line order (spec §9.5).
+        """
+
+        attached: list[TaskGraph] = []
+
+        def create(
+            current: TaskGraph,
+            release: Callable[[], None],
+            view: TaskGraphView,
+        ) -> GuardedObserver:
+            attached.append(current)
+            return GuardedObserver(observer, release, view.report)
+
+        guarded = await self._attach(create, context)
+        return AttachedObservation(attached[0], guarded)
 
     async def watch(self, context: Context) -> CommittedWatch:
         """A serialized coalesced watch of the graph; aborting ``context`` ends it ``aborted``."""
@@ -284,12 +304,6 @@ class TaskGraphView:
             for observer in list(mount.observers):
                 contained(partial(observer.close_session, failure), self.report)
         self._mount = None
-
-
-def _state_observer(
-    value: TaskGraph, release: Callable[[], None], view: TaskGraphView
-) -> CommittedState:
-    return CommittedState(value, release, view.report)
 
 
 def _watch_observer(

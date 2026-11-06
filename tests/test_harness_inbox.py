@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 import pytest
-from session_support import ControlledStorage, context, document_changes
+from session_support import ControlledStorage, context, document_changes, observe_commits
 from submission_support import (
     all_entries,
     fail,
@@ -260,7 +260,7 @@ async def test_commits_inbox_changes_as_positional_operations_without_retained_v
             if change["record"]["kind"] == "pi.inbox" and change["ops"]:
                 ops.append(list(change["ops"]))
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     input = await root.submit({"type": "input", "content": "a"}, context)
     task_id = await wait_busy(harness, root)
     w1 = await root.submit({"type": "write", "entry": queued_note("w")}, context)
@@ -329,7 +329,7 @@ async def test_writes_the_inbox_as_a_complete_base_exactly_when_it_becomes_empty
             if change["record"]["kind"] == "pi.inbox":
                 inbox_id["id"] = change["record"]["id"]
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     input = await root.submit({"type": "input", "content": "a"}, context)
     await wait_busy(harness, root)
     await root.submit({"type": "input", "content": "f1"}, context)

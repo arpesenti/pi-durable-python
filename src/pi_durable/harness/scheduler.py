@@ -432,7 +432,7 @@ class TaskScheduler:
         as committed, running in another process.
         """
 
-        self._session.observe_commits(self._observe)
+        self._session.observe_stored_commits(self._observe)
         self._session.subscribe_close(self._seal)
 
         def registry_changed() -> None:

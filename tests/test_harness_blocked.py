@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from session_support import context, flush
+from session_support import attached_graph, context, flush
 from task_support import completed, deferred, eventually, open_tasks
 
 from pi_durable import define_extension, define_task
@@ -260,7 +260,7 @@ async def test_interim_parked_task_reports_nothing_until_49() -> None:
     inspection = await harness.inspect(context)
     found = next(task for task in inspection["tasks"] if task["record"]["id"] == id)
     assert found["state"] == {"kind": "blocked", "reason": "restart_limit"}
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     assert graph.value["tasks"][str(id)]["blocked"] == "restart_limit"
     # Parked work needs no process: nothing is active.
     await eventually(lambda: not harness.wake()["active"])
@@ -401,7 +401,7 @@ async def test_runs_a_parked_task_once_a_raised_restart_limit_no_longer_parks_it
     opened["kill"]()  # a crash: a close would not count
     opened = await _open_with(path, registry, settings)
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     harness.resume()
     await eventually(lambda: graph.value["tasks"][str(id)].get("blocked") == "restart_limit")
     # Let a scheduling pass leave the parked task out.
@@ -586,7 +586,7 @@ async def test_tells_the_graph_and_the_host_when_a_migration_fails() -> None:
     _register(second, "v2", V2)
     opened = await _open_with(path, second)
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     harness.resume()
     await eventually(lambda: graph.value["tasks"][str(id)].get("blocked") == "migration_failed")
     await eventually(lambda: not harness.wake()["active"])
@@ -619,7 +619,7 @@ async def test_shows_an_abandoned_task_waiting_for_its_definition_as_blocked() -
     # The next open marks it `restart`; without its definition, it waits for one to clean up.
     opened = await _open_with(path, create_registry())
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     harness.resume()
     await eventually(_abort_reason(harness, id, "restart"))
     await eventually(lambda: graph.value["tasks"][str(id)].get("blocked") == "missing_task")
@@ -640,7 +640,7 @@ async def test_shows_a_task_without_a_definition_as_blocked_and_wakes_the_host_o
     path = _sqlite_path()
     opened = await _open_with(path, registry)
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
 
     async def run(_task: Any, runtime: Any, ctx: Any) -> None:
         await runtime.commit(lambda: completed(None), ctx)

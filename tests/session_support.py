@@ -150,8 +150,125 @@ def open_test_session() -> tuple[ControlledStorage, SessionImpl, list[CommitPubl
     storage = ControlledStorage()
     session = SessionImpl(cast(Storage, storage), lambda: 1_000, lambda: 600_000)
     publications: list[CommitPublication] = []
-    session.subscribe_commits(lambda publication, _context: publications.append(publication))
+    observe_commits(session, lambda publication, _context: publications.append(publication))
     return storage, session, publications
+
+
+class CommitObserverRecorder:
+    """A host ``CommitObserver`` handing each stored publication to a plain callable (spec §9.1).
+
+    A host observer that throws is reported and detached, unlike the Session's own follower, whose
+    throw fails the Session: a test that follows what was stored uses :func:`observe_commits`, and a
+    test of what the host is handed uses this one.
+    """
+
+    def __init__(self, on_publication: Callable[[CommitPublication, Context], Any]) -> None:
+        self._on_publication = on_publication
+        self.ends: list[Any] = []
+
+    def advance(self, publication: CommitPublication, context: Context) -> Any:
+        # What the callable returns goes back to the Session's guard, which awaits a rejected
+        # awaitable there and reports it: a host observer is contained, never fatal (§9.1).
+        return self._on_publication(publication, context)
+
+    def end(self, end: Any) -> None:
+        self.ends.append(end)
+
+
+def observe_commits_as_host(
+    session: Any,
+    on_publication: Callable[[CommitPublication, Context], Any],
+) -> CommitObserverRecorder:
+    """Attach ``on_publication`` as the host's own commit observer of ``session``."""
+
+    observer = CommitObserverRecorder(on_publication)
+    session.observe_commits(observer)
+    return observer
+
+
+def observe_commits(
+    session: Any,
+    on_publication: Callable[[CommitPublication, Context], Any],
+) -> Callable[[], None]:
+    """Follow what Storage stored, the way the Session's own components do; return its unsubscribe.
+
+    This is the Session's internal follower seam, not the host's :class:`CommitObserver`: it is
+    handed the publication on the line, which is what a test that inspects what was committed right
+    after the commit needs. A test of the host surface attaches its own ``CommitObserver`` through
+    ``Session.observe_commits()`` (spec §9.1).
+    """
+
+    return cast(Callable[[], None], session.observe_stored_commits(on_publication))
+
+
+class Mirror:
+    """A host state observer recording every call, its end, and the value it mirrors.
+
+    Tests that only need a reading use it through :func:`view_of` or :func:`graph_of`; a test that
+    follows a value over time attaches one directly; a test of the observer surface itself writes
+    its own observer and asserts on the calls it was handed (spec §9.1).
+    """
+
+    def __init__(self) -> None:
+        self.value: Any = None
+        self.calls: list[Any] = []
+        self.ends: list[Any] = []
+        self._observation: Any = None
+
+    def bind(self, observation: Any) -> Mirror:
+        """Record the observation this mirror was attached through, so ``dispose`` can detach it."""
+
+        self._observation = observation
+        self.value = observation.value
+        return self
+
+    def dispose(self) -> None:
+        """Detach the attachment; the mirrored value stays for the test to assert on."""
+
+        if self._observation is not None:
+            self._observation.detach()
+
+    def advance(self, call: Any, _context: Any = None) -> None:
+        self.calls.append(call)
+        if call["kind"] == "value" and not call["retired"]:
+            self.value = call["value"]
+
+    def end(self, end: Any) -> None:
+        self.ends.append(end)
+
+
+async def attached_graph(harness: Any, context: Context) -> Mirror:
+    """A mirror of the task graph that follows every publication until it is disposed."""
+
+    mirror = Mirror()
+    return mirror.bind(await harness.observe_task_graph(mirror, context))
+
+
+async def attached_view(harness: Any, conversation_id: Any, context: Context) -> Mirror:
+    """A mirror of one conversation's view that follows every publication until it is disposed."""
+
+    mirror = Mirror()
+    return mirror.bind(await harness.observe_conversation(conversation_id, mirror, context))
+
+
+async def view_of(harness: Any, conversation_id: Any, context: Context) -> Any:
+    """One conversation's current view, read the way committed state is read: by attaching."""
+
+    mirror = Mirror()
+    observation = await harness.observe_conversation(conversation_id, mirror, context)
+    value = observation.value
+    observation.detach()
+    return value
+
+
+async def graph_of(harness: Any, context: Context) -> Any:
+    """The task graph as it stands, read by attaching an observer of the mount."""
+
+    mirror = Mirror()
+    observation = await harness.observe_task_graph(mirror, context)
+    value = observation.value
+    observation.detach()
+    return value
 
 
 def document_copy_changes(publication: CommitPublication) -> list[dict[str, Any]]:
@@ -179,6 +296,7 @@ async def create_conversation(session: SessionImpl) -> ConversationId:
 
 
 __all__ = [
+    "CommitObserverRecorder",
     "ControlledStorage",
     "Deferred",
     "Gate",

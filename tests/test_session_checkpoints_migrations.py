@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from session_support import (
+    Mirror,
     context,
     create_conversation,
     document_changes,
@@ -1176,8 +1177,9 @@ async def test_sends_observers_of_an_older_shape_a_root_replacement() -> None:
         await tx.doc(V1Doc)
 
     await session.commit(create, context)
-    state = await session.document_state(V1Doc, context)
-    assert state is not None
+    mirror = Mirror()
+    observation = await session.observe_doc(V1Doc, mirror, context)
+    assert observation is not None
     watch = await session.watch_doc(V1Doc, context)
     assert watch is not None
     frames: list[Any] = []
@@ -1195,10 +1197,12 @@ async def test_sends_observers_of_an_older_shape_a_root_replacement() -> None:
     await session.commit(edit, context)
     await asyncio.wait_for(delivered.wait(), timeout=1)
     await flush()
-    assert state.value == {"names": ["first", "second"]}
+    assert mirror.value == {"names": ["first", "second"]}
     assert watch.value == {"names": ["first", "second"]}
     assert frames == [[["r", {"names": ["first", "second"]}]]]
-    state.dispose()
+    # An observer of the older shape is shown the migrated value whole, as the watch was.
+    assert mirror.calls[-1]["ops"] == [["r", {"names": ["first", "second"]}]]
+    observation.detach()
     await watch.stop()
 
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from session_support import context, create_conversation, document_changes, open_test_session
+from session_support import context, create_conversation, document_changes, observe_commits, open_test_session
 
 from pi_durable import (
     AgentDoc,
@@ -294,7 +294,7 @@ async def test_records_the_turn_count_as_the_run_takes_its_rounds() -> None:
             if change["record"]["kind"] == "pi.live" and value and "run" in value:
                 counts.append(value["run"]["turns"])
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     harness.resume()
     settled = await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
     assert settled["status"] == "done"
