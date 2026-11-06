@@ -191,7 +191,9 @@ _Avoid_: heartbeat, poll
 
 **Restart**:
 A cut-off of a running task by a crash, eviction, or reset, counted in `TaskRecord.restarts` at
-open. A close is not a restart; committing a new state clears the count.
+open. A close is not a restart; committing a new state clears the count. Reaching
+`settings.restart_limit` ends the task instead of running it again: a built-in kind ends itself and a
+run ends `restart_limit`, and the scheduler faults a task of any other kind.
 _Avoid_: retry, rerun
 
 **Report**:

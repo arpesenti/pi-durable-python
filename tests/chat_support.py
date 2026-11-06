@@ -496,6 +496,7 @@ class ChatSetup:
     models: FauxModels
     registry: Registry
     reports: list[BaseException] = field(default_factory=list)
+    infos: list[dict[str, Any]] = field(default_factory=list)
     settings: dict[str, Any] = field(default_factory=dict)
     now: Callable[[], int] = lambda: 0
 
@@ -518,6 +519,13 @@ def chat_setup(options: Mapping[str, Any] | None = None) -> ChatSetup:
     )
 
 
+def _record(setup: ChatSetup, report: dict[str, Any]) -> None:
+    """Split the one ``Report`` the host is handed into its error and its info, as upstream's helper does."""
+
+    setup.reports.append(report["error"])
+    setup.infos.append({key: value for key, value in report.items() if key != "error"})
+
+
 async def open_chat(
     storage: Storage,
     setup: ChatSetup,
@@ -531,7 +539,7 @@ async def open_chat(
         "registry": setup.registry,
         "settings": setup.settings,
         "now": setup.now,
-        "on_report": lambda report: setup.reports.append(report["error"]),
+        "on_report": lambda report: _record(setup, report),
     }
     if env is not None:
         options["env"] = env
@@ -540,6 +548,63 @@ async def open_chat(
         context, {"agent": {"model": {"provider": "faux", "modelId": "faux-1"}}}
     )
     return {"harness": harness, "root": root}
+
+
+_killed: list[Storage] = []
+"""The storages of killed Harnesses: a crash does not close its own storage."""
+
+
+class KillableStorage:
+    """A Storage whose calls hang once it is killed: a crash writes nothing more.
+
+    Every case that crashes a host needs one, so it lives beside ``open_chat``.
+    """
+
+    def __init__(self, inner: Storage) -> None:
+        self._inner = inner
+        self.dead = False
+
+    def kill(self) -> None:
+        self.dead = True
+        _killed.append(self._inner)
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._inner, name)
+        if not callable(value):
+            return value
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            if self.dead:
+                return _never()
+            return value(*args, **kwargs)
+
+        return call
+
+
+async def close_killed() -> None:
+    """Close the storages of killed Harnesses; a test calls it in its cleanup."""
+
+    while _killed:
+        storage = _killed.pop()
+        try:
+            await storage.close(context)
+        except Exception:
+            pass
+
+
+async def open_killable(
+    open_storage: Callable[[str], Awaitable[Storage]], path: Any, setup: ChatSetup, *, env: Any = None
+) -> dict[str, Any]:
+    """Open a chat over the SQLite file at ``path``, as upstream's ``openKillable`` does.
+
+    ``kill()`` simulates a crash of the process running it; opening the same path again is the
+    replacement host. ``open_storage`` opens the file, so a test keeps its own SQLite backend.
+    """
+
+    inner = await open_storage(str(path))
+    storage = KillableStorage(inner)
+    opened = await open_chat(storage, setup, env=env)
+    return {**opened, "kill": storage.kill}
 
 
 async def all_entries(conversation: Any, call_context: Any = context) -> list[EntryRecord]:
@@ -586,6 +651,9 @@ __all__ = [
     "EntryRecord",
     "live_of",
     "live_state",
+    "close_killed",
+    "KillableStorage",
+    "open_killable",
     "captured_partial",
     "failing_once",
     "hang_after_partial",

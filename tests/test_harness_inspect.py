@@ -111,8 +111,8 @@ async def test_reports_paused_running_and_empty_states_with_id_ordered_submissio
     assert inspection["scheduling"] == "paused"
     assert task_records(inspection) == [held, waiter]
     assert [task["state"] for task in inspection["tasks"]] == [
-        {"kind": "ready", "migrates": False},
-        {"kind": "ready", "migrates": False},
+        {"kind": "pending", "migrates": False},
+        {"kind": "pending", "migrates": False},
     ]
     assert [record["id"] for record in inspection["submissions"]] == submission_ids
     assert [record["status"] for record in inspection["submissions"]] == ["queued", "placed"]
@@ -153,7 +153,7 @@ async def test_never_starts_scheduling_for_a_read_only_viewer() -> None:
     for _ in range(3):
         inspection = await harness.inspect(context)
         assert inspection["scheduling"] == "paused"
-        assert inspection["tasks"][0]["state"] == {"kind": "ready", "migrates": False}
+        assert inspection["tasks"][0]["state"] == {"kind": "pending", "migrates": False}
         assert (await harness.get_task(id, context))["state"]["status"] == "pending"
         await flush()
     assert runs["count"] == 0
@@ -218,7 +218,13 @@ async def test_reports_blocked_reasons_without_migrating_or_running_them() -> No
     await opened["harness"].close(context)
 
 
-async def test_reports_a_sleep_until_its_time_and_a_parked_task_as_blocked() -> None:
+async def test_reports_a_sleep_until_its_time() -> None:
+    """Upstream ``harness-sleep.test.ts:109``: a sleep shows its ``until`` and no invocation.
+
+    A cut-off task is not inspected as blocked: #49 ends it, so the parked half of this case
+    went with the parked state.
+    """
+
     clock = [1_000]
 
     async def nap(_task: Any, runtime: Any, ctx: Any) -> None:
@@ -238,9 +244,7 @@ async def test_reports_a_sleep_until_its_time_and_a_parked_task_as_blocked() -> 
             "abort": lambda _task, _runtime, _context: None,
         }
     )
-    opened = await open_tasks(
-        MemoryStorage(), [Nap], {"now": lambda: clock[0], "settings": {"restart_limit": 1}}
-    )
+    opened = await open_tasks(MemoryStorage(), [Nap], {"now": lambda: clock[0]})
     harness = opened["harness"]
     root = await harness.root(context)
     id = await root.commit(

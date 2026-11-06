@@ -250,6 +250,39 @@ PROGRESS_COMMIT: CommitOptions = {"persistence": {"kind": "deferred"}}
 
 RUN_TASK_KINDS = frozenset({GENERATION_TASK_NAME})
 
+LIMITS_RESTARTS = frozenset({*RUN_TASK_KINDS, TOOL_TASK_KIND, COMPACTION_TASK_KIND})
+"""Built-in task kinds that end themselves once cut off ``settings.restart_limit`` times
+(``TaskRecord.restarts``); the scheduler faults a task of any other kind instead (spec §5.4).
+"""
+
+
+def cut_off_too_often(task: Mapping[str, Any], runtime: Any) -> bool:
+    """Whether ``task`` was cut off ``settings.restart_limit`` times in a row, so its phase ends it
+    instead of running again.
+
+    The settings are read only for a task that was cut off at all, so the normal path resolves the
+    host's settings nothing more often than before the limit applied to every kind.
+    """
+
+    restarts = task.get("restarts")
+    return bool(restarts is not None and restarts >= runtime.settings.restart_limit)
+
+
+def salvageable(task: Mapping[str, Any], runtime: Any) -> bool:
+    """Whether a task at the limit may still do the cleanup it does when it ends, such as converting a
+    partial: only at the limit. Past it, that cleanup may be what cut the task off, so it ends without
+    it.
+    """
+
+    return bool(int(task.get("restarts") or 0) <= runtime.settings.restart_limit)
+
+
+def cut_off_count(task: Mapping[str, Any]) -> str:
+    """How often a task was cut off, for a message: ``once``, or ``3 times in a row``."""
+
+    restarts = int(task.get("restarts") or 0)
+    return "once" if restarts == 1 else f"{restarts} times in a row"
+
 
 async def start_generation(
     tx: Transaction,
@@ -521,6 +554,7 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
 __all__ = [
     "COMPACTION_TASK_KIND",
     "GENERATION_TASK_NAME",
+    "LIMITS_RESTARTS",
     "CompactionFailure",
     "CompactionStatus",
     "LiveDoc",
@@ -540,6 +574,8 @@ __all__ = [
     "clear_compaction_failure",
     "clear_progress",
     "compaction_status",
+    "cut_off_count",
+    "cut_off_too_often",
     "end_run",
     "fail_compaction_status",
     "finish_slot",

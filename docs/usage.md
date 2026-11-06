@@ -301,15 +301,21 @@ Details worth knowing:
 - **Pacing timers.** `runtime.set_timer(callback, delay_ms)` arms a non-durable host timer for work
   inside a phase, such as a throttled progress commit; the invocation's end disarms it, and calling
   it after the end arms nothing.
-- **Restarts and parking.** Open counts a task a crash, eviction, or reset cut off in
-  `TaskRecord.restarts` and writes it back as `pending` with the count one higher. A state the task
-  commits itself that differs from its current one is progress and clears the count; a close is not
-  a crash, so the tasks it stops come back `pending` uncounted. At `settings.restart_limit` (default
-  `5`, `math.inf` never parks) the task is **parked**: `inspect()` and the task graph show
-  `{"kind": "blocked", "reason": "restart_limit"}`, it is not active in `harness.wake()`, and
-  `harness.retry_task(id, context)` runs it again. An abort mark
-  starts the count over and still runs a parked task's abort handler; an abort handler cut off that
-  many times ends the task `faulted` with detail `{"reason": "restart_limit"}`.
+- **Restarts.** Open counts a task a crash, eviction, or reset cut off in `TaskRecord.restarts` and
+  writes it back as `pending` with the count one higher. A state the task commits itself that differs
+  from its current one is progress and clears the count; a close is not a crash, so the tasks it stops
+  come back `pending` uncounted. At `settings.restart_limit` (default `5`, `math.inf` never ends a
+  task for it) a task ends visibly instead of running again: a tool call settles with an error result
+  carrying the `restart_limit` diagnostic and its task fails with detail
+  `{"reason": "restart_limit"}`, a compaction fails into `pi.live.compactionFailure`, a generation
+  ends its run with `pi.live.runFailure` reason `restart_limit` (a run that answered already ends
+  without a failure), and a task of an extension's kind ends `faulted` with detail
+  `{"reason": "restart_limit"}`, reported as `task_faulted`. A built-in task that ends itself this way
+  is reported as `task_interrupted` with its `restarts`, so a host keeps a crash-loop signal. Nothing
+  is parked and there is no entry point that runs a cut-off task again: to do the work again, submit
+  it again. Raising `settings.restart_limit` before the task is next reserved lets it run longer. An
+  abort mark starts the count over and still runs the abort handler; an abort handler cut off that many
+  times ends the task `faulted` with detail `{"reason": "restart_limit"}`.
 
 ## The Harness
 
@@ -373,9 +379,9 @@ timer for sleeps: it calls `on_wake(wake)` after open and whenever the value cha
 arms its own wakeup, such as a Durable Object alarm, and calls `resume()` when it fires. `resume()`
 also makes due sleeps runnable, which is how a wakeup resumes them.
 
-A parked task, a `completing` task, and a wait on a live task do not count as active; the work they
-wait for does. A task no definition can take is not active either: only a registry change, or
-`retry_task()` for a parked task, can let it run, and either offers `on_wake` the new value.
+A `completing` task and a wait on a live task do not count as active; the work they wait for does. A
+task no definition can take is not active either: only a registry change can let it run, and it offers
+`on_wake` the new value.
 
 ### Conversations
 

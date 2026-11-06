@@ -1004,7 +1004,11 @@ async def test_rejects_details_still_waiting_when_the_call_is_aborted_during_aft
 
     add_tool(setup.registry, tool("slow", slow))
 
-    async def after_tool(_call: Any, _result: Any, _api: Any, call_context: Any) -> Any:
+    async def after_tool(_call: Any, result: Any, _api: Any, call_context: Any) -> Any:
+        # The abort handler's result runs the hooks too (#11043); only the executed call's waits
+        # (`harness-tools.test.ts:1268`). Without this guard the case hangs on the abort invocation.
+        if any(item.get("code") == "aborted" for item in result.get("diagnostics") or ()):
+            return None
         in_after_tool.set()
         await aborted(call_context.abort_signal)
         return None

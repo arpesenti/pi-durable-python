@@ -225,15 +225,23 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
     `tests/test_harness_view.py:676`. `ConversationViews.observe` does take a window
     (`src/pi_durable/harness/view.py:169`), so nothing blocks translating them; no open ticket holds
     them, and naming their owner is #52's.
-- **A task cut off at open reports nothing until #49.** Upstream v1.5.0 has no parked task: its case
-  `test/harness-blocked.test.ts:136` faults an extension's task cut off `settings.restart_limit`
-  times in a row at open and reports `{kind: "task_faulted", reason: "restart_limit"}` with the
-  message `Task <id> (<kind>) was cut off 3 times without progress`. The port still parks — the
-  parked state, its `restart_limit` blocked reason, `retry_task()`, and the wake exclusion are #49's
-  to delete — and 1.5.0 carries no report kind for a task that is blocked but not ended, so the
-  `task_parked` report #34 deleted has no replacement yet.
-  `test_harness_blocked.py::test_interim_parked_task_reports_nothing_until_49` is the port-side
-  interim case that stands in for the upstream one until #49 replaces it.
+- **#49 ends a cut-off task instead of parking it.** Upstream v1.5.0 has no parked task: a task cut
+  off `settings.restart_limit` times in a row ends, each kind visibly (spec §5.4). What landed for it:
+  `test_harness_blocked.py::test_faults_an_extension_task_cut_off_restart_limit_times_instead_of_running_it_again`
+  is `test/harness-blocked.test.ts:136`, faulting an extension's task with the message
+  `Task <id> (<kind>) was cut off 3 times without progress` and one `task_faulted` report of reason
+  `restart_limit`; `tests/test_harness_restart_failure.py` translates the three upstream cases of
+  `test/harness-restart-failure.test.ts` for the built-in kinds — a tool call settled with an error
+  result carrying the `restart_limit` diagnostic and a task failed with that detail, a compaction
+  failed into `compactionFailure`, and a generation ending its run `unanswered` with `runFailure`
+  reason `restart_limit` — each also reported `task_interrupted` with its `restarts`, and
+  `test_harness_after_run.py::test_ends_an_answered_run_completed_without_a_failure_once_finish_is_cut_off`
+  is the answered case, which ends `completed` with no failure and keeps what is queued. Deleted with
+  it: the parked state, its `restart_limit` blocked reason of `BlockedReason` and `TaskInspection`,
+  `TaskScheduler.retry`, `Harness.retry_task`, and the wake exclusion, all of which 1.5.0 removed
+  (`Harness.retryTask()`, the `restart_limit` blocked reason, and the `task_parked` report are gone
+  upstream). The `task_parked` kind #34 deleted stays deleted; `task_interrupted` and `task_faulted`
+  carry the crash-loop signal in its place.
 - **The state getters' suite, translated rather than dropped.** Upstream 1.5.0 deletes
   `documentState()`, `ConversationHandle.viewState()`, the task-graph state getter, and
   `subscribeCommits()`, so `test_session_states.py` went with them. Each guarantee it carried is

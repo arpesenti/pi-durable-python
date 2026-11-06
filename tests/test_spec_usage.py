@@ -38,7 +38,7 @@ from pi_durable.context import Context
 from pi_durable.harness.types import HarnessSettings, Report, TaskRuntime, Wake
 from pi_durable.session.transaction import Transaction
 from pi_durable.tools import create_bash_tool, create_edit_tool, create_read_tool
-from pi_durable.types import EntryDraft, EntryId, RunningTask, Storage, TaskId
+from pi_durable.types import EntryDraft, EntryId, RunningTask, Storage
 
 # ─── Names the spec leaves to the application ────────────────────────────────
 
@@ -159,12 +159,6 @@ def report_to_a_breaker(report: Report) -> None:
     if kind == "task_faulted" and report.get("reason") == "restart_limit":
         _ = report["task"]["id"]
         _ = report["error"]
-
-
-async def retry_a_parked_task(harness: Harness, id: TaskId, context: Context) -> None:
-    await harness.retry_task(id, context)
-    if harness.wake()["active"]:
-        harness.resume()
 
 
 def settings_from_a_function() -> HarnessSettings:

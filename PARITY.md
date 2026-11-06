@@ -133,7 +133,6 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `DEFAULT_HARNESS_IDENTITY` | value | — | — | excluded (pi-ai client identity; see ADR 0002) |
 | `Harness` | value | `Harness` | test_harness_tasks.py, test_harness_ownership.py, test_harness_lifecycle.py, test_harness_cancellation_barrier.py, test_harness_tasks_recovery.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_storage_failure.py, test_harness_submissions.py, test_harness_inbox.py, test_harness_input_entries.py, test_harness_generation.py, test_harness_generation_recovery.py, test_harness_usage.py, test_harness_conversations.py, test_harness_inspect.py, test_harness_sleep.py, test_harness_blocked.py, test_harness_reports.py, test_harness_host_inputs.py, test_harness_failed_run_inbox.py | tested |
 | `Harness.wake` | value | `Harness.wake` | test_harness_sleep.py, test_harness_blocked.py | tested |
-| `Harness.retryTask` | value | `Harness.retry_task` | test_harness_blocked.py | tested |
 | `safeNow` | value | `safe_now` | test_harness_storage_failure.py, test_harness_reports.py | tested |
 | `SCHEDULER_INDEX_SIZES` | value | `Harness.scheduler_index_sizes` | test_harness_scheduler_retention.py | tested |
 
@@ -157,7 +156,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
 | `NestedToolSummary` | type | `NestedToolSummary` | test_harness_nested_tools.py | tested |
 | `RunFailure` | type | `RunFailure` | — | planned (1.5.0: why the newest run ended without an answer, kept until a run starts; #48) |
-| `RunFailureReason` | type | `RunFailureReason` | test_harness_run_failure.py, test_harness_turn_limit.py, test_harness_continue.py | tested (the whole 1.5.0 union, and a run end produces `model_error`, `no_model`, `aborted`, `reset`, `faulted`, `orphaned`, `interrupted`, `nothing_to_answer`, and `turn_limit`; `restart_limit` is in the union and no run end produces it: the cutoff that owes it is #49's) |
+| `RunFailureReason` | type | `RunFailureReason` | test_harness_run_failure.py, test_harness_turn_limit.py, test_harness_continue.py | tested (the whole 1.5.0 union, and a run end produces `model_error`, `no_model`, `aborted`, `reset`, `faulted`, `orphaned`, `interrupted`, `nothing_to_answer`, `turn_limit`, and `restart_limit` (the generation cut off `settings.restart_limit` times in a row ends its run with it: test_harness_restart_failure.py)) |
 | `ToolSlot` | type | `ToolSlot` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_deltas.py | tested (including the `unoffered` flag a call to a tool the request did not offer carries) |
 
 ### `./harness/provider.ts` → `pi_durable.harness.provider`
@@ -279,7 +278,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `SettledTask` | type | `SettledTask` | test_harness_tasks.py | tested |
 | `Submission` | type | `Submission` | test_harness_submissions.py, test_harness_inbox.py | tested |
 | `SubmissionDraft` | type | `SubmissionDraft` | test_harness_submissions.py, test_harness_input_entries.py | tested |
-| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py, test_harness_inspect.py, test_harness_sleep.py, test_harness_blocked.py | tested (including `sleeping` and `blocked` `restart_limit`) |
+| `TaskInspection` | type | `TaskInspection` | test_harness_cancellation_barrier.py, test_harness_inspect.py, test_harness_sleep.py, test_harness_blocked.py | tested (including `sleeping` and `blocked`; `pending` is the shape of a reservable task, as upstream spells it) |
 | `ToolControl` | type | `ToolControl` | test_harness_tools.py, test_harness_tools_recovery.py | tested (a boolean `terminate`; only `True` ends a round) |
 | `ToolDiagnostic` | type | `ToolDiagnostic` | test_harness_tools.py, test_harness_live_deltas.py | tested |
 | `ToolExecutionApi` | type | `ToolExecutionApi` | test_harness_tools.py, test_harness_tools_recovery.py, test_harness_ownership.py, test_harness_nested_tools.py, test_harness_nested_tools_restart.py, test_harness_structured_output.py | tested (including `now()`) |
@@ -669,7 +668,7 @@ SQLite backend and migrations.
 | 5.1 Definition | tested for what 1.5.0 adds here: `TaskRuntime.commit` takes the `options` a commit takes, which is how a running task's progress commits are deferred (`src/harness/types.ts:843`, `PROGRESS_COMMIT` at `src/harness/live.ts:230-235`); #47 |
 | 5.2 Effect sandwich | tested |
 | 5.3 Terminal tasks | tested |
-| 5.4 Scheduler, abort, and ownership | planned (a task cut off `restart_limit` times in a row ends instead of parking, with the per-task-kind outcome and `task_interrupted`, and the scheduler decides in recorded regions; #48, #49) |
+| 5.4 Scheduler, abort, and ownership | tested (a task cut off `restart_limit` times in a row ends instead of running again, each kind visibly: a tool call settles an error result with the `restart_limit` diagnostic built from its slot, a compaction fails into `compactionFailure`, a generation ends its run `restart_limit` (or, having answered, ends completed by crashes), and a task of an extension's kind is faulted by the scheduler; the built-ins that end themselves are reported `task_interrupted`, and nothing parks: no `retry_task()`, no `restart_limit` blocked reason, no wake exclusion (test_harness_restart_failure.py, test_harness_blocked.py, test_harness_after_run.py). The scheduler decides in recorded regions; #48, #49) |
 | 5.5 Structured concurrency | tested (the tasks an `afterRun` hook asks for are created as the generation's own children, so an idle wait stays busy until they are terminal, Stop reaches them, and aborting one on its own still ends the run normally: test_harness_after_run.py; #48) |
 | 5.6 Sleeping, timers, and wakeups | planned (`on_wake` runs in a microtask the line never waits for, and the foreground timer now also arms a deferred commit's deadline; #47) |
 | 6 Submissions and inbox | tested (continue submissions, `when_idle="reject"` with `ConversationIdle`, and `submit(tx, draft)` inside a commit landed with #50: test_harness_continue.py, test_harness_submit_in_commit.py. The answer-resolves-while-busy rule landed with #48: a run that answered keeps `pi.live.run`, with an empty ID list and `run.afterRun` set, until the tasks its `afterRun` hooks asked for are terminal, so a queued input waits behind an answer already settled -- test_harness_after_run.py asserts the wait resolves at the answer and that idle does not settle until the task ends; the rest of that upstream suite is named there |

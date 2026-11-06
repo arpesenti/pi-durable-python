@@ -1,6 +1,6 @@
 """Translated upstream ``harness-after-run`` cases: a run that answered waits for its run-end tasks.
 
-Upstream ``test/harness-after-run.test.ts`` holds 29 cases: 11 of them are translated here, as 12 tests
+Upstream ``test/harness-after-run.test.ts`` holds 29 cases: 14 of them are translated here, as 15 tests
 (one upstream case is translated as two). What still does not run is named below, with what it needs.
 
 A run whose answer's ``afterRun`` hooks ask for tasks keeps ``pi.live.run``, stays busy, and has already
@@ -11,18 +11,14 @@ without a failure however those tasks ended.
 
 Still not run, named so the gap cannot be lost. Each needs only the mechanism above plus what is named
 after it: a queue that fills while the tasks run; a crash before the tasks exist or in ``finish``; a
-hook reading the run's history, and that history after a compaction summarized its start; the cutoff
-reached in ``finish`` or in an after-run task, and a limit lowered so no ``task_interrupted`` is owed;
-a task that cannot run until Stop orphans it; a follow-up a task admits; a fork run idle on its
-after-run tasks; a run whose ``first`` was never recorded; a continue's history taken from a failed run
-or from its first tool round; a summary queued behind a terminate round's handoff; the held progress
-stored with commit A and asked again after an orderly close; and a failed run's first entry carried
-into ``runFailure`` alongside the run it failed on.
-
-Not this suite's gap, but named here so it stays owned: ``restart_limit`` is in the port's
-``RunFailureReason`` union and no run end produces it. It is the run end the restart cutoff owes, and
-#49 owns that -- see the deferral record in ``tests/test_harness_blocked.py`` and the note at
-``scheduler.py:504``.
+hook reading the run's history, and that history after a compaction summarized its start; a task that
+cannot run until Stop orphans it; a task of an extension's kind ending normally after the limit was
+lowered, which needs the boundary that tells a completion from an interruption before it can be told
+apart; a follow-up a task admits; a fork run idle on its after-run tasks; a run whose ``first`` was
+never recorded; a continue's history taken from a failed run or from its first tool round; a summary
+queued behind a terminate round's handoff; the held progress stored with commit A and asked again after
+an orderly close; and a failed run's first entry carried into ``runFailure`` alongside the run it failed
+on.
 
 The upstream cases still not run, in upstream order:
     "queues input during the tasks and places it after them: writes first, then steers and follow-ups",
@@ -30,16 +26,13 @@ The upstream cases still not run, in upstream order:
     "asks the hooks again after a crash before the tasks exist, and never once they do",
     "lets a hook read the run's history, tool results included",
     "lets a hook read the run's history after a compaction summarized the start of the run",
-    "ends an answered run completed, without a failure, once finish was cut off restartLimit times",
     "keeps the run busy while an after-run task cannot run, until Stop orphans it",
     "starts a fix run with a follow-up a task admits, after the tasks",
     "gives a continue after a failed run the failed run's history",
     "ends the run without asking when the hooks are deselected before finish runs",
     "starts a fork of a conversation running its after-run tasks idle",
     "gives a run without a recorded first entry its answer as first",
-    "ends the run normally when its after-run task is cut off restartLimit times",
     "reports no task_interrupted for a task that ends normally after the limit was lowered",
-    "reports no task_interrupted for a generation that ends normally after the limit was lowered in finish",
     "starts a continue's history at its first tool round when nothing failed and nothing was placed",
     "leaves a summary queued during the tasks stale behind a terminate round's handoff",
     "stores the answer's held progress with commit A, and asks again after an orderly close in finish",
@@ -48,14 +41,20 @@ The upstream cases still not run, in upstream order:
 from __future__ import annotations
 
 import asyncio
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from chat_support import (
     all_entries,
     assistant_message,
     chat_setup,
+    close_killed,
     faux_tool_call,
     open_chat,
+    open_killable,
 )
 from session_support import context
 from task_support import aborted, completed, deferred, eventually, settled
@@ -63,6 +62,7 @@ from tool_support import add_tool, tool
 
 from pi_durable import (
     GenerationTask,
+    InboxDoc,
     LiveDoc,
     MemoryStorage,
     define_entry,
@@ -71,8 +71,26 @@ from pi_durable import (
     hook,
     run_end_task,
 )
+from pi_durable.storage.sqlite.posix import open_posix_sqlite_storage
 
 TestsEntry: Any = define_entry("test.tests")
+
+_directories: list[Path] = []
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup() -> Any:
+    yield
+    await close_killed()
+    while _directories:
+        shutil.rmtree(_directories.pop(), ignore_errors=True)
+
+
+def _sqlite_path() -> Path:
+    directory = Path(tempfile.mkdtemp(prefix="pi-durable-after-run-"))
+    _directories.append(directory)
+    return directory / "session.sqlite"
+
 
 
 def probe() -> dict[str, Any]:
@@ -702,3 +720,108 @@ async def test_copies_a_failed_run_first_entry_into_run_failure() -> None:
     assert settled == [(3, {"status": "unanswered", "reason": "model_error", "detail": "boom"})]
     assert "run" not in live_state
     assert "generation" not in live_state
+
+
+async def test_ends_an_answered_run_completed_without_a_failure_once_finish_is_cut_off() -> None:
+    """Upstream ``harness-after-run.test.ts``: "ends an answered run completed, without a failure, once
+    finish was cut off restartLimit times".
+
+    The answer is already committed, so the run ends ``completed`` with no failure and no run, however
+    its ``finish`` phase was cut off; the queued item stays, as after a failed run, and the scheduler
+    still reports ``task_interrupted`` for a generation that crashes ended.
+    """
+
+    path = _sqlite_path()
+    setup = chat_setup()
+    setup.settings["restart_limit"] = 1
+    state = probe()
+    state["hook_gate"] = deferred()
+    install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await (await opened["root"].submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["asked"]) == 1)
+    await opened["root"].submit({"type": "input", "content": "later"}, context)
+    opened["kill"]()
+
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await opened["root"].wait_for_idle(context)
+    assert len(state["asked"]) == 1
+    state_now = await live(opened["harness"], opened["root"].id)
+    assert "run" not in state_now
+    assert "runFailure" not in state_now
+    inbox = await opened["harness"].snapshot(InboxDoc, opened["root"].id, context)
+    assert len(inbox["items"]) == 1
+    assert any(
+        info.get("kind") == "task_interrupted" and info.get("reason") == "restart_limit"
+        for info in setup.infos
+    )
+    await opened["harness"].close(context)
+
+
+async def test_ends_the_run_normally_when_its_after_run_task_is_cut_off_restart_limit_times() -> None:
+    """Upstream "ends the run normally when its after-run task is cut off restartLimit times".
+
+    The after-run task is cut off and the generation waiting for it is not: the scheduler faults the
+    task, the drain ends the run as it would for any terminal child, and no failure is recorded.
+    """
+
+    path = _sqlite_path()
+    setup = chat_setup()
+    setup.settings["restart_limit"] = 1
+    state = probe()
+    state["gate"] = deferred()
+    install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await (await opened["root"].submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["runs"]) == 1)
+    generation = (await live(opened["harness"], opened["root"].id))["run"]["taskId"]
+    opened["kill"]()
+    state["gate"] = None
+
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await opened["root"].wait_for_idle(context)
+    record = await opened["harness"].get_task(generation, context)
+    assert record["state"]["status"] == "terminal"
+    assert record["state"]["outcome"]["status"] == "completed"
+    assert "runFailure" not in await live(opened["harness"], opened["root"].id)
+    assert state["runs"] == ["run 1"]
+    assert any(
+        info.get("kind") == "task_faulted" and info.get("reason") == "restart_limit"
+        for info in setup.infos
+    )
+    await opened["harness"].close(context)
+
+
+async def test_reports_no_task_interrupted_for_a_generation_ended_normally_after_a_lowered_limit() -> None:
+    """Upstream "reports no task_interrupted for a generation that ends normally after the limit was
+    lowered in finish".
+
+    The phase had started under the old limit and the hooks finish their work, so the run ends as it
+    always does: lowering the limit while ``finish`` runs owes no report for crashes.
+    """
+
+    path = _sqlite_path()
+    setup = chat_setup()
+    state = probe()
+    state["hook_gate"] = deferred()
+    install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await (await opened["root"].submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["asked"]) == 1)
+    opened["kill"]()  # `finish` cut off once.
+    rerun = deferred()
+    state["hook_gate"] = rerun
+
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    opened["harness"].resume()
+    await eventually(lambda: len(state["asked"]) == 2)
+    # The host lowers the limit while the hook runs; the phase ends normally.
+    setup.settings["restart_limit"] = 1
+    rerun.resolve()
+    await opened["root"].wait_for_idle(context)
+    assert state["runs"] == ["run 2"]
+    assert [info for info in setup.infos if info.get("kind") == "task_interrupted"] == []
+    await opened["harness"].close(context)

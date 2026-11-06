@@ -68,8 +68,8 @@ from .util import (
 _SCAN_PAGE_SIZE = 256
 LIVE_STATUSES = ("pending", "running", "waiting", "sleeping", "completing")
 
-BlockedReason = Literal["missing_task", "task_too_old", "migration_failed", "restart_limit"]
-"""Why a task cannot be reserved: no definition can take it, or it is parked by the restart limit."""
+BlockedReason = Literal["missing_task", "task_too_old", "migration_failed"]
+"""Why a task cannot be reserved: no registered definition can take it."""
 
 AnyTaskRecord = TaskRecord
 RunnableTaskRecord = TaskRecord
@@ -315,6 +315,65 @@ def _missing_migration(record: Mapping[str, Any], definition: Any) -> Exception:
     )
 
 
+#: Terminal states a built-in task commits because it was cut off ``settings.restart_limit`` times, when
+#: their outcome does not say so (a failure with ``detail`` ``{reason: restart_limit}`` does), with the
+#: message the scheduler reports them ``task_interrupted`` with. Keyed by the identity of the state the
+#: phase returns, which is held so no later state can answer to the key: nothing is added to what is
+#: stored (``scheduler.ts:3008`` keeps this in a ``WeakMap``, which a dict cannot key).
+_ended_by_crashes: dict[int, tuple[str, dict[str, Any]]] = {}
+
+
+def ended_by_crashes(state: dict[str, Any], message: str) -> dict[str, Any]:
+    """``state``, marked as ending its task for crashes (spec §5.4).
+
+    The scheduler reports such a terminal state ``task_interrupted`` with ``message`` whatever its
+    outcome: a run that already answered ends ``completed``, without a failure, and still says crashes
+    ended it. The mark rides the object the phase returns, never what it stores.
+    """
+
+    _ended_by_crashes[id(state)] = (message, state)
+    return state
+
+
+def ended_by_crashes_message(state: Mapping[str, Any]) -> str | None:
+    """The message ``state`` was marked with, if it was: a state is read once, so the mark goes with it."""
+
+    marked = _ended_by_crashes.pop(id(state), None)
+    if marked is None or marked[1] is not state:
+        return None
+    return marked[0]
+
+
+def interruption_of(error: Mapping[str, Any]) -> Literal["restart_limit", "interrupted"] | None:
+    """Why a failed outcome's error says crashes ended the task (``detail.reason``), if it does."""
+
+    detail = error.get("detail")
+    if not isinstance(detail, Mapping):
+        return None
+    reason = detail.get("reason")
+    return reason if reason in ("restart_limit", "interrupted") else None
+
+
+def interrupted_report(state: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What a terminal state says crashes ended the task for, if anything: its message, reason, and
+    the task's restart count; ``None`` when the state says nothing of crashes.
+    """
+
+    if state["status"] != "terminal":
+        return None
+    restarts = int(record.get("restarts") or 0)
+    outcome = cast(Mapping[str, Any], state["outcome"])
+    if outcome["status"] == "failed":
+        error = cast(Mapping[str, Any], outcome["error"])
+        reason = interruption_of(error)
+        if reason is not None:
+            return {"message": str(error["message"]), "reason": reason, "restarts": restarts}
+    marked = ended_by_crashes_message(state)
+    if marked is not None:
+        return {"message": marked, "reason": "restart_limit", "restarts": restarts}
+    return None
+
+
 def _outdated_reason(task: AnyTask | None, record: Mapping[str, Any]) -> ReportReason:
     """Why the replacement definition cannot take a running task: it is gone, older than the task,
     or newer without a migration (spec §10.1, the reason of a ``task_outdated`` report).
@@ -375,6 +434,7 @@ class TaskScheduler:
         on_wake: Callable[[Wake], Any] | None,
         timers: Timers,
         write_at_close: Callable[[Callable[[], Sequence[StorageWrite]]], Awaitable[None]],
+        limits_restarts: Callable[[str], bool],
         settle_outcome: Callable[[Transaction, AnyTaskRecord, Mapping[str, Any]], Awaitable[None]],
         withdraw_inputs: Callable[[Transaction, ConversationId, str], Awaitable[None]],
         conversation: Callable[[ConversationId, Any, Context], Awaitable[ConversationHandle | None]],
@@ -393,6 +453,7 @@ class TaskScheduler:
         self._on_wake = on_wake
         self._timers = timers
         self._write_at_close = write_at_close
+        self._limits_restarts = limits_restarts
         self._report = report
         self._settle_outcome = settle_outcome
         self._withdraw_inputs = withdraw_inputs
@@ -427,8 +488,6 @@ class TaskScheduler:
         self._blocked_listeners: set[Callable[[], None]] = set()
         # A registry snapshot that threw for the task graph was reported; it is read per record.
         self._snapshot_reported = False
-        # Tasks a pass left out as parked; each pass checks them again, as restart_limit may have risen.
-        self._parked_tasks: set[TaskId] = set()
         self._reconcile_scheduled = False
         # Reconcile passes underway with work; their commits finalize held outcomes and mark cascades.
         self._reconciling_work = 0
@@ -504,9 +563,9 @@ class TaskScheduler:
     async def open(self, context: Context) -> None:
         """Load live tasks and change surviving ``running`` tasks back to ``pending``, counting the restart.
 
-        A task that reaches the restart limit this way is parked; 1.5.0 has no report for it, and #49
-        ends it instead, reported by its kind. Read-only, it only loads them: a ``running`` task stays
-        as committed, running in another process.
+        Dispatches nothing: a task cut off ``settings.restart_limit`` times ends when it is next
+        reserved, by its own kind or by the scheduler. Read-only, it only loads them: a ``running``
+        task stays as committed, running in another process.
         """
 
         self._session.observe_stored_commits(self._observe)
@@ -566,26 +625,9 @@ class TaskScheduler:
         self._wake_due()
         self._kick()
 
-    async def retry(self, id: TaskId, context: Context) -> None:
-        """Run a task parked by the restart limit again: clear its count and enable scheduling.
-
-        Does nothing for a task that is not parked; rejects for an unknown one.
-        """
-
-        async def clear(tx: Transaction) -> None:
-            current = await tx.task(id)
-            if current is None:
-                raise ValueError(f"Task {id} does not exist")
-            status = current["state"]["status"]
-            if status in ("terminal", "completing") or not self._parked(current):
-                return
-            tx.set_task(progressed(current))
-
-        await self._session.commit_with(clear, context)
-        self.resume()
-
     def blocked_reason(self, record: Mapping[str, Any]) -> BlockedReason | None:
-        """Why a live task cannot run here, if it cannot: its definition, or the restart limit.
+        """Why a live task cannot run here, if it cannot: its definition is missing, too old, or failed
+        to migrate.
 
         A running task, an abort-marked one, and one holding its outcome are never blocked.
         """
@@ -596,8 +638,6 @@ class TaskScheduler:
         # An abort request runs its handler or orphans the task; a `restart` mark waits for the definition.
         if record.get("abortRequested") and record.get("abortReason") is None:
             return None
-        if self._parked(record):
-            return "restart_limit"
         try:
             snapshot = self._registry.snapshot()
         except Exception as error:
@@ -648,8 +688,6 @@ class TaskScheduler:
                 continue
             # A sleep not yet due is not active; a due one may run, so it falls through.
             if status == "sleeping" and not record.get("abortRequested") and state["until"] > now:
-                continue
-            if self._parked(record):
                 continue
             # An abort invocation waits for the live work below it, which counts itself.
             if record.get("abortRequested") and self._waiting_on(record, True):
@@ -1497,14 +1535,6 @@ class TaskScheduler:
             if record is not None and not self._not_due(record):
                 self._runnable.add(id)
 
-    def _parked(self, record: Mapping[str, Any]) -> bool:
-        """A task cut off ``restart_limit`` times in a row; an abort mark still runs its abort handler."""
-
-        restarts = record.get("restarts")
-        return bool(
-            not record.get("abortRequested") and restarts is not None and restarts >= self._restart_limit()
-        )
-
     def _about_task(self, task: Any) -> dict[str, Any]:
         """What a report about a task's own code says of it: the task, and the extension that installed
         the definition whose code ran (the current one's when the task does not name one)."""
@@ -1523,22 +1553,6 @@ class TaskScheduler:
                 # A registry that throws is reported where it is read for scheduling.
                 extension = None
         return {"task": report, **optional_extension(extension)}
-
-    def _unpark_raised(self) -> None:
-        """Make parked tasks a raised ``restart_limit`` no longer parks candidates again."""
-
-        unparked = False
-        for id in list(self._parked_tasks):
-            record = self._live.get(id)
-            if record is not None and self._parked(record):
-                continue
-            self._parked_tasks.discard(id)
-            if record is None:
-                continue
-            self._runnable.add(id)
-            unparked = True
-        if unparked:
-            asyncio.get_running_loop().call_soon(self._notify_blocked)
 
     def _restart_limit(self) -> int | float:
         """``settings.restart_limit``, or the default when the host's settings throw."""
@@ -1625,7 +1639,6 @@ class TaskScheduler:
             # Every pass picks up sleeps whose time has come: a pass started by any change may be
             # the first to run after a deadline.
             self._wake_due()
-            self._unpark_raised()
             # The candidates are chosen in a decision region: a record an earlier admitted commit
             # replaced is reread once that commit publishes, so nothing is reserved on a stale one.
             plan = await self._region(self._plan_reservation, self._reload_scopes)
@@ -1634,23 +1647,20 @@ class TaskScheduler:
             if plan["cascade"]:
                 self._cascade_pending = True
                 self._schedule_reconcile()
-            for id in plan["parked"]:
-                self._runnable.discard(id)
-                if id not in self._parked_tasks:
-                    # Newly parked without a commit, as after a lowered limit.
-                    asyncio.get_running_loop().call_soon(self._notify_blocked)
-                self._parked_tasks.add(id)
             snapshot: RegistrySnapshot | None = None
-            limit = self._restart_limit()
             for record in plan["ready"]:
                 id = record["id"]
                 mode: Literal["run", "abort"] = "abort" if record.get("abortRequested") else "run"
-                # An abort handler cut off restart_limit times would run forever; nothing is left to
-                # park it for.
-                if mode == "abort" and int(record.get("restarts") or 0) >= limit:
+                # Work cut off restart_limit times in a row would run forever: an abort handler, or a
+                # phase of a kind that does not end itself at the limit, ends the task ``faulted``
+                # instead. The settings are read only for a task that was cut off at all.
+                restarts = record.get("restarts")
+                cut_off = restarts is not None and restarts >= self._restart_limit()
+                if cut_off and (mode == "abort" or not self._limits_restarts(record["kind"])):
                     message = (
-                        f"Abort handler of task {id} ({record['kind']}) was cut off "
-                        f"{record['restarts']} times"
+                        f"Abort handler of task {id} ({record['kind']}) was cut off {restarts} times"
+                        if mode == "abort"
+                        else f"Task {id} ({record['kind']}) was cut off {restarts} times without progress"
                     )
                     await self._terminate(
                         tx,
@@ -1818,7 +1828,6 @@ class TaskScheduler:
         """
 
         dropped: list[TaskId] = []
-        parked: list[TaskId] = []
         ready: list[AnyTaskRecord] = []
         cascade = False
         for id in list(self._runnable):
@@ -1833,16 +1842,12 @@ class TaskScheduler:
             if self._waiting_on(record, True) or self._not_due(record):
                 dropped.append(id)
                 continue
-            # It returns when retry() clears its restart count, or after restart_limit rose.
-            if self._parked(record):
-                parked.append(id)
-                continue
             if not record.get("abortRequested") and not record["background"]:
                 if self._below_cancelled(parent_of(record)):
                     cascade = True
                     continue
             ready.append(record)
-        return {"dropped": dropped, "parked": parked, "cascade": cascade, "ready": ready}
+        return {"dropped": dropped, "cascade": cascade, "ready": ready}
 
     def _waiting_on(self, record: Mapping[str, Any], first: bool = False) -> list[TaskId]:
         if record.get("abortRequested"):
@@ -1937,8 +1942,6 @@ class TaskScheduler:
             return {"kind": "waiting", "on": on}
         if self._not_due(record):
             return {"kind": "sleeping", "until": record["state"]["until"]}
-        if self._parked(record):
-            return {"kind": "blocked", "reason": "restart_limit"}
         fit = self._fit(record, snapshot.task(record["kind"]))
         if "reason" in fit:
             return {"kind": "blocked", **fit}
@@ -1948,7 +1951,7 @@ class TaskScheduler:
                 "reason": "migration_failed",
                 "error": _missing_migration(record, fit["task"].definition),
             }
-        return {"kind": "ready", "migrates": fit["migrates"]}
+        return {"kind": "pending", "migrates": fit["migrates"]}
 
     def _create_invocation(
         self, record: Mapping[str, Any], mode: Literal["run", "abort"], extension: str | None = None
@@ -2404,16 +2407,33 @@ class _Runtime:
         options: CommitOptions | None = None,
     ) -> asyncio.Future[None]:
         async def run() -> None:
+            interrupted: dict[str, Any] | None = None
+
             async def apply(tx: Transaction, current: ErasedRunningTask) -> None:
+                nonlocal interrupted
                 result = _invoke_change(change, tx, current)
                 if hasattr(result, "__await__"):
                     following = await cast(Awaitable[Any], result)
                 else:
                     following = result
-                if following is not None:
-                    await self._scheduler._commit_state(tx, self._invocation, current, following)
+                if following is None:
+                    return
+                # A task that ends for crashes says so (`task_interrupted`), so a host keeps a
+                # crash-loop signal; what it says is read before the state is written.
+                interrupted = interrupted_report(following, current)
+                await self._scheduler._commit_state(tx, self._invocation, current, following)
 
             await self._gated(apply, context, options)
+            if interrupted is not None:
+                self._scheduler._report(
+                    RuntimeError(interrupted["message"]),
+                    {
+                        "kind": "task_interrupted",
+                        **self._scheduler._about_task(self._invocation),
+                        "reason": interrupted["reason"],
+                        "restarts": interrupted["restarts"],
+                    },
+                )
 
         commit = asyncio.ensure_future(run())
         self._invocation.commits.add(commit)
@@ -2794,6 +2814,7 @@ __all__ = [
     "cancellation_intent",
     "conversation_node",
     "conversation_of",
+    "ended_by_crashes",
     "failed_outcome",
     "json_equal",
     "memo_of",

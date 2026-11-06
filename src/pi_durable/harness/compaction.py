@@ -32,6 +32,8 @@ from .live import (
     add_compaction_status,
     clear_compaction_failure,
     compaction_status,
+    cut_off_count,
+    cut_off_too_often,
     fail_compaction_status,
     remove_compaction_status,
     start_generation,
@@ -159,6 +161,9 @@ def compaction_policy(settings: Any, model: ModelRef) -> _Policy:
 
 
 async def _select_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    if cut_off_too_often(task, runtime):
+        await fail_cut_off(runtime, task, context)
+        return
     conversation_id = runtime.conversation_id
     agent = await runtime.agent(context)
     settings = runtime.settings
@@ -220,6 +225,9 @@ async def _select_phase(task: TaskRecord, runtime: Any, context: Context) -> Non
 
 
 async def _summarize_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    if cut_off_too_often(task, runtime):
+        await fail_cut_off(runtime, task, context)
+        return
     checkpoint = task_checkpoint(task)
     request = {key: value for key, value in checkpoint.items() if key != "phase"}
     ref = cast(ModelRef, request["model"])
@@ -308,6 +316,9 @@ async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None
     """After the backoff's sleep; a run before ``until`` sleeps again (spec section 8.7)."""
 
     checkpoint = task_checkpoint(task)
+    if cut_off_too_often(task, runtime):
+        await fail_cut_off(runtime, task, context)
+        return
     until = int(checkpoint["until"])
     request = {key: value for key, value in checkpoint.items() if key not in ("phase", "until")}
     if until > runtime.now():
@@ -668,6 +679,28 @@ async def complete(runtime: Any, context: Context) -> None:
         return {"status": "terminal", "outcome": {"status": "completed", "result": {}}}
 
     await runtime.commit(commit, context)
+
+
+async def fail_cut_off(runtime: Any, task: TaskRecord, context: Context) -> None:
+    """Fail a compaction cut off ``settings.restart_limit`` times in a row, not run it again.
+
+    The failure is recorded in ``pi.live.compactionFailure`` like any other one, and the scheduler
+    reports the task ``task_interrupted`` with its restart count (spec section 5.4).
+    """
+
+    message = f"Compaction was interrupted {cut_off_count(task)}"
+
+    async def stop(tx: Transaction) -> dict[str, Any]:
+        fail_compaction_status(await tx.doc(LiveDoc, runtime.conversation_id), runtime.task_id, message)
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": message, "detail": {"reason": "restart_limit"}},
+            },
+        }
+
+    await runtime.commit(stop, context)
 
 
 async def fail_no_model(runtime: Any, ref: ModelRef | None, context: Context) -> None:

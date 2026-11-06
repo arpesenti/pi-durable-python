@@ -39,9 +39,20 @@ from .inbox import (
     prepare_boundary,
     withdraw_queued_inputs,
 )
-from .live import GENERATION_TASK_NAME, PROGRESS_COMMIT, LiveDoc, RunEndUnanswered, end_run, start_run
+from .live import (
+    GENERATION_TASK_NAME,
+    PROGRESS_COMMIT,
+    LiveDoc,
+    RunEndUnanswered,
+    cut_off_count,
+    cut_off_too_often,
+    end_run,
+    salvageable,
+    start_run,
+)
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
+from .scheduler import ended_by_crashes
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
 from .types import AfterFailedRun, ContextView, ModelRef, PromptInput, RunSummary
 from .usage import record_usage
@@ -83,6 +94,8 @@ class RetryCheckpoint(TypedDict):
     attempt: int
     compacted: NotRequired[TaskId]
     until: int
+    poll: NotRequired[dict[str, Any]]
+    """The deferred response an interrupted poll will be polled again for."""
 
 
 class PollCheckpoint(TypedDict):
@@ -142,6 +155,9 @@ def _compact_fields(compacted: Any) -> dict[str, Any]:
 
 
 async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     conversation_id = runtime.conversation_id
     agent = await runtime.agent(context)
     settings = runtime.settings
@@ -262,6 +278,11 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
 async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     checkpoint = task_checkpoint(task)
+    # Charging the attempt may itself be what keeps failing, such as converting a huge partial: the
+    # limit ends it.
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     # The host stopped while this request was in flight: a failed attempt under the retry policy, not
     # a resend (spec section 8.3).
     if task.get("restarts") is not None:
@@ -325,13 +346,31 @@ async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     until = int(checkpoint["until"])
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     if until > runtime.now():
         await runtime.sleep_until(until, checkpoint, context)
         return
+    poll = checkpoint.get("poll")
     conversation_id = runtime.conversation_id
 
     async def retry(tx: Transaction) -> dict[str, Any]:
         live = await tx.doc(LiveDoc, conversation_id)
+        # A poll the host died during polls its response again, as the next attempt.
+        if poll is not None:
+            poll_at = runtime.now()
+            live["generation"] = {"attempt": attempt + 1, "deferred": {"pollAt": poll_at}}
+            return {
+                "status": "running",
+                "checkpoint": {
+                    "phase": "poll",
+                    "attempt": attempt + 1,
+                    **_compact_fields(compacted),
+                    **cast(dict[str, Any], poll),
+                    "pollAt": poll_at,
+                },
+            }
         live["generation"] = {"attempt": attempt + 1}
         return {
             "status": "running",
@@ -345,6 +384,10 @@ async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     """After the sleep until ``pollAt``; a run before it sleeps again (spec section 8.3)."""
 
     checkpoint = task_checkpoint(task)
+    # Cut off the limit in a row, the poll ends the run rather than fetching again.
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     # The host stopped while the poll's fetch was in flight: a failed attempt, as for a request. Checked
     # before the time, which may have moved backwards on a replacement host; a sleeping poll is not cut
     # off.
@@ -378,6 +421,9 @@ async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
 
 
 async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     checkpoint = cast(ToolsCheckpoint, task_checkpoint(task))
     assistant = checkpoint["assistant"]
     started = list(checkpoint["tools"])
@@ -425,6 +471,9 @@ async def _finish_phase(task: TaskRecord, runtime: Any, context: Context) -> Non
     """
 
     run = cast(RunSummary, task_checkpoint(task)["run"])
+    if cut_off_too_often(task, runtime):
+        await _end_answered_cut_off(runtime, task, run["answer"], context)
+        return
     prepared: list[dict[str, Any]] = []
 
     async def ask(handler: Callable[..., Any]) -> None:
@@ -467,22 +516,18 @@ async def _finish_phase(task: TaskRecord, runtime: Any, context: Context) -> Non
 async def _drain_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     """The after-run tasks are terminal, whatever their outcomes: end the run."""
 
-    await end_answered_run(runtime, task_checkpoint(task)["answer"], context)
+    answer = task_checkpoint(task)["answer"]
+    if cut_off_too_often(task, runtime):
+        await _end_answered_cut_off(runtime, task, cast(EntryId, answer), context)
+        return
+    await end_answered_run(runtime, answer, context)
 
 
 async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     checkpoint = task_checkpoint(task)
-    if checkpoint["phase"] == "poll":
-        ref = cast(ModelRef, checkpoint["model"])
-        model = runtime.models.get_model(ref["provider"], ref["modelId"])
-        if model is not None:
-            try:
-                await runtime.models.cancel_deferred(
-                    model, cast(JsonObject, checkpoint["handle"]), {"signal": runtime.signal}
-                )
-            except BaseException as error:
-                # A provider call such as cancelling a deferred response is a host callback.
-                runtime.report(error, {"kind": "host", "callback": "models"})
+    polled = _deferred_of(checkpoint)
+    if polled is not None:
+        await _cancel_deferred(runtime, polled, context)
     conversation_id = runtime.conversation_id
     # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results,
     # unoffered ones ``tool_unavailable``.
@@ -1196,15 +1241,7 @@ async def interrupted(
         text = f"The host stopped while the deferred answer was fetched, on attempt {attempt}"
     # A run that ends does not leave the provider's job running.
     if not retry and polled is not None:
-        ref = cast(ModelRef, polled["model"])
-        model = runtime.models.get_model(ref["provider"], ref["modelId"])
-        if model is not None:
-            try:
-                await runtime.models.cancel_deferred(
-                    model, cast(JsonObject, polled["handle"]), {"signal": runtime.signal}
-                )
-            except BaseException as error:
-                runtime.report(error, {"kind": "host", "callback": "models"})
+        await _cancel_deferred(runtime, polled, context)
     conversation_id = runtime.conversation_id
 
     async def apply(tx: Transaction) -> dict[str, Any]:
@@ -1242,6 +1279,98 @@ async def interrupted(
                 "error": {"message": text, "detail": {"reason": "interrupted"}},
             },
         }
+
+    await runtime.commit(apply, context)
+
+
+def _deferred_of(checkpoint: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The deferred response a checkpoint polls, or will poll again after a retry's backoff."""
+
+    if checkpoint["phase"] == "poll":
+        return checkpoint
+    if checkpoint["phase"] == "retry":
+        return cast(Mapping[str, Any] | None, checkpoint.get("poll"))
+    return None
+
+
+async def _cancel_deferred(runtime: Any, polled: Mapping[str, Any], context: Context) -> None:
+    """Cancel a deferred response no attempt will poll again; a failure is reported, never thrown."""
+
+    ref = cast(ModelRef, polled["model"])
+    model = runtime.models.get_model(ref["provider"], ref["modelId"])
+    if model is None:
+        return
+    try:
+        await runtime.models.cancel_deferred(
+            model, cast(JsonObject, polled["handle"]), {"signal": runtime.signal}
+        )
+    except BaseException as error:
+        # A provider call such as cancelling a deferred response is a host callback.
+        runtime.report(error, {"kind": "host", "callback": "models"})
+
+
+async def _end_cut_off(runtime: Any, task: TaskRecord, context: Context) -> None:
+    """End a run whose generation was cut off ``settings.restart_limit`` times in a row (spec §5.4).
+
+    At the limit it still keeps a committed partial as an aborted entry and cancels a deferred response
+    it polled; past the limit that cleanup may be what cut it off, so it ends without it.
+    """
+
+    checkpoint = task_checkpoint(task)
+    text = f"The generation was interrupted {cut_off_count(task)} in its {checkpoint['phase']} phase"
+    salvage = salvageable(task, runtime)
+    polled = _deferred_of(checkpoint)
+    if salvage and polled is not None:
+        await _cancel_deferred(runtime, polled, context)
+    conversation_id = runtime.conversation_id
+
+    async def apply(tx: Transaction) -> dict[str, Any]:
+        failure = await _prepare_failure(tx, runtime)
+        live = await tx.doc(LiveDoc, conversation_id)
+        if salvage:
+            await convert_partial(tx, live, conversation_id)
+        await _end_failed_run(
+            tx,
+            runtime,
+            live,
+            failure,
+            {"status": "unanswered", "reason": "restart_limit", "detail": text},
+        )
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": text, "detail": {"reason": "restart_limit"}},
+            },
+        }
+
+    await runtime.commit(apply, context)
+
+
+async def _end_answered_cut_off(
+    runtime: Any, task: TaskRecord, answer: EntryId, context: Context
+) -> None:
+    """End a run that answered once its ``finish`` or ``drain`` phase was cut off the limit (§5.4).
+
+    The run answered, so it ends ``completed``, without a failure and without the tasks it would still
+    have waited for -- marked, so the scheduler still reports it ``task_interrupted``. Queued items stay
+    queued, as after a failed run.
+    """
+
+    checkpoint = task_checkpoint(task)
+    text = f"The generation was interrupted {cut_off_count(task)} in its {checkpoint['phase']} phase"
+    conversation_id = runtime.conversation_id
+
+    async def apply(tx: Transaction) -> dict[str, Any]:
+        live = await tx.doc(LiveDoc, conversation_id)
+        end_run(tx, live, runtime.task_id, {"status": "done", "answer": answer})
+        return ended_by_crashes(
+            {
+                "status": "terminal",
+                "outcome": {"status": "completed", "result": {"entryId": answer}},
+            },
+            text,
+        )
 
     await runtime.commit(apply, context)
 

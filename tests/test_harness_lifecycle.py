@@ -259,7 +259,7 @@ async def test_runs_what_the_registry_holds_at_resume() -> None:
     installed = define("v1")
     first["registry"].install(define_extension({"name": "late", "tasks": [installed]}))
     inspection = await first["harness"].inspect(context)
-    assert inspection["tasks"][0]["state"] == {"kind": "ready", "migrates": False}
+    assert inspection["tasks"][0]["state"] == {"kind": "pending", "migrates": False}
     first["registry"].uninstall(define_extension({"name": "late"}))
     replacement = define("v2")
     first["registry"].install(define_extension({"name": "late", "tasks": [replacement]}))

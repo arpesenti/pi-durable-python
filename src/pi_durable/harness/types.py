@@ -444,7 +444,8 @@ LISTENER: ReportInfo = {"kind": "listener_error"}
 
 
 DEFAULT_RESTART_LIMIT = 5
-"""Default ``settings.restart_limit``: restarts in a row before a task is parked."""
+"""Default ``settings.restart_limit``: restarts in a row after which a task ends instead of
+running again (``agent.ts:57``)."""
 
 DEFAULT_AFTER_FAILED_RUN: AfterFailedRun = "keep"
 """Default ``settings.after_failed_run``: a failed run leaves its queued inputs queued."""

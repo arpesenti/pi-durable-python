@@ -29,7 +29,7 @@ from ..types import (
 from .agent import AgentDoc, configure, create_agent, resolve_agent, resolve_settings
 from .compaction import create_compaction
 from .inbox import InboxDoc, QueueModes, withdraw_queued_inputs
-from .live import LiveDoc, settle_scheduler_outcome, start_generation
+from .live import LIMITS_RESTARTS, LiveDoc, settle_scheduler_outcome, start_generation
 from .provider import ProviderDoc
 from .registry import BUILTIN_TASKS
 from .scheduler import TaskScheduler
@@ -331,6 +331,7 @@ class Harness(SessionImpl):
                 lambda error: report(error, host_error("setTimer")),
             ),
             write_at_close=self.write_at_close,
+            limits_restarts=lambda kind: kind in LIMITS_RESTARTS,
             settle_outcome=lambda tx, record, outcome: self._settle_outcome(tx, record, cast(Any, outcome)),
             withdraw_inputs=self._withdraw_inputs,
             conversation=lambda id, binding, call_context: self._bound_conversation(
@@ -462,12 +463,6 @@ class Harness(SessionImpl):
 
         self.assert_usable()
         return self._tasks.wake()
-
-    async def retry_task(self, id: TaskId, context: Context) -> None:
-        """Run a task parked by ``settings.restart_limit`` again."""
-
-        self.assert_usable()
-        await self._tasks.retry(id, context)
 
     async def get_task(self, id: TaskId, context: Context) -> TaskRecord | None:
         return await self.read_on_line(lambda line: line.task(id, context))
