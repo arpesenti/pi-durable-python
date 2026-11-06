@@ -127,14 +127,16 @@ the 1.4.0 record. On top of them:
 - **The attached-host storage subpath, pi-schema, and the telemetry host-callback member.** Excluded
   by [ADR 0003](./adr/0003-upstream-1-5-0-scope.md), each with its reason on the matching `excluded`
   row of `PARITY.md`'s **Excluded subpaths** table.
-- **`NativeWatchCall`.** #56 excludes it by name. Upstream v1.5.0 holds it only as a Chord re-export
-  (`src/index.ts:1`) and names it nowhere else in its `src/` or `test/`; a native watch is one a Chord
-  host opens on its own store, and this port has no Chord host to open one — Chord is an internal
-  implementation detail ([ADR 0001](./adr/0001-parity-baseline-and-boundary.md), and the `Chord` row
-  of `PARITY.md`'s deviations) — while its only way to open a watch is `Conversation.watch()`, whose
-  listener takes `WatchCall`. No port type plays the role, so the name goes under ADR 0003's lockstep
-  rule rather than riding into a release as a `planned` row for a host this port never had. The reason
-  a reader of the matrix needs is on `PARITY.md`'s `excluded` row, and
+- **`NativeWatchCall`.** #56 excludes it by name. Upstream v1.5.0 re-exports it as one of four Chord
+  watch types (`src/index.ts:1`) and names it nowhere else in its `src/` or `test/`. What durable hands
+  a listener is `WatchCall`, and an observer's `advance`/`end` take `WatchCall`/`WatchEnd`
+  (`src/types.ts:1112-1115`); this port's watches are opened only by `Conversation.watch()` and hand
+  their listener exactly that. Chord is an internal implementation detail here
+  ([ADR 0001](./adr/0001-parity-baseline-and-boundary.md), and the `Chord` row of `PARITY.md`'s
+  deviations), so the port holds no Chord host that could hand a listener Chord's own native call and
+  no port type plays the role: the name goes under ADR 0003's lockstep rule rather than riding into a
+  release as a `planned` row for a host this port never had. The reason a reader of the matrix needs is
+  on `PARITY.md`'s `excluded` row, and
   `test_types.py::test_the_public_types_exclude_the_native_watch_call_by_name` pins it beside the
   three watch re-exports of that same upstream line the port does carry.
 

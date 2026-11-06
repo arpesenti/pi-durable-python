@@ -355,10 +355,12 @@ def test_the_public_types_exclude_the_native_watch_call_by_name() -> None:
 
     ``src/index.ts:1`` re-exports four Chord watch types — ``NativeWatchCall``, ``WatchCall``,
     ``WatchEnd``, ``WatchHandle`` — and names ``NativeWatchCall`` nowhere else in its ``src/`` or
-    ``test/``. A native watch is one a Chord host opens on its own store; this port has no Chord host
-    to open one, because Chord is an internal implementation detail here (ADR 0001, and the ``Chord``
-    row of ``PARITY.md``'s deviations), and its only way to open a watch is ``Conversation.watch()``,
-    whose listener takes the :data:`WatchCall`. The three the port does play are pinned beside the one
+    ``test/``. What durable hands a listener is ``WatchCall``, and an observer's ``advance``/``end``
+    take ``WatchCall``/``WatchEnd`` (``src/types.ts:1112-1115``); this port opens a watch only through
+    ``Conversation.watch()`` and hands its listener exactly that, and Chord is an internal
+    implementation detail here (ADR 0001, and the ``Chord`` row of ``PARITY.md``'s deviations), so no
+    Chord host exists that could hand a listener Chord's own native call. The three the port does play
+    are pinned beside the one
     it excludes, so ``NativeWatchCall`` is a named exclusion in the tree rather than an omission a
     later reader has to re-derive (ADR 0003 keeps the port in lockstep with what upstream ships, not
     with what it re-exports from a host this port never had).
