@@ -511,8 +511,10 @@ Only a blocking compaction makes the run wait; a background one runs beside it. 
   one listener. `ConversationTranscript` pages a client past that window.
 - `harness.observe_task_graph(observer, context)` and `harness.watch_task_graph()` expose every
   live task, its waits, and the conversations it owns.
-- `watch_events(harness, conversation_id, context)` returns the experimental `AgentEventStream`
-  that translates committed publications into coding-agent-shaped events.
+
+A renderer renders state: what a run looks like is what its conversation view shows — the entry
+window, `pi.live` with its run, generation, tool slots, and compaction listings, and the other
+built-in documents — and what its task graph and reports show. This version has no event stream.
 
 Close the Harness when the host stops. `close(context)` seals admission synchronously and joins the
 running work; storages and execution environments are the host's to close.

@@ -221,7 +221,7 @@ executed by `tests/test_release_docs.py`.
 | --- | --- |
 | `pi_durable` | Root export: `Session`/`create_session`, `Harness`, entry tokens, document and task definitions, errors, provider protocol, `MemoryStorage`, and the built-in task types. |
 | `pi_durable.env` | The `ExecutionEnv` contract, the POSIX backend, output truncation, and line scanning. |
-| `pi_durable.harness` | Conversations, submissions and the inbox, the scheduler, agents and the registry, extensions and hooks, tools, generation, compaction, usage, the conversation view, the agent event stream, and the task graph. |
+| `pi_durable.harness` | Conversations, submissions and the inbox, the scheduler, agents and the registry, extensions and hooks, tools, generation, compaction, usage, the conversation view, and the task graph. |
 | `pi_durable.providers` | The `Model` catalog entry, the `Models` protocol, transcript and request helpers, retry and overflow classifiers, and the OpenAI/Anthropic adapters (`pi_durable.providers.openai`, `pi_durable.providers.anthropic`). |
 | `pi_durable.session` | The Session kernel, the transaction API, document drafts, forks, and observation. |
 | `pi_durable.storage` | The reference memory backend (`pi_durable.storage.memory`), SQLite (`pi_durable.storage.sqlite`), and JSONL (`pi_durable.storage.jsonl`). |
@@ -246,7 +246,7 @@ suites and the remaining explicit deviations.
   describes. Cross-language storage interoperability is incidental, not a contract; see
   [ADR 0001](./docs/adr/0001-parity-baseline-and-boundary.md).
 - **Stable surface.** The modules in the table above, the names exported from them, and the
-  specification sections they implement. `AgentEventStream` is experimental, as upstream says.
+  specification sections they implement.
 - **Excluded.** Code Mode, the image implementation (the `ImageProcessor` protocol remains),
   Cloudflare adapters, PowerShell, Windows support, the benchmark helpers, and the attached-host
   storage subpath, which needs a Chord host this port does not have. [`PARITY.md`](./PARITY.md)

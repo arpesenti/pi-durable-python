@@ -23,12 +23,12 @@ from chat_support import (
     usage,
 )
 from harness_support import add_section
+from live_support import view_history
 from session_support import ControlledStorage, context
 from task_support import Deferred, aborted, completed, deferred, eventually
 from tool_support import add_hooks, add_task, add_tool
 
 from pi_durable import (
-    AgentEvent,
     CompactionTask,
     LiveDoc,
     MemoryStorage,
@@ -36,7 +36,6 @@ from pi_durable import (
     UsageDoc,
     define_task,
     define_tool,
-    watch_events,
 )
 from pi_durable.harness.compaction import select_cut, serialize_conversation
 from pi_durable.harness.context import order_tool_results
@@ -1156,29 +1155,53 @@ async def test_records_a_compaction_failure_in_pi_live_until_a_summary_is_produc
     chat = await open_compaction(context_window=2000)
     await history(chat)
     chat.setup.settings["compaction"] = dict(BACKGROUND)
-    events: list[AgentEvent] = []
-    stream = await watch_events(chat.harness, chat.root.id, context)
-    stream.start(lambda batch, _context: events.extend(batch))
+    views = await view_history(chat.harness, chat.root.id)
     chat.faux.summaries.append(failure("bad request"))
     await turn(chat, text("u4", 100), text("a4", 100))
     await eventually(lambda: _has_failure(chat))
     recorded = (await live(chat))["compactionFailure"]
     assert recorded["trigger"] == "threshold"
     assert recorded["error"] == "Summarization failed: bad request"
-    await eventually(
-        lambda: any(event["type"] == "compaction_end" for event in events)
+    # The value that drops the compaction's status is the one that records its failure.
+    states = views["live"]()
+    listed = next(
+        index
+        for index, state in enumerate(states)
+        if any(status["taskId"] == recorded["taskId"] for status in state.get("compactions") or ())
     )
-    ended = next(event for event in events if event["type"] == "compaction_end")
-    assert ended["taskId"] == recorded["taskId"]
-    assert ended["reason"] == "threshold"
-    assert ended["error"] == "Summarization failed: bad request"
+    ended = _compaction_end(states, listed, recorded["taskId"])
+    assert states[ended]["compactionFailure"] == recorded
+    # A consumer that attaches now starts with the failure it missed.
+    late = await view_history(chat.harness, chat.root.id)
+    assert (late["views"][0]["docs"].get("pi.live") or {}).get("compactionFailure") == recorded
+    late["detach"]()
     # A compaction that produces a summary removes the failure.
     chat.setup.settings["compaction"] = dict(MANUAL)
     chat.faux.summaries.append(summary())
     manual = await chat.root.compact(None, context)
     assert (await result(chat, manual))["status"] == "completed"
     assert (await live(chat)).get("compactionFailure") is None
+    states = views["live"]()
+    listed = next(
+        index
+        for index, state in enumerate(states)
+        if index > ended
+        and any(status["taskId"] == manual for status in state.get("compactions") or ())
+    )
+    assert "compactionFailure" not in states[_compaction_end(states, listed, manual)]
+    views["detach"]()
     await chat.harness.close(context)
+
+
+def _compaction_end(states: list[dict[str, Any]], listed: int, task_id: Any) -> int:
+    """The index of the value that drops compaction ``task_id`` from the listing."""
+
+    return next(
+        index
+        for index, state in enumerate(states)
+        if index > listed
+        and not any(status["taskId"] == task_id for status in state.get("compactions") or ())
+    )
 
 
 async def _has_failure(chat: Chat) -> bool:
@@ -1321,9 +1344,7 @@ async def test_blocking_compaction_is_aborted_with_its_generation_by_esc() -> No
     chat.setup.settings["compaction"] = dict(BLOCKING)
     reached = deferred()
     chat.faux.summaries.append(gated(deferred(), summary(), reached))
-    events: list[AgentEvent] = []
-    stream = await watch_events(chat.harness, chat.root.id, context)
-    stream.start(lambda batch, _context: events.extend(batch))
+    views = await view_history(chat.harness, chat.root.id)
     input = await chat.root.submit({"type": "input", "content": text("u4", 200)}, context)
     await reached.promise
     [child] = await compaction_tasks(chat)
@@ -1332,10 +1353,16 @@ async def test_blocking_compaction_is_aborted_with_its_generation_by_esc() -> No
     assert settled["status"] == "unanswered" and settled["reason"] == "aborted"
     record = await chat.harness.get_task(child["id"], context)
     assert record["state"]["outcome"] == {"status": "aborted"}
-    await eventually(lambda: any(event["type"] == "run_end" for event in events))
-    types = [event["type"] for event in events]
-    assert types.index("compaction_end") < types.index("run_end")
-    await stream.stop()
+    views["detach"]()
+    # The compaction's status leaves the live document before the run ends.
+    states = views["live"]()
+    busy = next(index for index, state in enumerate(states) if state.get("compactions") is not None)
+    assert busy > 0
+    compaction_end = _compaction_end(states, busy, child["id"])
+    run_end = next(
+        index for index, state in enumerate(states) if index > busy and state.get("run") is None
+    )
+    assert compaction_end < run_end
     await chat.harness.close(context)
 
 
@@ -1743,7 +1770,7 @@ async def _compaction_retrying(chat: Chat) -> bool:
     return bool(statuses and statuses[0].get("retry") is not None)
 
 
-async def test_reports_start_and_end_and_the_retry_backoff_in_a_late_joiners_snapshot() -> None:
+async def test_lists_a_compaction_from_start_to_end_with_its_backoff_in_a_late_joiners_view() -> None:
     chat = await open_compaction()
     await history(chat)
     chat.setup.settings["retry"] = {
@@ -1751,37 +1778,31 @@ async def test_reports_start_and_end_and_the_retry_backoff_in_a_late_joiners_sna
         "max_retries": 2,
         "base_delay_ms": 60_000,
     }
-    events: list[AgentEvent] = []
-    stream = await watch_events(chat.harness, chat.root.id, context)
-    stream.start(lambda batch, _context: events.extend(batch))
+    views = await view_history(chat.harness, chat.root.id)
     chat.faux.summaries.append(failure("overloaded"))
     id = await chat.root.compact(None, context)
     await eventually(lambda: _compaction_retrying(chat))
-    late = await watch_events(chat.harness, chat.root.id, context)
-    [status] = late.snapshot["compactions"]
+    late = await view_history(chat.harness, chat.root.id)
+    [status] = (late["views"][0]["docs"].get("pi.live") or {})["compactions"]
     assert status["taskId"] == id
     assert status["trigger"] == "manual"
     assert status["blocking"] is False
     assert status["attempt"] == 1
     assert status["retry"]["error"] == "overloaded"
     assert isinstance(status["retry"]["at"], int)
-    await late.stop()
+    late["detach"]()
     await chat.harness.abort_task(id, context)
-    await eventually(
-        lambda: any(event["type"] == "compaction_end" for event in events)
-    )
-    assert [
-        event for event in events if event["type"].startswith("compaction_")
-    ] == [
-        {
-            "type": "compaction_start",
-            "taskId": id,
-            "reason": "manual",
-            "blocking": False,
-        },
-        {"type": "compaction_end", "taskId": id, "reason": "manual"},
-    ]
-    await stream.stop()
+
+    async def unlisted() -> bool:
+        return (await live(chat)).get("compactions") is None
+
+    await eventually(unlisted)
+    views["detach"]()
+    # The view listed the compaction while it ran, and its status is gone once it ends: the span the
+    # start and end events used to mark. An abort is not a failure.
+    listed = [status for state in views["live"]() for status in state.get("compactions") or ()]
+    assert listed[0] == {"taskId": id, "trigger": "manual", "blocking": False, "attempt": 1}
+    assert views["live"]()[-1].get("compactionFailure") is None
     await chat.harness.close(context)
 
 
@@ -1792,11 +1813,11 @@ async def test_shows_a_late_joiner_a_compaction_that_is_summarizing() -> None:
     chat.faux.summaries.append(gated(deferred(), summary(), reached))
     id = await chat.root.compact(None, context)
     await reached.promise
-    stream = await watch_events(chat.harness, chat.root.id, context)
-    assert stream.snapshot["compactions"] == [
+    watch = await chat.root.watch(context)
+    assert (watch.value["docs"].get("pi.live") or {})["compactions"] == [
         {"taskId": id, "trigger": "manual", "blocking": False, "attempt": 1}
     ]
-    await stream.stop()
+    await watch.stop()
     await chat.harness.abort_task(id, context)
     await chat.harness.close(context)
 
@@ -2274,59 +2295,50 @@ async def test_treats_a_length_stop_as_an_ordinary_answer_not_an_overflow() -> N
     await chat.harness.close(context)
 
 
-async def test_orders_the_events_of_a_summary_placed_at_once() -> None:
+async def test_orders_the_values_of_a_summary_placed_at_once() -> None:
     chat = await open_compaction()
     await history(chat)
-    events: list[AgentEvent] = []
-    stream = await watch_events(chat.harness, chat.root.id, context)
-    stream.start(lambda batch, _context: events.extend(batch))
+    views = await view_history(chat.harness, chat.root.id)
     chat.faux.summaries.append(summary())
-    await result(chat, await chat.root.compact(None, context))
-    await eventually(
-        lambda: any(event["type"] == "compaction_end" for event in events)
-    )
-    end = next(
-        index for index, event in enumerate(events) if event["type"] == "compaction_end"
-    )
-    assert [event["type"] for event in events[end - 2:end + 3]] == [
-        "message_start",
-        "message_end",
-        "compaction_end",
-        "submission",
-        "usage_changed",
-    ]
-    await stream.stop()
+    id = await chat.root.compact(None, context)
+    await result(chat, id)
+
+    async def unlisted() -> bool:
+        return (await live(chat)).get("compactions") is None
+
+    await eventually(unlisted)
+    views["detach"]()
+    states = views["live"]()
+    listed = next(index for index, state in enumerate(states) if state.get("compactions") is not None)
+    ended = _compaction_end(states, listed, id)
+    # The commit that ends the listing appends the summary entry and stores the spend it cost, in one
+    # value: the ordering the event batch used to spell out is the commit's own.
+    appended = views["views"][ended]["entries"][len(views["views"][ended - 1]["entries"]) :]
+    assert [entry["kind"] for entry in appended] == ["pi.compaction"]
+    before = views["views"][ended - 1]["docs"].get("pi.usage")
+    assert views["views"][ended]["docs"].get("pi.usage") != before
     await chat.harness.close(context)
 
 
-async def test_puts_compaction_start_last_in_the_batch_of_the_preparation_commit() -> None:
+async def test_lists_a_background_compaction_in_the_preparation_commit_with_its_entries() -> None:
     chat = await open_compaction(context_window=2000)
     await history(chat)
     chat.setup.settings["compaction"] = dict(BACKGROUND)
-    batches: list[list[AgentEvent]] = []
-    stream = await watch_events(chat.harness, chat.root.id, context)
-    stream.start(lambda batch, _context: batches.append(list(batch)))
+    views = await view_history(chat.harness, chat.root.id)
     # A new section makes the preparation commit append a system entry next to the compaction's status.
     add_section(chat.setup.registry, "extra", lambda *_args: "extra")
     chat.faux.summaries.append(gated(deferred(), summary()))
     await turn(chat, text("u4", 100), "a4")
-    await eventually(
-        lambda: any(
-            any(event["type"] == "compaction_start" for event in batch)
-            for batch in batches
-        )
-    )
-    batch = next(
-        batch
-        for batch in batches
-        if any(event["type"] == "compaction_start" for event in batch)
-    )
-    assert [event["type"] for event in batch] == [
-        "message_start",
-        "message_end",
-        "compaction_start",
-    ]
-    await stream.stop()
+
+    async def listed() -> bool:
+        return (await live(chat)).get("compactions") is not None
+
+    await eventually(listed)
+    views["detach"]()
+    states = views["live"]()
+    started = next(index for index, state in enumerate(states) if state.get("compactions") is not None)
+    appended = views["views"][started]["entries"][len(views["views"][started - 1]["entries"]) :]
+    assert [entry["kind"] for entry in appended] == ["pi.system"]
     [task] = await compaction_tasks(chat)
     await chat.harness.abort_task(task["id"], context)
     await chat.harness.close(context)

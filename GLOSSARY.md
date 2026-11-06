@@ -145,11 +145,6 @@ when the consumer attaches, not per commit. The whole transcript is never mounte
 past a window with `ConversationTranscript`.
 _Avoid_: slice, page, buffer
 
-**Agent event stream**:
-The experimental adapter that translates one conversation's committed publications into events
-shaped like the coding agent's session events.
-_Avoid_: audit log, replay
-
 **Task graph**:
 The Session-wide mount of every live task, its waits, and the conversations it owns.
 _Avoid_: task tree, scheduler state

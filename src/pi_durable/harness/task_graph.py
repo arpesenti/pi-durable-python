@@ -1,4 +1,4 @@
-"""Task graph view: every live task, its waits, and the conversations it owns (spec §9.5).
+"""Task graph view: every live task, its waits, and the conversations it owns (spec §9.4).
 
 The graph is to the Session's tasks what the conversation view is to one conversation: a
 structural mount built on the Session line by its first observer, advanced only from committed
@@ -143,7 +143,7 @@ class TaskGraphView:
         """A synchronous observer of the graph, attached atomically on the Session line.
 
         It mirrors what a watch of the mount is handed — including a blocked-reason change derived
-        outside any commit — unfolded, in line order (spec §9.5).
+        outside any commit — unfolded, in line order (spec §9.4).
         """
 
         attached: list[TaskGraph] = []

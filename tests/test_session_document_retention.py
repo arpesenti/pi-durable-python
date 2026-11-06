@@ -9,12 +9,12 @@ event streams with documents kept and evicted right after use.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any, cast
 
 import pytest
 from chat_support import assistant_message, chat_setup, faux_tool_call, open_chat
+from live_support import view_history
 from session_support import (
     ControlledStorage,
     Deferred,
@@ -25,7 +25,7 @@ from session_support import (
 )
 from tool_support import add_tool, tool
 
-from pi_durable import MemoryStorage, define_doc, define_doc_family, watch_events
+from pi_durable import MemoryStorage, define_doc, define_doc_family
 from pi_durable.ids import ConversationId
 from pi_durable.session import session as session_module
 from pi_durable.session.session import SessionImpl, set_default_document_retention
@@ -619,7 +619,7 @@ async def test_follows_a_harness_settings_change_at_the_next_use() -> None:
         set_default_document_retention(previous)
 
 
-async def test_gives_the_same_events_with_documents_evicted_right_after_use_as_with_documents_kept() -> (
+async def test_gives_the_same_views_with_documents_evicted_right_after_use_as_with_documents_kept() -> (
     None
 ):
     async def run(document_retention_ms: int) -> list[str]:
@@ -647,19 +647,28 @@ async def test_gives_the_same_events_with_documents_evicted_right_after_use_as_w
         )
         opened = await open_chat(MemoryStorage(), setup)
         harness, root = opened["harness"], opened["root"]
-        events: list[Any] = []
-        stream = await watch_events(harness, root.id, context)
-        stream.start(lambda batch, _context: events.extend(batch))
+        history = await view_history(harness, root.id)
         await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
         await harness.wait_for_idle(context)
-        await stream.stop()
+        history["detach"]()
         await harness.close(context)
-        # Ids and times differ between runs; the sequence of event types and tool outputs must not.
+        # Ids and times differ between runs; the sequence of entries, run states, and tool outputs must not.
         return [
-            f"update:{json.dumps(event['output'], sort_keys=True)}"
-            if event["type"] == "tool_execution_update"
-            else event["type"]
-            for event in events
+            " ".join(
+                [
+                    ",".join(entry["kind"] for entry in view["entries"]),
+                    f"run:{bool(state.get('run'))}",
+                    f"generation:{bool(state.get('generation'))}",
+                    *(
+                        f"{slot['callId']}:{slot['status']}:{slot.get('output', '')}"
+                        for slot in state.get("tools") or ()
+                    ),
+                ]
+            )
+            for view, state in zip(history["views"], history["live"](), strict=True)
         ]
 
-    assert await run(0) == await run(600_000)
+    kept = await run(600_000)
+    # The comparison only means something when the run actually showed work to a consumer.
+    assert len(kept) > 1
+    assert await run(0) == kept

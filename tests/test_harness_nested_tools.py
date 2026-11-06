@@ -11,7 +11,15 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any, cast
 
-from session_support import context, observe_commits
+from live_support import (
+    ended_at,
+    nested_result_of,
+    nested_results,
+    slots_of,
+    start_order,
+    view_history,
+)
+from session_support import context, flush, observe_commits
 from task_support import aborted, deferred, eventually
 from tool_support import (
     DONE,
@@ -26,8 +34,9 @@ from tool_support import (
     tool,
 )
 
-from pi_durable import LiveDoc, MemoryStorage, NestedCallDoc, ToolTask, UsageDoc, watch_events
+from pi_durable import LiveDoc, MemoryStorage, NestedCallDoc, ToolTask, UsageDoc
 from pi_durable.context import AbortController, with_abort_signal
+from pi_durable.delta import apply_immutable
 from pi_durable.types import CommitReceipt
 
 
@@ -461,12 +470,98 @@ async def test_runs_nested_calls_of_nested_calls() -> None:
         return {"output": [{"type": "text", "text": text(result)}]}
 
     add_tool(setup.registry, tool("outer", outer))
-    result = await run(setup, [call("outer"), DONE])
-    assert text(results(result["entries"])[0]) == "echo deep"
-    outer_task, inner_task, deep_task = await tool_tasks(result["harness"])
+    setup.faux.set_responses([call("outer"), DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    history = await view_history(harness, root.id)
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await harness.wait_for_idle(context)
+    await flush()
+    history["detach"]()
+    result_entries = results(await all_entries(root))
+    assert text(result_entries[0]) == "echo deep"
+    outer_task, inner_task, deep_task = await tool_tasks(harness)
     assert (inner_task["owner"], deep_task["owner"]) == (outer_task["id"], inner_task["id"])
-    assert await result["harness"].snapshot(LiveDoc, result["root"].id, context) == {}
-    await result["harness"].close(context)
+    states = history["live"]()
+    # The view shows the calls starting caller first, then each call it made.
+    assert start_order(states) == ["c1", "c1/1", "c1/1/x"]
+    deep_slot = next(slot for slot in slots_of(states, "c1/1/x") if slot is not None)
+    assert deep_slot["parentCallId"] == "c1/1"
+    # And ends them children first.
+    assert ended_at(states, "c1/1/x") < ended_at(states, "c1/1") < ended_at(states, "c1")
+    assert await harness.snapshot(LiveDoc, root.id, context) == {}
+    await harness.close(context)
+
+
+async def test_reports_nested_calls_in_pi_live_with_their_parent_and_their_result() -> None:
+    setup = chat_setup()
+    release = deferred()
+    running = deferred()
+
+    async def slow(_args: dict[str, Any], api: Any, call_context: Any) -> dict[str, Any]:
+        api.output("working\n")
+        await api.details({"step": 1}, call_context)
+        running.resolve()
+        await release.promise
+        return {"output": [{"type": "text", "text": "slow done"}]}
+
+    async def batch(_args: dict[str, Any], api: Any, call_context: Any) -> dict[str, Any]:
+        nested = await api.execute_tool("slow", {}, call_context)
+        return {"output": [{"type": "text", "text": nested.get("structuredOutput") or ""}]}
+
+    add_tool(setup.registry, tool("slow", slow))
+    add_tool(setup.registry, tool("batch", batch))
+    setup.faux.set_responses([call("batch"), DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    results = nested_results(harness)
+    history = await view_history(harness, root.id)
+    submission = await root.submit({"type": "input", "content": "go"}, context)
+    await running.promise
+    # The running nested call shows beside the call that made it, with the arguments it runs with,
+    # the output it wrote, and the details it published.
+    assert (await harness.snapshot(LiveDoc, root.id, context))["nestedTools"] == [
+        {
+            "callId": "c1/1",
+            "parentCallId": "c1",
+            "parentTaskId": (await harness.snapshot(LiveDoc, root.id, context))["nestedTools"][0][
+                "parentTaskId"
+            ],
+            "name": "slow",
+            "taskId": (await harness.snapshot(LiveDoc, root.id, context))["nestedTools"][0]["taskId"],
+            "arguments": {},
+            "status": "running",
+            "output": "working\n",
+            "details": {"step": 1},
+        }
+    ]
+    release.resolve()
+    await submission.wait(context)
+    await harness.wait_for_idle(context)
+    await flush()
+    history["detach"]()
+    states = history["live"]()
+    # The view shows the caller start first and the nested call end first, and hands its result to the
+    # caller through the document its terminal commit wrote.
+    assert start_order(states) == ["c1", "c1/1"]
+    assert ended_at(states, "c1/1") < ended_at(states, "c1")
+    child_result = nested_result_of(states, results, "c1/1")
+    assert child_result["structuredOutput"] == "slow done"
+    assert child_result["isError"] is False
+    # A nested slot names its own task and the calling one; a model-issued slot names neither.
+    parent_task, child_task = await tool_tasks(harness)
+    listed = next(slot for slot in slots_of(states, "c1/1") if slot is not None)
+    assert (listed["taskId"], listed["parentCallId"], listed["parentTaskId"]) == (
+        child_task["id"],
+        "c1",
+        parent_task["id"],
+    )
+    parent_slot = next(slot for slot in slots_of(states, "c1") if slot is not None)
+    assert "parentTaskId" not in parent_slot and "parentCallId" not in parent_slot
+    assert await harness.snapshot(LiveDoc, root.id, context) == {}
+    await harness.close(context)
 
 
 async def test_commits_only_the_status_of_a_nested_call_made_without_progress() -> None:
@@ -1039,22 +1134,35 @@ async def test_reports_several_running_nested_calls_in_their_slots() -> None:
     harness.resume()
     submission = await root.submit({"type": "input", "content": "go"}, context)
     await asyncio.gather(running["one"].promise, running["two"].promise)
-    stream = await watch_events(harness, root.id, context)
-    assert [
-        (slot["callId"], slot["status"]) for slot in stream.snapshot["nestedTools"]
-    ] == [("c1/1", "running"), ("c1/2", "running")]
-    updates: list[tuple[str, Any]] = []
+    watch = await root.watch(context)
+    [nested_of] = [_nested_slots(watch.value)]
+    assert [(slot["callId"], slot["status"]) for slot in nested_of] == [
+        ("c1/1", "running"),
+        ("c1/2", "running"),
+    ]
+    # Each value's operations rebuild the next one, the late subscriber's starting value included.
+    replayed = watch.value
+    outputs: list[tuple[Any, Any]] = []
 
-    def listen(batch: Any, _context: Any) -> None:
-        for event in batch:
-            if event["type"] == "tool_execution_update" and "output" in event:
-                updates.append((event["toolCallId"], event["output"]))
+    async def listener(call: Any, _context: Any) -> None:
+        nonlocal replayed
+        if call["kind"] != "value":
+            return
+        replayed = apply_immutable(replayed, call["ops"])
+        assert replayed == call["value"]
+        slots = _nested_slots(call["value"])
+        outputs.append(
+            (
+                slots[0].get("output") if len(slots) > 0 else None,
+                slots[1].get("output") if len(slots) > 1 else None,
+            )
+        )
 
-    stream.start(listen)
+    watch.start(listener)
     # The second slot writes first, so a wrong slot index in the update path would show.
     wrote["two"].resolve()
     await wrote["two"].promise
-    await eventually(lambda: len(updates) == 1)
+    await eventually(lambda: bool(outputs) and outputs[-1] == (None, "two\n"))
 
     async def two_shows() -> bool:
         live = await harness.snapshot(LiveDoc, root.id, context)
@@ -1064,7 +1172,7 @@ async def test_reports_several_running_nested_calls_in_their_slots() -> None:
     await eventually(two_shows)
     wrote["one"].resolve()
     await wrote["one"].promise
-    await eventually(lambda: len(updates) == 2)
+    await eventually(lambda: bool(outputs) and outputs[-1] == ("one\n", "two\n"))
 
     async def both_show() -> bool:
         live = await harness.snapshot(LiveDoc, root.id, context)
@@ -1073,9 +1181,16 @@ async def test_reports_several_running_nested_calls_in_their_slots() -> None:
     await eventually(both_show)
     release.resolve()
     await submission.wait(context)
-    await stream.stop()
-    assert updates == [("c1/2", {"set": "two\n"}), ("c1/1", {"set": "one\n"})]
+    await watch.stop()
+    # Each slot showed its own output while both ran, in the order they were written.
+    assert (None, "two\n") in outputs and ("one\n", "two\n") in outputs
     await harness.close(context)
+
+
+def _nested_slots(view: Any) -> list[dict[str, Any]]:
+    """The nested slots one view of the conversation mounts."""
+
+    return list((view["docs"].get("pi.live") or {}).get("nestedTools") or ())
 
 
 async def test_resolves_nested_calls_among_the_tools_that_may_be_called_by_tools() -> None:

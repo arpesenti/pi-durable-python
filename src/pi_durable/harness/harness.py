@@ -657,7 +657,7 @@ class Harness(SessionImpl):
         return await self._views.observe(id, observer, context, window)
 
     async def observe_task_graph(self, observer: Observer, context: Context) -> Any:
-        """Attach a synchronous observer of the Session-wide task-graph mount (spec §9.5)."""
+        """Attach a synchronous observer of the Session-wide task-graph mount (spec §9.4)."""
 
         self.assert_usable()
         return await self._graph.observe(observer, context)

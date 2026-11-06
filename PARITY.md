@@ -20,8 +20,7 @@ is green.
 Under a re-baseline, a row whose section the new text changed or added goes back to `planned`: the
 code and suite that satisfied it at the previous baseline do not yet speak this one. The ticket
 that ports the section moves the row, and is named in the row's parenthetical. A row still
-`tested` describes a section this baseline's text left alone — plus the two rows under the 9.4 and
-9.5 keys, which await the retirement and re-key #46 holds.
+`tested` describes a section this baseline's text left alone.
 
 ## Status legend
 
@@ -115,17 +114,6 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `wrapSection` | value | `wrap_section` | test_harness_registry_agent.py | tested |
 | `wrapTool` | value | `wrap_tool` | test_harness_registry_agent.py | tested |
 
-### `./harness/events.ts` → `pi_durable.harness.events`
-
-| Upstream | Kind | Python target | Tests | Status |
-| --- | --- | --- | --- | --- |
-| `watchEvents` | value | `watch_events` | test_harness_events.py | tested |
-| `AgentEvent` | type | `AgentEvent` | test_harness_events.py | tested |
-| `AgentEventStream` | type | `AgentEventStream` | test_harness_events.py | tested |
-| `MessageChange` | type | `MessageChange` | test_harness_events.py | tested |
-| `SnapshotEvent` | type | `SnapshotEvent` | test_harness_events.py | tested |
-| `ToolEventCall` | type | `ToolEventCall` | test_harness_events.py | tested |
-
 ### `./harness/generation.ts` → `pi_durable.harness.generation`
 
 | Upstream | Kind | Python target | Tests | Status |
@@ -159,8 +147,8 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `LiveDoc` | value | `LiveDoc` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_tools_recovery.py, test_harness_live_migrations.py | tested (version 3 at `live.ts:196`, with the in-place migrate from stored versions 1 and 2) |
-| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py, test_harness_events.py, test_harness_live_migrations.py | tested (live status and its event stream; `trigger` names what started it, and a stored `reason` is renamed in place) |
-| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py, test_harness_events.py, test_harness_live_migrations.py | tested (live status and the late-joiner snapshot; `trigger` names what started it, and a stored `reason` is renamed in its key order) |
+| `CompactionFailure` | type | `CompactionFailure` | test_harness_compaction.py, test_harness_live_migrations.py | tested (the live status and the value that records a failure; `trigger` names what started it, and a stored `reason` is renamed in place) |
+| `CompactionStatus` | type | `CompactionStatus` | test_harness_compaction.py, test_harness_live_migrations.py | tested (the live status and a late consumer's first value; `trigger` names what started it, and a stored `reason` is renamed in its key order) |
 | `LiveRun` | type | `LiveRun` | test_harness_live_deltas.py, test_harness_live_migrations.py, test_harness_tools.py | tested (`turns`: a round counts it and a stored run without one counts from 0; `first` and `afterRun` are #48) |
 | `LiveState` | type | `LiveState` | test_harness_submissions.py, test_harness_inbox.py, test_harness_generation.py, test_harness_live_deltas.py, test_harness_tools.py, test_harness_live_migrations.py | tested |
 | `NestedToolSlot` | type | `NestedToolSlot` | test_harness_nested_tools.py | tested |
@@ -677,13 +665,12 @@ SQLite backend and migrations.
 | 8.4 Tool | planned (the `afterTool` chain over every result the task writes, with its bounds, is #49. `pi.tool` is version 3 and an `unoffered` call resolves `tool_unavailable`: test_harness_tools.py, test_harness_tools_recovery.py; #36) |
 | 8.5 Tool rounds | planned (a handoff continues the run, a `terminate` round hands to `finish`, and `max_turns` ends the round `turn_limit`; #48) |
 | 8.6 Usage | tested |
-| 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the live status and in what `compaction_start` and `compaction_end` report: test_harness_compaction.py, test_harness_events.py; #36) |
+| 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the status the live document lists: test_harness_compaction.py, test_harness_live_migrations.py; #36) |
 | 9 Document observation and Chord | tested |
 | 9.1 Watches | tested (`WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35; and the `Observer` beside it — `advance(call, context)` / `end(end)` attached atomically on the line, its detach idempotent, `ended` only by an observed owner that ended and `failed` by the Session's close, with the commit observer handed exactly what Storage stored: test_session_observers.py, test_harness_observers.py. Supersedes the 1.4.0 Document state section, whose state getters #44 deleted) || 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
 | 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
-| 9.3 Conversation view | planned (1.5.0: the entry window with `before`, the `ConversationWindow` bounds, and `ConversationTranscript` are tested in test_harness_view.py and test_conversation_transcript.py; the per-observer window is #44's, the agent event stream renders through the view until #46 deletes it, and upstream `test/harness-view-run.test.ts` — a run as the view shows it — awaits #47 and #48) |
-| 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
-| 9.5 Task graph view | tested (translated in test_harness_task_graph.py; the graph observer of #44 mirrors each publication on the line, a blocked reason re-derived with no commit, in test_harness_observers.py; #46 re-keys this row to the vendored 9.4) |
+| 9.3 Conversation view | planned (1.5.0: the entry window with `before`, the `ConversationWindow` bounds, and `ConversationTranscript` are tested in test_harness_view.py and test_conversation_transcript.py; a run as the view shows it is translated in test_harness_view_run.py, where the assertions the deleted agent event adapter carried now ride on the view, and upstream's remaining `test/harness-view-run.test.ts` cases — streamed-partial cost and the run failure — await #47 and #48) |
+| 9.4 Task graph view | tested (the vendored 9.4, re-keyed from the 9.5 this port carried and from the retired Agent events section #46 deletes: translated in test_harness_task_graph.py, and the graph observer of #44 mirrors each publication on the line, a blocked reason re-derived with no commit, in test_harness_observers.py) |
 | 10 Storage contract | tested (`commit_batches(batches, receive, context)` is the protocol's only commit call — per-batch checks against the state the earlier batches left, one durability receipt per stored batch delivered before the call settles, and the refusal a resolved outcome beside a rejection that stores nothing — with the optional `publishing()` scope and the narrowed `mint_id()` monotonicity across reopen: test_storage_commit_batches.py over the memory, SQLite and JSONL backends, and no backend carries the retired single-write signature; #38, #41. The conformance suite carries the receipt contract itself — the group stored in order against the state its earlier batches left, the prefix a refusal keeps, a later batch its own actions refuse, a copy resolved against its predecessors, receipts checked one per stored batch by the wrapper every case runs through, and every case seeded through `commit_writes`; #39, #41. The durable backends' own depth landed with #40, which also pins that every backend module registers the same case list) |
 | 10.1 Failures | planned (one outcome per commit of a call in line order, durable-but-unpublished commits after a failure, receipts that stand before a rejection, and the tagged observer ends; #42, #44. The tagged watch ends landed with #35) |
 | 11 Backends | tested |
@@ -694,8 +681,8 @@ SQLite backend and migrations.
 | 13 Non-goals | n/a (1.5.0 narrows the visible-undurable bullet to admit deferred commits; reviewed with #42 and #47) |
 
 The upstream document-retention suite has two Harness-level cases: one follows a Harness settings
-change at its next use, and one compares agent event streams with documents evicted. Both are
-translated in `test_session_document_retention.py`.
+change at its next use, and one compares the views a run reaches with documents evicted against the
+same run with documents kept. Both are translated in `test_session_document_retention.py`.
 
 The four task-integrity suites (`harness-tasks-recovery`, `harness-scheduler-indexes`,
 `harness-scheduler-retention`, and `harness-storage-failure`) are fully translated for the task
@@ -770,9 +757,11 @@ selection and the context estimate, transcript serialization, manual placement t
 submission and its idle/busy/reset outcomes, `beforeCompact` decisions, retry backoff with a pinned
 request, cap and failure classification, background and blocking thresholds, overflow compaction
 and its retry, fork and inbox interactions, recovery across reopen, concurrent summaries, the
-one-compaction rule, and the older-head-marker edits. Its `compaction_start`/`compaction_end`
-ordering, late-joiner snapshots, and kept-entry view assertions now run through `watch_events` and
-the windowed `watch(context, window)` in the same file, alongside the same committed state checkedthrough `pi.live`, the task outcome, submissions, and the context view.
+one-compaction rule, and the older-head-marker edits. Its compaction listing from start to end, a
+late consumer's first value, and kept-entry view assertions now run through
+`harness.observe_conversation` and the windowed `watch(context, window)` in the same file, alongside
+the same committed state checked through `pi.live`, the task outcome, submissions, and the context
+view.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and
@@ -792,11 +781,11 @@ The upstream `harness-nested-tools` and `harness-nested-tools-restart` suites ar
 `callers` resolution for tools; hooks seeing the parent; unavailable, invalid, blocked, thrown,
 interrupted, aborted, faulted, and orphaned results; output and details with `progress: false`;
 usage; left-running calls aborted before their caller settles, including during a restart cleanup;
-and `abandonOnRestart` for a replay-unsafe caller and the child tasks it creates. Agent-event
-assertions for nested calls run in `test_harness_events.py` (parent IDs, the nested result, and
-child-before-caller order for deep calls). The late-subscriber agent-event snapshot and the
-per-slot updates for several running nested calls run in `test_harness_nested_tools.py`; the same
-values are also checked through the stored `NestedCallDoc` and `pi.live` snapshots.
+and `abandonOnRestart` for a replay-unsafe caller and the child tasks it creates. The parent IDs, the
+nested result, and the child-before-caller order of deep calls are read from the conversation view
+and the stored `NestedCallDoc` in the same file, where the late subscriber's first value and the
+per-slot outputs of several running nested calls are read from the same values, each frame checked by
+replaying its own operations.
 
 The upstream `harness-structured-output` suite is translated in
 `test_harness_structured_output.py`: schema-less output shapes, bounds without rendered

@@ -3,7 +3,7 @@
 A Harness observer is mounted the way a watch is — one attachment on the Session line, admitted with
 the load of what it observes — and then mirrors publications: a conversation's view and the Session's
 task graph, each arriving as the same :class:`WatchCall` a watch of the same mount would receive, in
-line order and unfolded (spec §9.1, §9.3, §9.5).
+line order and unfolded (spec §9.1, §9.3, §9.4).
 
 Deferral block — the cases this ticket does not translate, named, with their reason, and the ticket
 that holds them. Every one needs a task document's **watch** to be retired and ended by the commit
@@ -368,7 +368,7 @@ async def test_rejects_an_attachment_cancelled_while_it_waits_on_the_line() -> N
 
 
 async def test_advances_a_graph_observer_with_a_blocked_refresh_outside_any_commit() -> None:
-    """Upstream: "advance a graph observer with a blocked refresh, outside any commit" (§9.5).
+    """Upstream: "advance a graph observer with a blocked refresh, outside any commit" (§9.4).
 
     A reason that changes without a commit — the registry gained the definition — still reaches the
     observer on the line, because the graph publishes its own blocked state; it is not an adoption

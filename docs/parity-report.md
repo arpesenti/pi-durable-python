@@ -43,7 +43,6 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-compaction` | `test_harness_compaction.py` |
 | `harness-context` | `test_harness_context.py`, `test_harness_context_ranges.py` |
 | `harness-conversations` | `test_harness_conversations.py` |
-| `harness-events` | `test_harness_events.py` |
 | `harness-failed-run-inbox` | `test_harness_failed_run_inbox.py` |
 | `harness-generation-recovery` | `test_harness_generation_recovery.py` |
 | `harness-host-inputs` | `test_harness_host_inputs.py` |
@@ -54,7 +53,7 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-lifecycle` | `test_harness_lifecycle.py`, `test_harness_lifecycle_observations.py` |
 | `harness-live-deltas` | `test_harness_live_deltas.py` |
 | `harness-nested-tools-restart` | `test_harness_nested_tools_restart.py` |
-| `harness-nested-tools` | `test_harness_nested_tools.py`, `test_harness_events.py` |
+| `harness-nested-tools` | `test_harness_nested_tools.py` |
 | `harness-ownership` | `test_harness_ownership.py`, `test_harness_scheduler_retention.py`, `test_harness_tasks_recovery.py` |
 | `harness-prompt` | `test_harness_prompt.py` |
 | `harness-registry` | `test_harness_registry_agent.py` |
@@ -73,6 +72,7 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-tools-recovery` | `test_harness_tools_recovery.py` |
 | `harness-tools` | `test_harness_tools.py` |
 | `harness-view` | `test_harness_view.py` |
+| `harness-view-run` | `test_harness_view_run.py`, `test_harness_nested_tools.py`, `test_harness_compaction.py`, `test_session_document_retention.py` |
 | `jsonl-storage` | `test_jsonl_storage.py` |
 | `memory-storage` | `test_memory_storage.py` |
 | `provider-session-cache-e2e` | `test_provider_session_cache_e2e.py` (live case skipped without credentials) |
@@ -231,17 +231,36 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `test/conversation-view-bench.ts` is a benchmark helper over the windowed view and is excluded on
   the same basis; the window shapes it measures are asserted behaviorally in
   `test_harness_view.py`.
-- **`harness-view-run` is not translated by the windowed view.** Upstream v1.5.0 adds
+- **The streamed-partials half of `harness-view-run` waits for #47 and #48.** Upstream v1.5.0 adds
   `test/harness-view-run.test.ts` — "a run as the conversation view shows it" and "streamed
   partials", 14 cases that read run state (`pi.live`, `pi.inbox`, streamed partials, tool slots)
-  out of the windowed view's operations. The window itself is #45's contract and is tested here;
-  these cases belong to the tickets that own what the view renders — #47 for the streamed answer and
-  its partials, #48 for the failure and restart-cutoff states — and no ticket claims the file yet.
+  out of the windowed view's operations. #46 translated the run cases there — they are where the
+  assertions the deleted agent event adapter carried now ride — in `test_harness_view_run.py`, and
+  the nested-call and compaction cases of that file in `test_harness_nested_tools.py`,
+  `test_harness_compaction.py`, and `test_session_document_retention.py`. What remains is the
+  "streamed partials" describe — the per-commit cost of a growing partial, a watcher's memory over a
+  long stream, and the run-failure and restart-cutoff states — which belongs to #47 and #48. The two
+  upstream cases that read `runFailure` are not translated here for the same reason: the port carries
+  no run-failure state until #48 lands it.
+- **The deleted agent event adapter's own batching bound is not carried over.** `MAX_PENDING_EVENT_BATCHES`
+  (100 undelivered batches before one snapshot replaced them) was the deleted adapter's private rule,
+  owned by no seam the port keeps, and upstream v1.5.0 deletes it with the section, so no case is kept
+  for the number itself. What a host could observe through it — that a consumer which falls behind
+  converges on a single bounded delivery rather than promising every transition — is asserted on the
+  windowed view in `test_harness_view.py`: `test_folds_undelivered_commits_into_one_call_whose_ops_reach_the_newest_view`
+  (101 undelivered commits arrive as one call whose operations reach the newest view),
+  `test_bounds_an_overflow_replacement_by_max`,
+  `test_keeps_the_newest_min_of_a_commit_that_appends_more_than_max_at_once`, and
+  `test_lets_a_long_lived_watch_drop_the_entries_that_left_its_window`. The same holds for the
+  adapter's event vocabulary (`tool_execution_start`/`update`/`end`, `message_start`/`update`/`end`,
+  `run_start`/`run_end`, `turn_start`/`turn_end`): it was the deleted module's rendering of committed
+  state, and the state itself is asserted where it lives — `pi.live`, the entry window, the task graph
+  and reports.
 - **Telemetry and pi-ai client identity.** `HarnessOptions.telemetry`, `DURABLE_TELEMETRY_SCHEMA`,
   `HarnessOptions.identity`, and `DEFAULT_HARNESS_IDENTITY` are excluded by
   [ADR 0002](./adr/0002-upstream-1-4-0-scope.md): they describe pi-ai and pi-telemetry integration
   with no normative spec section, and their observable content is available through `on_report`,
-  `inspect()`, the task graph, the view, and the event stream.
+  `inspect()`, the task graph, and the view.
 - **IndexedDB and Workers.** `IndexedDbStorage` and `test-workers/*` are browser and Cloudflare
   backends, excluded with the adapters they exercise (ADR 0002).
 - **Timers.** Python's default `set_timer` arms an asyncio timer for both foreground and background
