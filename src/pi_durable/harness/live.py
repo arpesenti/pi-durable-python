@@ -17,7 +17,7 @@ from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonValue
 from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
-from ..types import SubmissionSettlement, TaskRecord
+from ..types import CommitOptions, SubmissionSettlement, TaskRecord
 from .types import CompactionReason, ToolDiagnostic
 
 
@@ -166,6 +166,13 @@ LiveDoc = define_doc(
 GENERATION_TASK_NAME = "pi.generation"
 TOOL_TASK_KIND = "pi.tool"
 COMPACTION_TASK_KIND = "pi.compaction"
+#:
+#: How the progress throttles commit a partial answer and running tool output into ``pi.live``: deferred,
+#: so Storage gets them together, at the next commit that reads or writes ``pi.live`` or after
+#: ``settings.progress.persist_within_ms``. Every commit that consumes or clears streamed fields reads
+#: ``pi.live``, so it stores them with its own changes (`live.ts:230-235`).
+PROGRESS_COMMIT: CommitOptions = {"persistence": {"kind": "deferred"}}
+
 RUN_TASK_KINDS = frozenset({GENERATION_TASK_NAME})
 
 
@@ -406,6 +413,7 @@ __all__ = [
     "remove_compaction_status",
     "remove_nested_slots",
     "settle_scheduler_outcome",
+    "PROGRESS_COMMIT",
     "start_generation",
     "start_run",
     "tool_slot",

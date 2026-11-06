@@ -31,7 +31,7 @@ from ..types import EntryDraft, MessageRecord, TaskRecord
 from .agent import add_tools, section_extension
 from .compaction import compaction_policy, create_compaction, estimate_context, select_cut
 from .inbox import Boundary, QueueModes, apply_boundary, prepare_boundary, withdraw_queued_inputs
-from .live import LiveDoc, end_run, start_run
+from .live import PROGRESS_COMMIT, LiveDoc, end_run, start_run
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
@@ -239,7 +239,10 @@ async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> No
         await convert_partial(tx, live, conversation_id)
         live["generation"] = {"attempt": attempt}
 
-    await runtime.commit(start, context)
+    # The attempt shown is presentation, stored like progress (`PROGRESS_COMMIT`); converting a
+    # partial left by an interrupted attempt appends an entry, which makes the commit immediate
+    # (`generation.ts:269-283`).
+    await runtime.commit(start, context, PROGRESS_COMMIT)
     model = runtime.models.get_model(ref["provider"], ref["modelId"])
     if model is None:
         await fail_no_model(runtime, ref, context)
@@ -514,7 +517,9 @@ class _Flusher:
             generation = live["generation"]
             assign_json(generation, "message", message)
 
-        await self._runtime.commit(flush, self._context)
+        # The partial answer is presentation, not state: deferred, so watches see each revision at once and
+        # Storage gets them together (`generation.ts:715-724`).
+        await self._runtime.commit(flush, self._context, PROGRESS_COMMIT)
 
 
 async def stream_response(

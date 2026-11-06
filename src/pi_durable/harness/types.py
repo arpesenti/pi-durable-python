@@ -39,6 +39,7 @@ from ..documents import (
 from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
+    CommitOptions,
     ContinueDoneRecord,
     ContinueUnansweredRecord,
     ConversationOwnership,
@@ -175,7 +176,9 @@ class ToolExecutionApi(Protocol):
 
     def details(self, value: JsonValue, context: Context) -> Awaitable[None]: ...
 
-    def commit(self, change: Callable[..., Any], context: Context) -> Awaitable[Any]: ...
+    def commit(
+        self, change: Callable[..., Any], context: Context, options: CommitOptions | None = None
+    ) -> Awaitable[Any]: ...
 
     def memo(self, name: str, *args: Any) -> Awaitable[JsonValue | None]: ...
 
@@ -547,10 +550,15 @@ class CompactionResult(TypedDict, total=False):
 
 
 class ProgressPolicy(TypedDict, total=False):
-    """How often running progress is committed."""
+    """How often running progress is committed, and how long it may wait in memory before it is stored.
+
+    Progress commits are deferred (`CommitPersistence`): watches see each at once, and Storage gets them
+    together, at the run's next phase boundary or after ``persist_within_ms`` (``types.ts:589-601``).
+    """
 
     partial_interval_ms: int
     output_interval_ms: int
+    persist_within_ms: int
 
 
 class GenerationHooks(TypedDict, total=False):
@@ -691,6 +699,7 @@ class TaskRuntime(Protocol):
         self,
         change: Callable[..., NextTaskState | None | Awaitable[NextTaskState | None]],
         context: Context,
+        options: CommitOptions | None = None,
     ) -> None: ...
 
     async def memo(self, name: str, *args: Any) -> JsonValue | None: ...

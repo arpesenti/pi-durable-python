@@ -112,6 +112,9 @@ async def test_answers_an_input_and_settles_its_submission() -> None:
 async def test_stores_partials_as_deltas_and_a_complete_base_once_nothing_is_in_flight() -> None:
     setup = chat_setup()
     setup.faux.set_responses([slow_message(assistant_message("w" * 200), chunks=8, interval=0.03)])
+    # Store deferred partials well within the stream, so some reach Storage before the answer
+    # (`harness-generation.test.ts:122-123`).
+    setup.settings["progress"] = {"persist_within_ms": 100}
     storage = ControlledStorage()
     opened = await open_chat(storage, setup)
     harness, root = opened["harness"], opened["root"]
@@ -588,7 +591,11 @@ async def test_resolves_settings_over_the_builtin_defaults() -> None:
         "keep_recent_tokens": 20_000,
         "background_tokens": 32_768,
     }
-    assert resolved.progress == {"partial_interval_ms": 100, "output_interval_ms": 100}
+    assert resolved.progress == {
+        "partial_interval_ms": 100,
+        "output_interval_ms": 100,
+        "persist_within_ms": 1000,
+    }
     assert resolved.tool_execution == "parallel"
     assert resolved.steering_mode == "one-at-a-time"
     assert resolved.follow_up_mode == "one-at-a-time"
@@ -604,7 +611,11 @@ async def test_resolves_settings_over_the_builtin_defaults() -> None:
     assert resolve_settings({"progress": {"output_interval_ms": 500}}).progress == {
         "partial_interval_ms": 100,
         "output_interval_ms": 500,
+        "persist_within_ms": 1000,
     }
+    # Not a number of milliseconds, 0 or more: the default (`harness-generation.test.ts:571-573`).
+    assert resolve_settings({"progress": {"persist_within_ms": -1}}).progress["persist_within_ms"] == 1000
+    assert resolve_settings({"progress": {"persist_within_ms": 0}}).progress["persist_within_ms"] == 0
 
 
 async def test_commits_partials_no_more_often_than_the_partial_interval() -> None:

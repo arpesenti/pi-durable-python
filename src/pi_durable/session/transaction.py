@@ -8,11 +8,12 @@ adoption swaps committed document values in memory only after storage succeeds.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any, Literal, Protocol, cast
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from ..context import Context
-from ..delta import Op
+from ..delta import Op, PendingOps
 from ..documents import (
     AnyDocToken,
     DocDefinition,
@@ -42,6 +43,7 @@ from ..types import (
     Cursor,
     DocumentAddress,
     DocumentCommitChange,
+    DocumentContent,
     DocumentCopySource,
     DocumentCreate,
     DocumentRecord,
@@ -172,6 +174,86 @@ class DocumentPlan:
     content: StorageWrite | None = None
     change: _PlanChange | None = None
     conversation_id: int | None = None
+    #: What :meth:`Transaction.take_held` stored in front of this plan's own change: the held
+    #: operations the stored content carries, and whether the commit's own change was published too.
+    held: _PlanHeld | None = None
+
+
+@dataclass(slots=True)
+class _PlanHeld:
+    """The held operations a commit stored with one plan, and whether its own change showed too."""
+
+    ops: list[Op]
+    observed: bool
+
+
+@dataclass(slots=True)
+class AdoptedDocuments:
+    """What adoption publishes: to the Session's own observers, and the stored changes onward.
+
+    ``observed`` is this commit's own changes as memory adopted them; ``stored`` is what Storage got,
+    which is the same list unless the commit also stored held changes, and then those precede its own
+    (spec §4.1).
+    """
+
+    observed: list[DocumentCommitChange]
+    stored: list[DocumentCommitChange]
+
+
+@dataclass(slots=True)
+class HeldChanges:
+    """One changed incarnation a deferred commit may hold: it, its operations, and its base."
+
+    ``holdable`` answers with these; the Session folds each one's operations into the queue it keeps
+    for the incarnation (``HeldDocument``).
+    """
+
+    loaded: LoadedDocument
+    ops: list[Op]
+    base: bool
+
+
+@dataclass(slots=True)
+class HeldDocument:
+    """The changes deferred commits adopted in memory and the Session has not stored yet.
+
+    The Session owns one per cached incarnation: the folded operations of every held commit, and
+    whether one of them selected a base (``checkpoint_when``), which makes their store the whole
+    value (spec §4.1).
+    """
+
+    loaded: LoadedDocument
+    pending: PendingOps = field(default_factory=PendingOps)
+    base: bool = False
+
+
+_H = TypeVar("_H", bound=HeldDocument)
+
+
+def store_held(
+    hold: HeldDocument,
+    ops: list[Op],
+    value: JsonObject,
+    version: int,
+) -> tuple[DocumentContent, list[Op]]:
+    """Take a hold's changes, ``ops`` on top of them, as one stored content for an incarnation at
+    ``value``.
+
+    The operations a reader applies are the folded ones, or one root replacement once the queue
+    passed :data:`~pi_durable.delta.MAX_PENDING_OPS` -- which stores the whole value, as does a hold
+    whose commits selected a base.
+    """
+
+    hold.pending.push(ops)
+    taken = hold.pending.take()
+    if taken is None:
+        return (
+            {"version": version, "kind": "base", "value": value},
+            [["r", value]],
+        )
+    if hold.base:
+        return ({"version": version, "kind": "base", "value": value}, taken)
+    return ({"version": version, "kind": "delta", "ops": taken}, taken)
 
 
 SubmissionChange = SubmissionSettlement | dict[str, Any]
@@ -501,6 +583,135 @@ class Transaction:
     def staged_conversations(self) -> list[ConversationRecord]:
         return [write["value"] for write in self._writes if write["type"] == "conversation"]
 
+    # ── Deferred commits ───────────────────────────────────────────────────
+
+    def holdable(self) -> list[HeldChanges] | None:
+        """What a deferred commit holds in memory instead of storing, or ``None`` when it must store.
+
+        A commit may be held only when every write changes an existing ``latest``, ``initial``-fork
+        conversation document at its stored version: any entry, task, submission or retirement, any
+        creation or migration, and any other document semantics make it immediate.
+        """
+
+        if any(write["type"] != "document.change" for write in self._writes):
+            return None
+        held: list[HeldChanges] = []
+        for plan in self._plans:
+            content, change = plan.content, plan.change
+            if content is None and not plan.retire:
+                continue
+            if plan.retire or change is None or change.loaded is None:
+                return None
+            if content is None or content["type"] != "document.change":
+                return None
+            loaded = change.loaded
+            record = loaded.record
+            if (
+                record["scope"]["kind"] != "conversation"
+                or record.get("history") != "latest"
+                or record.get("fork") != "initial"
+            ):
+                return None
+            # A migration stores a base at once.
+            if loaded.stored_version != change.version:
+                return None
+            held.append(
+                HeldChanges(
+                    loaded=loaded,
+                    ops=change.ops,
+                    base=content["content"]["kind"] == "base",
+                )
+            )
+        return held
+
+    def adopt_held(self) -> list[DocumentCommitChange]:
+        """Adopt a held commit in memory only and return its publication for the Session's own observers.
+
+        The tracked value advances and nothing else does: the stored version and the delta count stay,
+        because Storage got nothing (spec §4.1).
+        """
+
+        publications: list[DocumentCommitChange] = []
+        for plan in self._plans:
+            # Every plan of a held commit changes or reads a loaded incarnation (`holdable`).
+            change = plan.change
+            assert change is not None and change.loaded is not None
+            if not change.ops:
+                continue
+            change.loaded.value = change.value
+            publications.append(
+                {
+                    "type": "document",
+                    "kind": "change",
+                    "record": change.loaded.record,
+                    "conversationId": plan.conversation_id,
+                    "version": change.version,
+                    "value": change.value,
+                    "ops": change.ops,
+                }
+            )
+        return publications
+
+    def take_held(self, hold_of: Callable[[DocumentId], _H | None]) -> list[_H]:
+        """Store the held changes of every incarnation this commit reads or writes, before its own.
+
+        Called right before storage admission, after every fallible step: it empties the holds, so a
+        failure earlier than this keeps them, and a commit never stores a hold adopted after it in
+        line order. A document this commit only read gains its first write here, so a later job that
+        reads it waits for this commit instead of storing the same held changes again.
+        """
+
+        taken: list[_H] = []
+        for plan in self._plans:
+            # A new incarnation holds nothing yet.
+            if "createdAt" not in plan.record:
+                continue
+            hold = hold_of(plan.record["id"])
+            if hold is None:
+                continue
+            taken.append(hold)
+            own = plan.content
+            own_change = own if own is not None and own["type"] == "document.change" else None
+            change = plan.change
+            value = change.value if change is not None else hold.loaded.value
+            version = hold.loaded.value_version
+            content, ops = store_held(hold, change.ops if change is not None else [], value, version)
+            # A base this commit selected or must write covers what was held.
+            if own_change is not None and own_change["content"]["kind"] == "base":
+                content = own_change["content"]
+            write = cast(
+                StorageWrite,
+                {"type": "document.change", "id": plan.record["id"], "content": content},
+            )
+            if own_change is not None:
+                self._writes[self._writes.index(own_change)] = write
+            else:
+                self._insert_before_retirement(write)
+            if not plan.retire:
+                plan.held = _PlanHeld(ops=ops, observed=own_change is not None)
+            plan.content = write
+            # Held documents are conversation documents; one this commit only read has no owner
+            # resolved yet.
+            if plan.record["scope"]["kind"] == "conversation":
+                plan.conversation_id = plan.record["scope"]["conversationId"]
+        return taken
+
+    def _insert_before_retirement(self, write: StorageWrite) -> None:
+        """Stage a content write for an incarnation, before its retirement when it retires."""
+
+        at = next(
+            (
+                index
+                for index, candidate in enumerate(self._writes)
+                if candidate["type"] == "document.retire" and candidate["id"] == write["id"]
+            ),
+            -1,
+        )
+        if at < 0:
+            self._writes.append(write)
+        else:
+            self._writes.insert(at, write)
+
     # ── Documents ──────────────────────────────────────────────────────────
 
     async def doc(self, token: AnyDocToken, *args: Any) -> DocumentDraft:
@@ -678,8 +889,11 @@ class Transaction:
             if document.draft is not None:
                 document.draft._seal()
 
-    def adopt(self, seq: Seq) -> list[DocumentCommitChange]:
+    def adopt(self, seq: Seq) -> AdoptedDocuments:
         publications: list[DocumentCommitChange] = []
+        # Only when the commit stored held changes: then what Storage got differs from what memory
+        # adopted, and the held ones come first.
+        stored: list[DocumentCommitChange] | None = None
         for plan in self._plans:
             committed = "createdAt" in plan.record
             record: DocumentRecord = (
@@ -714,39 +928,54 @@ class Transaction:
                                 loaded.deltas_since_base = 0
                             else:
                                 loaded.deltas_since_base += 1
+            publication: DocumentCommitChange | None = None
             if plan.retire:
                 if committed:
                     self._host.evict(plan.address_id, record["id"])
-                publications.append(
-                    {
-                        "type": "document",
-                        "kind": "retire",
-                        "record": record,
-                        "conversationId": plan.conversation_id,
-                    }
-                )
+                publication = {
+                    "type": "document",
+                    "kind": "retire",
+                    "record": record,
+                    "conversationId": plan.conversation_id,
+                }
             elif plan.content is not None and plan.content["type"] == "document.copy":
-                publications.append(
-                    {
-                        "type": "document.copy",
-                        "record": record,
-                        "conversationId": plan.conversation_id,
-                        "source": plan.content["source"],
-                    }
-                )
+                publication = {
+                    "type": "document.copy",
+                    "record": record,
+                    "conversationId": plan.conversation_id,
+                    "source": plan.content["source"],
+                }
             elif change is not None and (change.loaded is None or plan.content is not None):
-                publications.append(
-                    {
-                        "type": "document",
-                        "kind": "change",
-                        "record": record,
-                        "conversationId": plan.conversation_id,
-                        "version": change.version,
-                        "value": change.value,
-                        "ops": [] if change.loaded is None else change.ops,
-                    }
-                )
-        return publications
+                publication = {
+                    "type": "document",
+                    "kind": "change",
+                    "record": record,
+                    "conversationId": plan.conversation_id,
+                    "version": change.version,
+                    "value": change.value,
+                    "ops": [] if change.loaded is None else change.ops,
+                }
+            if publication is None:
+                continue
+            held_plan = plan.held
+            if held_plan is None:
+                publications.append(publication)
+                if stored is not None:
+                    stored.append(publication)
+                continue
+            if stored is None:
+                stored = list(publications)
+            if held_plan.observed:
+                publications.append(publication)
+            # Only a document change of a loaded incarnation carries held operations; a retirement is
+            # published alone.
+            if publication["type"] == "document" and publication["kind"] == "change":
+                stored_change = dict(publication)
+                stored_change["ops"] = held_plan.ops
+                stored.append(cast(DocumentCommitChange, stored_change))
+            else:
+                stored.append(publication)
+        return AdoptedDocuments(observed=publications, stored=publications if stored is None else stored)
 
     async def _assemble(self) -> list[StorageWrite]:
         storage = self._host.storage
