@@ -241,12 +241,59 @@ def spec_section_status() -> dict[str, str]:
     return statuses
 
 
+def spec_section_bodies(version: str) -> dict[str, str]:
+    """Each section's own body in the vendored specification.
+
+    A body is the text under its heading up to the next heading of any level, so a parent's own
+    body stops at its first subsection: a section is changed by what was written in it, not by
+    what its children carry.
+    """
+
+    lines = read(vendored(version, "spec")).splitlines()
+    headings = [
+        (index, match.group(1))
+        for index, line in enumerate(lines)
+        if (match := re.match(r"^#{2,4}\s+(\d+(?:\.\d+)*)[.\s]", line))
+    ]
+    bodies: dict[str, str] = {}
+    for position, (index, number) in enumerate(headings):
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        bodies[number] = "\n".join(lines[index + 1 : end]).strip()
+    return bodies
+
+
 def vendored_spec_sections(version: str) -> set[str]:
     """Every section number the vendored specification carries."""
 
-    text = read(vendored(version, "spec"))
-    pattern = r"^#{2,4}\s+(\d+(?:\.\d+)*)[.\s]"
-    return {match.group(1) for match in re.finditer(pattern, text, re.MULTILINE)}
+    return set(spec_section_bodies(version))
+
+
+def previous_baseline() -> str:
+    """The baseline the current one re-baselines from: the newest vendored spec frozen in
+    `AUDIT_RECORDS`.
+
+    Deriving the pair keeps the re-baseline check comparing two texts instead of carrying a list
+    of the rows it agrees to overlook.
+    """
+
+    versions = [name.removeprefix("spec-").removesuffix(".md") for name in AUDIT_RECORDS]
+    assert versions, "the tree vendors no earlier baseline to re-baseline against"
+    return max(versions, key=lambda version: tuple(int(part) for part in version.split(".")))
+
+
+def spec_section_claims() -> list[tuple[str, str]]:
+    """Every `## Spec sections` row as ``(section number, status cell)``, in the order the rows read.
+
+    Row by row rather than through `spec_section_status()`: a claim split into two rows under one
+    section number is two claims, and each one owes its own proof.
+    """
+
+    claims: list[tuple[str, str]] = []
+    for cells in matrix_table("Spec sections"):
+        number = cells[0].split(" ", 1)[0]
+        if re.fullmatch(r"\d+(?:\.\d+)*", number):
+            claims.append((number, cells[-1]))
+    return claims
 
 
 def test_the_matrix_names_the_vendored_baseline() -> None:
@@ -357,6 +404,35 @@ def test_every_spec_section_row_has_the_table_arity() -> None:
     assert not wrong, (
         "these Spec sections rows do not render as the 2-cell table rows the section's header "
         f"declares: {joined}"
+    )
+
+
+def test_a_row_tested_under_a_section_this_baseline_rewrote_names_its_porting_ticket() -> None:
+    """The re-baseline rule is a check, not an aspiration: a section the new text changed or added
+    is `planned` until the ticket that ports it moves the row, and the row names that ticket.
+
+    The code and suite that satisfied a row at the previous baseline do not yet speak this one, so
+    a `tested` row under a rewritten section is either a porting ticket that dropped its name from
+    the row it moved or an overclaim of behaviour no suite proves at this baseline. The predicate
+    reads the two vendored specs and the matrix, so it moves with the baseline and holds no list
+    of rows it agrees to overlook.
+    """
+
+    current = reference_field("Version")
+    before = spec_section_bodies(previous_baseline())
+    after = spec_section_bodies(current)
+    rewritten = {number for number, body in after.items() if before.get(number) != body}
+    unexplained = [
+        f"{number} [{status}]"
+        for number, status in spec_section_claims()
+        if number in rewritten and status.startswith("tested") and not re.search(r"#\d+", status)
+    ]
+    assert not unexplained, (
+        f"these Spec sections rows are `tested` under a section whose own text v{previous_baseline()} "
+        f"to v{current} rewrote, and name no porting ticket: "
+        + "; ".join(unexplained)
+        + ". Under a re-baseline such a row goes back to `planned`, and the ticket that ports the "
+        "section moves it and names itself in the row's parenthetical."
     )
 
 
