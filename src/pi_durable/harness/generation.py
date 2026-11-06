@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, NotRequired, TypedDict, cast
 
 from ..context import Context
 from ..entries import AssistantEntry, ResetEntry, SystemEntry, UserEntry
-from ..ids import ConversationId, EntryId, TaskId
+from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue, copy_json
 from ..providers import (
     is_context_overflow,
@@ -26,16 +27,23 @@ from ..providers import (
 )
 from ..session.drafts import DraftList, DraftObject
 from ..session.transaction import Transaction
-from ..tasks import define_task
+from ..tasks import Task, define_task
 from ..types import EntryDraft, MessageRecord, TaskRecord
-from .agent import add_tools, section_extension
+from .agent import add_tools, agent_hooks, section_extension
 from .compaction import compaction_policy, create_compaction, estimate_context, select_cut
-from .inbox import Boundary, QueueModes, apply_boundary, prepare_boundary, withdraw_queued_inputs
-from .live import PROGRESS_COMMIT, LiveDoc, RunEndUnanswered, end_run, start_run
+from .inbox import (
+    Boundary,
+    QueueModes,
+    apply_boundary,
+    has_queued_reset,
+    prepare_boundary,
+    withdraw_queued_inputs,
+)
+from .live import GENERATION_TASK_NAME, PROGRESS_COMMIT, LiveDoc, RunEndUnanswered, end_run, start_run
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
-from .types import AfterFailedRun, ContextView, ModelRef, PromptInput
+from .types import AfterFailedRun, ContextView, ModelRef, PromptInput, RunSummary
 from .usage import record_usage
 from .util import (
     assign_json,
@@ -94,8 +102,29 @@ class ToolsCheckpoint(TypedDict):
     pending: list[str]
 
 
+class FinishCheckpoint(TypedDict):
+    """A run that answered, waiting for what its ``afterRun`` hooks ask for."""
+
+    phase: str
+    run: RunSummary
+
+
+class DrainCheckpoint(TypedDict):
+    """The run's after-run tasks are running; their outcomes do not decide the run's."""
+
+    phase: str
+    answer: EntryId
+    tasks: list[TaskId]
+
+
 GenerationCheckpoint = (
-    PrepareCheckpoint | RequestCheckpoint | RetryCheckpoint | PollCheckpoint | ToolsCheckpoint
+    PrepareCheckpoint
+    | RequestCheckpoint
+    | RetryCheckpoint
+    | PollCheckpoint
+    | ToolsCheckpoint
+    | FinishCheckpoint
+    | DrainCheckpoint
 )
 """Checkpoint shapes the generation phases read and write."""
 
@@ -387,6 +416,60 @@ async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None
     await runtime.commit(start, context)
 
 
+async def _finish_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """Ask the ``afterRun`` hooks for tasks and create them as the generation's children (spec §8.3).
+
+    The run answered, settled its inputs, and kept ``pi.live.run`` in commit A; this phase asks once,
+    creates what passed the checks in the commit that moves to ``drain``, and ends the run now when the
+    hooks asked for nothing.
+    """
+
+    run = cast(RunSummary, task_checkpoint(task)["run"])
+    prepared: list[dict[str, Any]] = []
+
+    async def ask(handler: Callable[..., Any]) -> None:
+        asked = await call_hook(handler, dict(run), runtime, context)
+        if isinstance(asked, Mapping):
+            requests = asked.get("tasks")
+            if requests is not None:
+                prepare_run_end_tasks(runtime, cast(Sequence[Mapping[str, Any]], requests), prepared)
+
+    await runtime.hooks.each("afterRun", ask)
+    if not prepared:
+        await end_answered_run(runtime, run["answer"], context)
+        return
+    conversation_id = runtime.conversation_id
+
+    async def create(tx: Transaction) -> dict[str, Any]:
+        created: list[TaskId] = []
+        for ready in prepared:
+            created.append(
+                await tx.create_task(
+                    ready["task"],
+                    ready["input"],
+                    {"ownership": {"kind": "task", "taskId": runtime.task_id}},
+                )
+            )
+        live = await tx.doc(LiveDoc, conversation_id)
+        held = live.get("run")
+        if held is not None and held["taskId"] == runtime.task_id and held.get("afterRun") is not None:
+            held["afterRun"]["tasks"] = created
+        return {
+            "status": "waiting",
+            "checkpoint": {"phase": "drain", "answer": run["answer"], "tasks": created},
+            "on": created,
+            "policy": "allSettled",
+        }
+
+    await runtime.commit(create, context)
+
+
+async def _drain_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """The after-run tasks are terminal, whatever their outcomes: end the run."""
+
+    await end_answered_run(runtime, task_checkpoint(task)["answer"], context)
+
+
 async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     checkpoint = task_checkpoint(task)
     if checkpoint["phase"] == "poll":
@@ -462,6 +545,8 @@ GenerationTask = define_task(
             "retry": _retry_phase,
             "poll": _poll_phase,
             "tools": _tools_phase,
+            "finish": _finish_phase,
+            "drain": _drain_phase,
         },
         "abort": _abort,
     }
@@ -723,6 +808,7 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             continuation = result.get("continue")
 
     await runtime.hooks.each("onYield", on_yield)
+    after_run = await asks_after_run(runtime, context)
     conversation_id = runtime.conversation_id
 
     async def finish(tx: Transaction) -> dict[str, Any]:
@@ -738,9 +824,21 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             "status": "terminal",
             "outcome": {"status": "completed", "result": {"entryId": entry["id"]}},
         }
+        continues = continuation if takes_continuation(continuation, boundary) else None
+        if continues is None and after_run:
+            # Commit A: the run keeps ``pi.live.run`` and asks its hooks in ``finish``; the final
+            # boundary, and the queued items it selects, wait for the run's end.
+            held = hold_run(
+                tx,
+                live,
+                runtime,
+                {"reason": "answer", "answer": entry["id"], "last": entry["id"]},
+            )
+            if held is not None:
+                return held
         placed = await apply_boundary(tx, boundary, "final", runtime.now())
-        if continuation is not None and not placed.users and not placed.reset:
-            user = {"role": "user", "content": continuation, "timestamp": runtime.now()}
+        if continues is not None:
+            user = {"role": "user", "content": continues, "timestamp": runtime.now()}
             await tx.append_entry(
                 UserEntry, conversation_id, cast(EntryDraft, {"model": [user]})
             )
@@ -939,6 +1037,9 @@ async def finish_tool_round(
     # Read from the phase's agent, as every agent field; a ``configure()`` during the round
     # applies at its end.
     max_turns = (await runtime.agent(context)).max_turns
+    # A terminate round asks the hooks too: the run ends, and its last entry is the newest result or
+    # the handoff's reset.
+    after_run = terminate and await asks_after_run(runtime, context)
 
     async def finish(tx: Transaction) -> dict[str, Any]:
         boundary = await prepare_boundary(
@@ -950,6 +1051,8 @@ async def finish_tool_round(
             await add_tools(tx, conversation_id, added)
         live = await tx.doc(LiveDoc, conversation_id)
         now = runtime.now()
+        # The run's last entry so far: the newest result, or the assistant when no result has an entry.
+        last = max([assistant, *results])
         if handoff is not None:
             message = {"role": "user", "content": handoff, "timestamp": now}
             entry = await tx.append_entry(
@@ -958,6 +1061,13 @@ async def finish_tool_round(
                 cast(EntryDraft, {"head": "self", "model": [message]}),
             )
             boundary.head = entry["id"]
+            last = entry["id"]
+        if after_run:
+            held = hold_run(
+                tx, live, runtime, {"reason": "terminate", "answer": assistant, "last": last}
+            )
+            if held is not None:
+                return held
         if terminate:
             placed = await apply_boundary(tx, boundary, "final", now)
             end_run(tx, live, runtime.task_id, {"status": "done", "answer": assistant})
@@ -1178,6 +1288,132 @@ async def _end_failed_run(
         await start_run(
             tx, conversation_id, live, placed.users, task_for(runtime), placed.first, keep_failure=True
         )
+
+
+async def asks_after_run(runtime: Any, context: Context) -> bool:
+    """Whether the phase's agent selects an ``afterRun`` hook, so a run that answers waits for its
+    tasks (spec section 8.3)."""
+
+    hooks = agent_hooks(await runtime.agent(context), GENERATION_TASK_NAME)
+    return any(callable(entry["handlers"].get("afterRun")) for entry in hooks)
+
+
+def takes_continuation(continuation: Any, boundary: Boundary) -> bool:
+    """Whether an answer's ``onYield`` continuation is taken (spec section 8.3).
+
+    Decided from the inbox before the final boundary places anything: only when it holds no user item,
+    of which the boundary would select one, and no reset, which would otherwise run first. A
+    continuation starts the turn count over.
+    """
+
+    if continuation is None:
+        return False
+    items = boundary.inbox["items"]
+    return not any(item["mode"] in ("steer", "followUp") for item in items) and not has_queued_reset(
+        items
+    )
+
+
+def hold_run(tx: Transaction, live: Any, runtime: Any, end: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Commit A of a run that answered with ``afterRun`` hooks selected (spec section 8.3).
+
+    Settle the run's inputs ``done`` with the answer and keep ``pi.live.run`` for the after-run tasks,
+    then ask the hooks in ``finish``. The final boundary waits for the run's end, so queued items stay
+    queued. A run the generation no longer owns is left alone.
+    """
+
+    run = live.get("run")
+    if run is None or run["taskId"] != runtime.task_id:
+        return None
+    for submitted in list(run["inputs"]):
+        tx.settle_submission(cast(SubmissionId, submitted), {"status": "done", "answer": end["answer"]})
+    run["inputs"] = []
+    run["afterRun"] = {}
+    for key in ("generation", "tools", "nestedTools"):
+        if key in live:
+            del live[key]
+    # A run started before `first` was recorded has its answer as its first entry.
+    summary: RunSummary = {
+        "reason": end["reason"],
+        "first": run.get("first") if run.get("first") is not None else end["answer"],
+        "answer": end["answer"],
+        "last": end["last"],
+    }
+    return {"status": "running", "checkpoint": {"phase": "finish", "run": summary}}
+
+
+def prepare_run_end_tasks(
+    runtime: Any, requests: Sequence[Mapping[str, Any]], prepared: list[dict[str, Any]]
+) -> None:
+    """Check the tasks one ``afterRun`` hook asked for, off the line, and add those that pass.
+
+    A broken request is skipped instead of failing the creating commit: its kind must be an installed
+    task that is not built-in, its input JSON, and its definition's ``initial()`` must return a JSON
+    checkpoint of one of its phases. The task is created from the installed definition, as every task
+    runs under it, with that checkpoint, so ``initial()`` runs once. Then throw the rejections, which
+    ``hooks.each`` reports against the hook's extension.
+    """
+
+    rejected: list[Exception] = []
+    for request in requests:
+        try:
+            asked = request["task"]
+            name = str(asked.definition.name)
+            if name.startswith("pi."):
+                raise ValueError(f"An afterRun hook cannot start the built-in task {name}")
+            installed = runtime.registry.task(name)
+            if installed is None:
+                raise ValueError(f"Task {name} is not installed")
+            input = copy_json(request["input"])
+            definition = installed.definition
+            checkpoint = copy_json(definition.initial(input))
+            if not isinstance(checkpoint, Mapping) or checkpoint.get("phase") not in definition.phases:
+                phase = checkpoint.get("phase") if isinstance(checkpoint, Mapping) else checkpoint
+                raise ValueError(f"Task {name} starts at the unknown phase {phase}")
+            prepared.append(
+                {
+                    "task": Task(
+                        replace(definition, initial=lambda _input, held=checkpoint: held)
+                    ),
+                    "input": input,
+                }
+            )
+        except Exception as error:
+            rejected.append(error)
+    if len(rejected) == 1:
+        raise rejected[0]
+    if len(rejected) > 1:
+        raise ExceptionGroup(f"{len(rejected)} afterRun task requests were rejected", rejected)
+
+
+async def end_answered_run(runtime: Any, answer: EntryId, context: Context) -> None:
+    """Commit B of a run that answered (spec section 8.3): its after-run tasks are terminal, or there
+    were none.
+
+    Place what the final boundary selects, end the run without a failure, and start the next one for
+    selected user items.
+    """
+
+    conversation_id = runtime.conversation_id
+
+    async def finish(tx: Transaction) -> dict[str, Any]:
+        settings = runtime.settings
+        boundary = await prepare_boundary(
+            tx,
+            conversation_id,
+            QueueModes(settings.steering_mode, settings.follow_up_mode),
+        )
+        live = await tx.doc(LiveDoc, conversation_id)
+        placed = await apply_boundary(tx, boundary, "final", runtime.now())
+        end_run(tx, live, runtime.task_id, {"status": "done", "answer": answer})
+        if placed.users:
+            await start_run(tx, conversation_id, live, placed.users, task_for(runtime), placed.first)
+        return {
+            "status": "terminal",
+            "outcome": {"status": "completed", "result": {"entryId": answer}},
+        }
+
+    await runtime.commit(finish, context)
 
 
 async def fail_model_error(runtime: Any, text: str, context: Context) -> None:

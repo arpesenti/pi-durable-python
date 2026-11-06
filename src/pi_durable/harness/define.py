@@ -10,6 +10,7 @@ from .types import (
     Extension,
     HookRegistration,
     PromptSection,
+    RunEndTask,
     ToolRegistration,
     Wrap,
 )
@@ -96,6 +97,12 @@ def hook(task: AnyTask, handlers: Mapping[str, Any]) -> HookRegistration:
     return HookRegistration(task=task.definition.name, handlers=dict(handlers))
 
 
+def run_end_task(task: AnyTask, input: Any) -> RunEndTask:
+    """A task an ``afterRun`` hook asks the generation to run, with the input it starts on."""
+
+    return {"task": task, "input": input}
+
+
 def wrap_tool(tool: ToolRegistration, wrapper: Callable[[ToolRegistration], ToolRegistration]) -> Wrap:
     """Wrap the tool named like ``tool`` wherever the wrapping extension is selected."""
 
@@ -108,4 +115,12 @@ def wrap_section(key: str, wrapper: Callable[[PromptSection], PromptSection]) ->
     return Wrap(section=key, wrap=wrapper)
 
 
-__all__ = ["define_extension", "define_tool", "hook", "section", "wrap_section", "wrap_tool"]
+__all__ = [
+    "define_extension",
+    "define_tool",
+    "hook",
+    "run_end_task",
+    "section",
+    "wrap_section",
+    "wrap_tool",
+]

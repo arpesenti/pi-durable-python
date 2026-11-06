@@ -575,6 +575,31 @@ class GenerationHooks(TypedDict, total=False):
     afterResponse: Callable[..., Any]
     onYield: Callable[..., Any]
     afterTools: Callable[..., Any]
+    afterRun: Callable[..., Any]
+
+
+class RunSummary(TypedDict):
+    """How a run ended, for ``afterRun`` hooks.
+
+    Read the run's history with ``api.entries({ minEntryId: first, maxEntryId: last })``.
+    """
+
+    reason: Literal["answer", "terminate"]
+    """A final answer, or a tool round whose every call asked to ``terminate``."""
+    first: EntryId
+    """The run's first entry (``LiveRun.first``); the answer itself for a run that has none."""
+    answer: EntryId
+    """The answer, or the terminating round's tool-calling answer, whose results follow it."""
+    last: EntryId
+    """The run's last entry: the answer; for a ``terminate`` round its newest result, or the reset
+    of its handoff."""
+
+
+class RunEndTask(TypedDict):
+    """A task an ``afterRun`` hook asks for, built by :func:`run_end_task`."""
+
+    task: Any
+    input: JsonValue
 
 
 class CompactionHooks(TypedDict, total=False):
@@ -999,6 +1024,8 @@ __all__ = [
     "EnvTarget",
     "Extension",
     "GenerationHooks",
+    "RunEndTask",
+    "RunSummary",
     "HarnessInspection",
     "HarnessOptions",
     "HarnessSettings",

@@ -184,9 +184,11 @@ async def generation_id(harness: Any, conversation_id: Any) -> Any:
 
 
 async def test_answers_a_run_interrupted_by_a_host_that_died_while_the_model_answered() -> None:
-    # The port's Session layer does not yet charge a re-adopted attempt, so the record is left as a
-    # dead host left it with ``restarts`` set, the way the recovery suite leaves what an earlier version
-    # stored; the rule under test is the generation's own.
+    # The port charges a re-adopted attempt only for a task it finds ``running`` at open
+    # (``scheduler.py:539``), and a close that unwinds the in-flight stream parks it ``pending`` with
+    # no count. The record is therefore left as the dead host left it -- ``restarts`` set, the way the
+    # recovery suite leaves what an earlier version stored -- and the generation's own rule, that an
+    # in-flight attempt is a failed attempt under the retry policy, is asserted as upstream asserts it.
     storage = ControlledStorage()
     setup = chat_setup()
     setup.settings["progress"] = {"partial_interval_ms": 0}
