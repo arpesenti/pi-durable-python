@@ -1,13 +1,16 @@
-"""Committed observation: exact-frame watches and read-only attached states.
+"""Committed observation: coalesced watches and read-only attached states.
 
-A watch is bound to one committed revision or view mount. It queues every committed change while
-its listener runs, so callbacks never overlap, and collapses more than
-``MAX_PENDING_WATCH_FRAMES`` pending frames into one root replacement. A watch ends five ways, and
-only those: ``stopped`` by its own ``stop()``, ``aborted`` by the acquisition context's abort signal,
-``ended`` or ``failed`` by its Session, and ``listener_error`` by the error its listener raised. A
-retirement is a change, not an end, so a watch whose document retired keeps its last value until it
-is stopped or the Session ends. A state publishes every later revision in order through its
-listeners and keeps its last value at close.
+A watch is bound to one committed revision or view mount. While its listener runs, later commits
+wait in :class:`~pi_durable.delta.PendingOps` and are delivered folded — one call with the newest
+value, the folded operations, the newest commit's context, and a retirement flag — so a slow or
+unstarted listener costs one call per burst and, past the pending-operation bound, one root
+replacement. A watch follows its address rather than one incarnation: a retirement is a change with
+the last value and no operations, and a document created at that address later arrives on the same
+watch as a root replacement. A watch ends five ways, and only those: ``stopped`` by its own
+``stop()``, ``aborted`` by the acquisition context's abort signal, ``ended`` or ``failed`` by its
+Session, and ``listener_error`` by the error its listener raised. Termination drops every reference
+the watch holds into its Session and its listener, keeping only its last value. A state publishes
+every later revision in order through its listeners and keeps its last value at close.
 """
 
 from __future__ import annotations
@@ -18,25 +21,34 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from ..context import BACKGROUND_CONTEXT, AbortSignal, Context, without_abort_signal
-from ..delta import Op
+from ..delta import Op, PendingOps
 from ..errors import is_failure
-from ..json import JsonObject
+from ..ids import DocumentId
 from ..types import (
     DocumentCommitChangeInput,
+    WatchCall,
     WatchEnd,
     WatchEndInput,
+    WatchValueCall,
     to_document_commit_change,
     to_watch_end,
+    watch_value_call,
 )
 
-ObservedDocumentValue = JsonObject | None
-"""One observed revision; ``None`` is the canonical retirement value."""
 
-MAX_PENDING_WATCH_FRAMES = 100
-"""Maximum exact committed frames retained behind one unavailable watch listener."""
+class _Unchanged:
+    """The type of :data:`UNCHANGED`, a value a delivery does not carry."""
+
+
+UNCHANGED = _Unchanged()
+"""The marker of a delivery that brings no new value: a retirement keeps the last one."""
 
 RETIREMENT_OPERATIONS: list[Op] = [["r", None]]
-"""Canonical terminal update for a retired document incarnation."""
+"""Canonical terminal update for a retired document incarnation.
+
+Only an attached :class:`CommittedState` applies it; a 1.5.0 watch is never given ``None``, because
+Durable has no value for an absent document (spec §9.1).
+"""
 
 
 @dataclass(slots=True)
@@ -118,10 +130,12 @@ class CommittedState:
         self._released = True
         self._release()
 
-    def advance(self, value: Any, _ops: list[Op], context: Context) -> None:
-        """Publish one exact committed revision to every listener."""
+    def advance(self, call: WatchCall[Any], context: Context) -> None:
+        """Publish one committed revision to every listener; a state reads only its value."""
 
-        self._advance(value, context)
+        if call["kind"] != "value":
+            return
+        self._advance(call["value"], context)
 
     def _advance(self, value: Any, context: Context) -> None:
         if self._disposed or self._closed:
@@ -186,9 +200,16 @@ def observed_operations(
 
 
 class CommittedWatch:
-    """Serialized exact-frame watch bound to one document incarnation (spec §9.2)."""
+    """Serialized coalesced watch of one document address, view mount, or task-graph mount (§9.2).
+
+    Commits that land while the listener runs, or before :meth:`start`, wait folded in one
+    :class:`~pi_durable.delta.PendingOps` queue and arrive together: the newest value, the folded
+    operations or one root replacement past the bound, the newest commit's context, and a retirement
+    flag. A watch is the host's to stop, and never ends on a retirement.
+    """
 
     __slots__ = (
+        "__weakref__",
         "_cancellation_remove",
         "_cancellation_signal",
         "_closed",
@@ -198,10 +219,12 @@ class CommittedWatch:
         "_listener",
         "_observed_version",
         "_pending",
-        "_release",
-        "_replace",
+        "_pending_change",
+        "_pending_context",
+        "_pending_retired",
+        "_pending_value",
+        "_record_id",
         "_report",
-        "_retired",
         "_running",
         "_scheduled",
         "_started",
@@ -214,23 +237,26 @@ class CommittedWatch:
         detach: Callable[[], None],
         report: Callable[[BaseException], None],
         observed_version: int = 0,
-        replace: Callable[[], Any] | None = None,
+        record_id: DocumentId | None = None,
     ) -> None:
         self._value: Any = value
-        self._detach = detach
-        self._report = report
+        self._detach: Callable[[], None] | None = detach
+        self._report: Callable[[BaseException], None] | None = report
         self._observed_version = observed_version
-        self._replace = replace
+        self._record_id = record_id
         self._closed: asyncio.Future[WatchEnd] = asyncio.get_running_loop().create_future()
         # Awaiting a cancellation must not cancel the watch's own terminal result; `closed` and
         # every `stop()` return this same shielded value, as v1.3.0 returns one common promise.
         self._terminal: asyncio.Future[WatchEnd] = asyncio.shield(self._closed)
-        self._pending: list[tuple[Any, list[Op], Context]] = []
-        self._listener: Callable[[Any, list[Op], Context], Any] | None = None
+        self._pending = PendingOps()
+        self._pending_change = False
+        self._pending_value: Any = value
+        self._pending_context: Context = BACKGROUND_CONTEXT
+        self._pending_retired = False
+        self._listener: Callable[[WatchCall[Any], Context], Any] | None = None
         self._started = False
         self._scheduled = False
         self._running = False
-        self._retired = False
         self._end: WatchEnd | None = None
         self._cancellation_signal: AbortSignal | None = None
         self._cancellation_remove: Callable[[], None] | None = None
@@ -245,15 +271,9 @@ class CommittedWatch:
     def closed(self) -> asyncio.Future[WatchEnd]:
         return self._terminal
 
-    @property
-    def retired(self) -> bool:
-        """Whether the observed incarnation retired; a retired observer pins nothing."""
-
-        return self._retired
-
     def start(
         self,
-        listener: Callable[[Any, list[Op], Context], Awaitable[None] | None],
+        listener: Callable[[WatchCall[Any], Context], Awaitable[None] | None],
     ) -> None:
         """Install the sole asynchronous listener. Never invokes it inline."""
 
@@ -263,7 +283,7 @@ class CommittedWatch:
             raise RuntimeError("Watch is stopped")
         self._started = True
         self._listener = listener
-        if self._pending:
+        if self._pending_change:
             self._schedule()
 
     def stop(self) -> asyncio.Future[WatchEnd]:
@@ -304,39 +324,77 @@ class CommittedWatch:
         else:
             self._terminate({"kind": "failed", "error": failure})
 
-    def advance(self, change: DocumentCommitChangeInput, context: Context) -> None:
-        """Queue the committed document change, skipping one this observer already holds."""
+    def advance(self, call: WatchCall[Any], context: Context) -> None:
+        """Queue one committed call: the seam a mount, or an observer of one, advances.
 
-        if self._end is not None or self._retired:
+        A retirement is a call like any other and not an end: it keeps the last value and carries no
+        operations, and the watch stays open until :meth:`stop` or the Session's own end.
+        """
+
+        if self._end is not None or call["kind"] != "value":
+            return
+        self._queue(call["value"], call["ops"], call["retired"], context)
+
+    def advance_document(self, change: DocumentCommitChangeInput, context: Context) -> None:
+        """Queue the committed document change at this watch's address (spec §9.2).
+
+        A watch follows its address rather than one incarnation: a retirement keeps the last value
+        and carries no operations, and a document created at the address later arrives as a root
+        replacement of the new incarnation, folded with what is pending.
+        """
+
+        if self._end is not None:
             return
         settled = to_document_commit_change(change)
         if settled["type"] != "document":
             return
+        if settled["kind"] == "retire":
+            # Durable has no value for an absent document: the retirement carries neither a value
+            # nor operations, only the flag (spec §9.1).
+            self._queue(UNCHANGED, [], True, context)
+            return
         ops, version = observed_operations(self._observed_version, settled)
+        if self._record_id is not None and settled["record"]["id"] != self._record_id:
+            ops, version = [["r", settled["value"]]], settled["version"]
         if not ops:
             return
         self._observed_version = version
-        self.advance_frame(None if settled["kind"] == "retire" else settled["value"], ops, context)
+        self._record_id = settled["record"]["id"]
+        self._queue(settled["value"], ops, False, context)
 
-    def advance_frame(self, value: Any, ops: list[Op], context: Context) -> None:
-        """Queue one exact committed frame for a view, graph, or event stream.
+    def _queue(
+        self,
+        value: Any,
+        ops: list[Op],
+        retired: bool,
+        context: Context,
+    ) -> None:
+        """Fold one change into what waits behind the listener, and schedule a call for it."""
 
-        A retirement is a frame like any other, not an end: it is the last one this watch is given
-        for a retired address, and the watch stays open until :meth:`stop` or the Session's own end.
-        """
-
-        if self._end is not None or self._retired:
-            return
-        if value is None:
-            self._retired = True
-        if len(self._pending) >= MAX_PENDING_WATCH_FRAMES:
-            self._pending.clear()
-            replacement = self._replace() if self._replace is not None else value
-            self._pending.append((replacement, [["r", replacement]], context))
-        else:
-            self._pending.append((value, ops, context))
+        if ops:
+            self._pending.push(ops)
+        if value is not UNCHANGED:
+            self._pending_value = value
+        if retired:
+            self._pending_retired = True
+        # The newest commit's Context is preserved, without the producer's cancellation.
+        self._pending_context = without_abort_signal(context)
+        self._pending_change = True
         if self._started:
             self._schedule()
+
+    def _take(self) -> WatchValueCall[Any] | None:
+        """Take what waited behind the listener as one call, or ``None`` when nothing did."""
+
+        if not self._pending_change:
+            return None
+        self._pending_change = False
+        retired = self._pending_retired
+        self._pending_retired = False
+        value = self._pending_value
+        ops = self._pending.take()
+        # Past the pending-operation bound the folded operations give way to one root replacement.
+        return watch_value_call(value, [["r", value]] if ops is None else ops, retired)
 
     def _schedule(self) -> None:
         if self._scheduled or self._running or self._end is not None:
@@ -353,47 +411,59 @@ class CommittedWatch:
 
     async def _drain(self) -> None:
         try:
-            while self._end is None and self._pending:
-                value, ops, context = self._pending.pop(0)
-                self._value = value
+            while self._end is None:
+                call = self._take()
+                if call is None:
+                    break
+                # Immediately before the invocation, `value` advances to the delivered revision.
+                self._value = call["value"]
                 listener = self._listener
                 assert listener is not None
+                context = self._pending_context
                 try:
-                    result = listener(value, ops, without_abort_signal(context))
+                    result = listener(call, context)
                     if isinstance(result, Awaitable):
                         await result
                 except BaseException as error:
                     if not is_failure(error):
                         raise
                     if self._end is None:
-                        self._report(error)
+                        report = self._report
+                        if report is not None:
+                            report(error)
                         self._terminate({"kind": "listener_error", "error": error})
-                    break
-                if value is None:
-                    # The retirement was the last frame: nothing further is queued for a retired
-                    # address, and the watch itself stays open (#35).
                     break
         finally:
             self._running = False
-            if self._end is None and self._pending:
+            if self._end is None and self._pending_change:
                 self._schedule()
 
     def _terminate(self, end: WatchEndInput) -> None:
-        """End the watch, once: detach, drop pending frames, and settle ``closed``.
+        """End the watch, once: drop every reference into the Session, and settle ``closed``.
 
-        The end arrives in either spelling (#33); ``closed`` settles with the ``kind`` one alone.
+        What is still queued is discarded, and the listener, the detach closure, the report sink,
+        and the abort hook are released, so a stopped watch that is still referenced keeps nothing of
+        its Session or its listener — only its last value (spec §9.1). The end arrives in either
+        spelling (#33); ``closed`` settles with the ``kind`` one alone.
         """
 
         if self._end is not None:
             return
         self._end = to_watch_end(end)
-        self._pending.clear()
+        self._pending = PendingOps()
+        self._pending_change = False
+        self._pending_retired = False
+        self._pending_context = BACKGROUND_CONTEXT
+        self._listener = None
+        self._report = None
         if self._cancellation_remove is not None:
             remove = self._cancellation_remove
             self._cancellation_remove = None
             remove()
+        detach, self._detach = self._detach, None
         try:
-            self._detach()
+            if detach is not None:
+                detach()
         finally:
             if not self._closed.done():
                 self._closed.set_result(self._end)
@@ -403,8 +473,7 @@ __all__ = [
     "CommittedState",
     "CommittedWatch",
     "Delivery",
-    "MAX_PENDING_WATCH_FRAMES",
-    "ObservedDocumentValue",
     "RETIREMENT_OPERATIONS",
+    "UNCHANGED",
     "observed_operations",
 ]

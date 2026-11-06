@@ -124,7 +124,7 @@ async def test_every_way_a_watch_ends_emits_its_tag_under_kind() -> None:
     failing = await session.watch_doc(EndStateDoc, context)
     assert failing is not None
 
-    def throwing_listener(_value: Any, _ops: Any, _delivery_context: Any) -> None:
+    def throwing_listener(_call: Any, _delivery_context: Any) -> None:
         raise RuntimeError("listener failed")
 
     failing.start(throwing_listener)
@@ -142,7 +142,7 @@ async def test_every_way_a_watch_ends_emits_its_tag_under_kind() -> None:
         await tx.retire_doc(EndStateDoc)
 
     await session.commit(retire, context)
-    retired.start(lambda _value, _ops, _delivery_context: None)
+    retired.start(lambda _call, _delivery_context: None)
     # A retirement is a change and not an end: the watch is the host's to stop (spec §9.1).
     assert await retired.stop() == {"kind": "stopped"}
 

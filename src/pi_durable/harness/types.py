@@ -944,7 +944,7 @@ class Conversation(Protocol):
 
 
 ConversationWatch: TypeAlias = WatchHandle[Any]
-"""A serialized exact-frame watch of one conversation's view."""
+"""A serialized coalesced watch of one conversation's view."""
 
 
 class Submission(Protocol):

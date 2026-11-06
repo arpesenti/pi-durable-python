@@ -1,7 +1,7 @@
 """Translated v1.3.0 ``harness-view`` suite.
 
 Covers the conversation view mount: hydration of the active transcript and built-in documents,
-one exact frame per touching commit, structural sharing, head cuts and forks, retirement,
+one frame per touching commit, structural sharing, head cuts and forks, retirement,
 overflow, independent observers, close, cancellation, listener isolation, and unrelated commits.
 """
 
@@ -37,8 +37,8 @@ async def record(conversation: Any) -> dict[str, Any]:
     initial = watch.value
     frames: list[dict[str, Any]] = []
 
-    async def listener(value: Any, ops: Any, _context: Any) -> None:
-        frames.append({"value": value, "ops": ops})
+    async def listener(call: Any, _context: Any) -> None:
+        frames.append({"value": call["value"], "ops": call["ops"]})
 
     watch.start(listener)
     return {"watch": watch, "initial": initial, "frames": frames}
@@ -291,21 +291,26 @@ async def test_unmounts_a_retired_document_and_mounts_its_recreation_whole() -> 
     await harness.close(context)
 
 
-async def test_replaces_undelivered_frames_with_the_newest_view_after_100_pending_frames() -> None:
+async def test_folds_undelivered_commits_into_one_call_whose_ops_reach_the_newest_view() -> None:
     opened = await open_chat(MemoryStorage(), chat_setup())
     harness, root = opened["harness"], opened["root"]
     watch = await root.watch(context)
+    acquisition = watch.value
     for _index in range(101):
         await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "note"}), context)
     frames: list[dict[str, Any]] = []
 
-    async def listener(value: Any, ops: Any, _context: Any) -> None:
-        frames.append({"value": value, "ops": ops})
+    async def listener(call: Any, _context: Any) -> None:
+        frames.append({"value": call["value"], "ops": call["ops"]})
 
     watch.start(listener)
     await drained()
     assert len(frames) == 1
-    assert frames[0]["ops"] == [["r", frames[0]["value"]]]
+    # One hundred and one appends is 101 pending operations, well under the root-replacement bound:
+    # the call carries each commit's own splice, and replaying them reaches the newest view.
+    assert [op[0] for op in frames[0]["ops"]] == ["p"] * 101
+    assert all(op[1] == ["entries"] for op in frames[0]["ops"])
+    assert apply_immutable(acquisition, frames[0]["ops"]) == frames[0]["value"]
     assert len(frames[0]["value"]["entries"]) == 101
     await watch.stop()
     await harness.close(context)
@@ -392,7 +397,7 @@ async def test_shares_one_mount_between_concurrent_observers_and_isolates_a_fail
     assert failing.value is shared.value
     shared.dispose()
 
-    async def listener(_value: Any, _ops: Any, _context: Any) -> None:
+    async def listener(_call: Any, _context: Any) -> None:
         raise RuntimeError("listener failed")
 
     failing.start(listener)

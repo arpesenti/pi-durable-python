@@ -643,7 +643,7 @@ class Harness(SessionImpl):
         return await self._graph.state(context)
 
     async def watch_task_graph(self, context: Context) -> Any:
-        """Return the task-graph mount through its serialized exact-frame watch."""
+        """Return the task-graph mount through its serialized coalesced watch."""
 
         self.assert_usable()
         return await self._graph.watch(context)

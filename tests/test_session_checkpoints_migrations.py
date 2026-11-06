@@ -538,14 +538,22 @@ async def test_writes_the_required_base_on_the_first_transaction_then_writes_del
     watch = await session.watch_doc(Old, context)
     assert watch is not None
     frames: list[dict[str, Any]] = []
-    watch.start(lambda value, ops, _context: frames.append({"value": value, "ops": ops}))
+
+    def observe(call: Any, _context: Any) -> None:
+        frames.append({"value": call["value"], "ops": call["ops"]})
+
+    watch.start(observe)
     assert await session.snapshot(Current, context) == {"count": 4}
     snapshot = await session.snapshot(Current, context)
     # An observer of the new shape: the migration changes nothing it sees.
     current = await session.watch_doc(Current, context)
     assert current is not None
     current_frames: list[Any] = []
-    current.start(lambda value, _ops, _context: current_frames.append(value))
+
+    def observe_new_shape(call: Any, _context: Any) -> None:
+        current_frames.append(call["value"])
+
+    current.start(observe_new_shape)
 
     async def touch(tx: Any) -> None:
         await tx.doc(Current)
@@ -1175,8 +1183,8 @@ async def test_sends_observers_of_an_older_shape_a_root_replacement() -> None:
     frames: list[Any] = []
     delivered = asyncio.Event()
 
-    def listener(_value: Any, ops: Any, _context: Any) -> None:
-        frames.append(ops)
+    def listener(call: Any, _context: Any) -> None:
+        frames.append(call["ops"])
         delivered.set()
 
     watch.start(listener)

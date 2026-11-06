@@ -60,7 +60,6 @@ from ..types import (
 from .observation import (
     CommittedState,
     CommittedWatch,
-    ObservedDocumentValue,
     observed_operations,
 )
 from .transaction import LoadedDocument, Transaction, TransactionScope
@@ -133,11 +132,16 @@ def _record_address_id(record: DocumentRecord) -> str:
 
 @dataclass(slots=True)
 class _WatchAttachment:
-    """One watch subscribed to a committed incarnation, and the incarnation it pins."""
+    """One watch subscribed to a document address, and the incarnation it currently pins.
 
-    record_id: DocumentId
+    A watch follows its address, so a retirement unpins what it held and a document created at that
+    address later is pinned again for the same watch (spec §9.2).
+    """
+
+    address_id: str
+    record_id: DocumentId | None
     watch: CommittedWatch
-    release: Callable[[], None]
+    release: Callable[[], None] | None
 
 
 @dataclass(slots=True)
@@ -658,11 +662,26 @@ class SessionImpl:
         for entry in list(self._watches):
             for change in documents:
                 settled = to_document_commit_change(change)
-                if settled["type"] != "document" or settled["record"]["id"] != entry.record_id:
+                if (
+                    settled["type"] != "document"
+                    or _record_address_id(settled["record"]) != entry.address_id
+                ):
                     continue
+                # A watch follows its address: while it is absent the watch pins nothing, and a new
+                # incarnation is pinned for the same watch.
                 if settled["kind"] == "retire":
-                    entry.release()
-                entry.watch.advance(settled, context)
+                    if entry.release is not None:
+                        entry.release()
+                    entry.release = None
+                    entry.record_id = None
+                elif entry.record_id != settled["record"]["id"]:
+                    if entry.release is not None:
+                        entry.release()
+                    entry.record_id = settled["record"]["id"]
+                    entry.release = self._pin_document(
+                        entry.address_id, settled["record"]["id"]
+                    )
+                entry.watch.advance_document(settled, context)
         for listener in list(self._internal_listeners):
             contained(partial(listener, publication, context), self.fail)
         for listener in list(self._commit_listeners):
@@ -845,12 +864,15 @@ class SessionImpl:
             release()
 
         watch = CommittedWatch(
-            cast(ObservedDocumentValue, loaded.value),
+            loaded.value,
             detach,
             self.report,
             loaded.value_version,
+            loaded.record["id"],
         )
-        self._watches.append(_WatchAttachment(loaded.record["id"], watch, release))
+        self._watches.append(
+            _WatchAttachment(loaded.address_id, loaded.record["id"], watch, release)
+        )
         return watch
 
     async def snapshot_as_of(self, token: AnyDocToken, *args: Any) -> JsonObject | None:
