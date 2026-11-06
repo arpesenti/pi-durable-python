@@ -429,8 +429,6 @@ def advance_mount(
     frame_context = without_abort_signal(context)
     if not doc_ops and not appended:
         # A publication that touches nothing mounted creates no revision.
-        for windowed in list(mount.observers):
-            _publish(windowed, windowed.value, windowed.value, [], publication, frame_context, report)
         return
     if doc_ops:
         mount.docs = docs
@@ -453,28 +451,6 @@ def advance_mount(
         advance = getattr(windowed.observer, "advance", None)
         if advance is not None:
             contained(partial(advance, call, frame_context), report)
-        # Every publication reaches event adapters, including one that changes no mounted state.
-        _publish(windowed, previous, windowed.value, ops, publication, frame_context, report)
-
-
-def _publish(
-    windowed: Windowed,
-    before: ConversationView,
-    after: ConversationView,
-    ops: list[Op],
-    publication: CommitPublication,
-    frame_context: Context,
-    report: Callable[[BaseException], None],
-) -> None:
-    """Give one consumer the whole publication, on top of its own window's change."""
-
-    publication_listener = getattr(windowed.observer, "publication", None)
-    if publication_listener is None:
-        return
-    contained(
-        partial(publication_listener, before, after, ops, publication, frame_context),
-        report,
-    )
 
 
 def _prefixed(op: Op, prefix: list[Any]) -> Op:
