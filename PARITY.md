@@ -336,7 +336,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `CommitObserver` | type | `CommitObserver` | test_session_observers.py, test_harness_storage_failure.py, test_harness_reports.py | tested (`advance(publication, context)` / `end(end)` replaces the `subscribe_commits()` listener: exactly what Storage made durable, handed on the line after the Session's own followers, a throw reported and the observer detached; #44) |
 | `CommitOptions` | type | `CommitOptions` | — | planned (1.5.0: the `persistence` mark one commit takes; #47) |
 | `CommitPersistence` | type | `CommitPersistence` | — | planned (1.5.0: `{kind: "immediate"}` or `{kind: "deferred", within_ms?}`; #47) |
-| `CommitPublication` | type | `CommitPublication` | test_types.py | tested (1.5.0 keeps the shape and narrows when it is published; #42) |
+| `CommitPublication` | type | `CommitPublication` | test_types.py | tested (1.5.0 keeps the shape) |
 | `CommitResult` | type | `CommitResult` | test_storage_commit_batches.py | tested (1.5.0: `{stored, refused?}` — what one `Storage.commit_batches()` call stored, the refusal a resolved outcome; #38) |
 | `CommonDocDefinition` | type | `CommonDocDefinition` | test_session_definitions.py | tested |
 | `ContextEdit` | type | `ContextEdit` | test_types.py | tested |
@@ -644,7 +644,7 @@ SQLite backend and migrations.
 | 3.5 Bases and checkpoints | planned (a held deferred commit runs its predicate once against the stored count and stores its base with the held operations; #47) |
 | 3.6 Versions and migrations | planned (`documentState()` left the access-driven migration list with #44: what migrates is now what an observer is shown whole. `pi.live` is version 3 and stored versions 1 and 2 migrate in place, the persisted version constants are read at their definition sites, and the SQLite schema and JSONL format stand still: test_harness_live_migrations.py, #36) |
 | 3.7 Forks | planned (fork metadata hydrates watches and mounted views only; the document-state path is gone; #44) |
-| 4 Transactions and storage ownership | planned (group commit: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound, and outcomes in line order — see the vendored group-commit document; #42) |
+| 4 Transactions and storage ownership | tested (group commit on the mutation line: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound enforced and observable, outcomes delivered in line order, and durable-before-published — `tests/test_session_group_commit.py`, `tests/test_harness_group_commit.py`. The deferred half of 3.4 Mutation ownership is #47's and stays planned) |
 | 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
 | 5 Tasks | tested |
 | 5.1 Definition | planned (the `kind`-tagged `ReportFrom` landed with #33. What 1.5.0 still owes here is the `options` a commit takes — `TaskRuntime.commit` takes none, and that window is #47's — and `TaskRuntime.entries()`, which #50's continue work landed without and no open ticket holds) |

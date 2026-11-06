@@ -62,6 +62,7 @@ from ..types import (
 )
 from .drafts import DocumentDraft, PreparedDraft
 from .forks import prepare_fork_document_copies
+from .keys import document_key, incarnation_key, scope_key, table_keys
 
 AnyTaskRecord = TaskRecord
 _INTERNAL_SCAN_PAGE_SIZE = 256
@@ -411,9 +412,7 @@ class Transaction:
                 options.get("conversationId") is not None
                 and options["conversationId"] != owner["conversationId"]
             ):
-                raise ValueError(
-                    f"A child task lives in its owner's conversation {owner['conversationId']}"
-                )
+                raise ValueError(f"A child task lives in its owner's conversation {owner['conversationId']}")
         conversation_id = (
             (owner["conversationId"] if owner is not None else None)
             or options.get("conversationId")
@@ -481,12 +480,26 @@ class Transaction:
     def staged_tasks(self) -> list[AnyTaskRecord]:
         return [task.write[1] for task in self._tasks.values() if task.write is not None]
 
+    def write_keys(self) -> list[str]:
+        """The keys this commit writes, once settled, for the Session's unpublished write set.
+
+        A later job that reads one of them waits for this commit's publication instead of reading
+        what Storage still holds; a document write is keyed here, where the address is known.
+        """
+
+        keys: list[str] = []
+        table_keys(self._writes, keys)
+        for plan in self._plans:
+            if plan.content is None and not plan.retire:
+                continue
+            keys.append(document_key(plan.address_id))
+            keys.append(incarnation_key(plan.record["id"]))
+            if plan.retire or "createdAt" not in plan.record:
+                keys.append(scope_key(plan.record["scope"]))
+        return keys
+
     def staged_conversations(self) -> list[ConversationRecord]:
-        return [
-            write["value"]
-            for write in self._writes
-            if write["type"] == "conversation"
-        ]
+        return [write["value"] for write in self._writes if write["type"] == "conversation"]
 
     # ── Documents ──────────────────────────────────────────────────────────
 
@@ -583,9 +596,7 @@ class Transaction:
             if task["state"]["status"] == "terminal":
                 raise ValueError(f"Task {scope['taskId']} is terminal")
         self._assert_open()
-        value = copy_json(
-            definition.initial(seed) if definition.family else definition.initial()
-        )
+        value = copy_json(definition.initial(seed) if definition.family else definition.initial())
         if not isinstance(value, dict):
             raise TypeError(f"Document {definition.kind} initial() must return an object")
         id = cast(DocumentId, await self._host.storage.mint_id())
@@ -886,9 +897,7 @@ class Transaction:
                 continue
             record = plan.record
             if record["id"] in self._fork_source_document_ids:
-                raise ValueError(
-                    f"Cannot change fork source document {record['id']} in the fork transaction"
-                )
+                raise ValueError(f"Cannot change fork source document {record['id']} in the fork transaction")
             scope = record["scope"]
             if (
                 scope["kind"] == "conversation"
@@ -1076,9 +1085,7 @@ class Transaction:
     async def _committed_task(self, id: TaskId) -> AnyTaskRecord | None:
         task = self._task_entry(id)
         if task.committed_read is None:
-            task.committed_read = asyncio.ensure_future(
-                self._host.storage.task(id, self._context)
-            )
+            task.committed_read = asyncio.ensure_future(self._host.storage.task(id, self._context))
         return await task.committed_read
 
 

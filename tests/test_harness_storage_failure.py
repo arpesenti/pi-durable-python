@@ -412,7 +412,11 @@ async def test_fails_it_for_a_throw_in_its_own_commit_listeners() -> None:
     storage = ControlledStorage()
     opened = await started(storage)
     bug = RuntimeError("listener bug")
-    opened["harness"].observe_stored_commits(lambda publication, _context: _raise(bug))
+    # Upstream's listener throws synchronously (`followCommits(() => { throw bug })`,
+    # harness-storage-failure.test.ts:330): the Session's own commit observers are called inside the
+    # publication, so the error the publication returns is what fails the Session. Only the host's
+    # `subscribeCommits` observers may be asynchronous, and their errors are reported, never fatal.
+    opened["harness"].observe_stored_commits(lambda publication, _context: _throw(bug))
     # The commit itself is durable and resolves; the Session fails behind it.
     assert await opened["root"].commit(
         lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
@@ -423,6 +427,10 @@ async def test_fails_it_for_a_throw_in_its_own_commit_listeners() -> None:
 
 
 async def _raise(error: BaseException) -> None:
+    raise error
+
+
+def _throw(error: BaseException) -> None:
     raise error
 
 

@@ -149,9 +149,7 @@ def report_task(task: Any) -> ReportTask:
         return {
             "id": cast(TaskId, task.get("id", task.get("taskId"))),
             "kind": cast(str, task["kind"]),
-            "conversationId": cast(
-                ConversationId, task.get("conversationId", task.get("conversation_id"))
-            ),
+            "conversationId": cast(ConversationId, task.get("conversationId", task.get("conversation_id"))),
         }
     return {
         "id": cast(TaskId, task.task_id),
@@ -585,9 +583,7 @@ class TaskScheduler:
                     except Exception as error:
                         snapshot_failed = True
                         self._report(error, REGISTRY)
-                if snapshot is not None and "reason" in self._fit(
-                    record, snapshot.task(record["kind"])
-                ):
+                if snapshot is not None and "reason" in self._fit(record, snapshot.task(record["kind"])):
                     continue
             return {"active": True} if at is None else {"active": True, "at": at}
         return {"active": False} if at is None else {"active": False, "at": at}
@@ -627,9 +623,7 @@ class TaskScheduler:
                 record = self._live.get(invocation.task_id)
                 if record is None or record["state"]["status"] != "running":
                     continue
-                value = with_state(
-                    record, {"status": "pending", "checkpoint": record["state"]["checkpoint"]}
-                )
+                value = with_state(record, {"status": "pending", "checkpoint": record["state"]["checkpoint"]})
                 batch.append({"type": "task", "value": value})
             return batch
 
@@ -682,12 +676,12 @@ class TaskScheduler:
     async def wait_for_task(self, id: TaskId, context: Context) -> SettledTask:
         """Resolve with the terminal receipt; cancelling ``context`` cancels only this wait."""
 
-        async def find() -> Any:
+        async def find(line: Storage) -> Any:
             if self._closing:
                 raise closed_error(self._session)
             if id in self._live:
                 return {"promise": self._task_waiters.add(id, context)}
-            record = await self._storage.task(id, context)
+            record = await line.task(id, context)
             if record is None:
                 raise ValueError(f"Task {id} does not exist")
             return {"promise": resolved(cast(SettledTask, record))}
@@ -869,6 +863,7 @@ class TaskScheduler:
         self._expiry = None
         self._expiry_handle = None
         self._settle_idle()
+
     def _schedule_reconcile(self) -> None:
         # A read-only reconcile could only fail: what it writes is refused, and its own commits
         # fail the Session.
@@ -928,7 +923,7 @@ class TaskScheduler:
             await self._finalize(tx)
 
         try:
-            await self._session.commit_with(apply, self._context)
+            await self._session.commit_internal(apply, self._context)
         except Exception as error:
             self._fail_session(error)
         if work:
@@ -1053,7 +1048,7 @@ class TaskScheduler:
         self._sweep_scheduled = True
         loop = asyncio.get_running_loop()
 
-        async def sweep() -> None:
+        async def sweep(_line: Storage) -> None:
             self._sweep_scheduled = False
             self._sweep()
 
@@ -1423,9 +1418,7 @@ class TaskScheduler:
 
         restarts = record.get("restarts")
         return bool(
-            not record.get("abortRequested")
-            and restarts is not None
-            and restarts >= self._restart_limit()
+            not record.get("abortRequested") and restarts is not None and restarts >= self._restart_limit()
         )
 
     def _about_task(self, task: Any) -> dict[str, Any]:
@@ -1614,15 +1607,13 @@ class TaskScheduler:
                         )
                     )
                 self._runnable.discard(id)
-                invocation = self._create_invocation(
-                    record, mode, installer_of(snapshot, resolution["task"])
-                )
+                invocation = self._create_invocation(record, mode, installer_of(snapshot, resolution["task"]))
                 reservations.append(
                     {"invocation": invocation, "task": resolution["task"], "snapshot": snapshot}
                 )
 
         try:
-            await self._session.commit_with(reserve, self._context)
+            await self._session.commit_internal(reserve, self._context)
         except Exception:
             for reservation in reservations:
                 self._invocations.pop(reservation["invocation"].task_id, None)
@@ -1918,7 +1909,7 @@ class TaskScheduler:
         try:
             # The step writes the scheduler's own decision; the invocation's signal must not cancel it,
             # since the fault or the terminal record has to land.
-            continued = await self._session.commit_with(step, without_abort_signal(invocation.context))
+            continued = await self._session.commit_internal(step, without_abort_signal(invocation.context))
         except BaseException as error:
             self._end(invocation)
             if not is_failure(error):
@@ -2262,7 +2253,7 @@ class _Runtime:
     async def get_task(self, id: TaskId, context: Context) -> TaskRecord | None:
         self._check()
         return await self._read(
-            lambda: self._scheduler._session.read_on_line(lambda: self._scheduler._storage.task(id, context)),
+            lambda: self._scheduler._session.read_on_line(lambda line: line.task(id, context)),
             context,
         )
 
@@ -2277,7 +2268,7 @@ class _Runtime:
     async def owned_tasks(self, context: Context) -> list[TaskRecord]:
         self._check()
 
-        async def read() -> list[TaskRecord]:
+        async def read(_line: Storage) -> list[TaskRecord]:
             if self._invocation.ended:
                 raise _ended_error(self._invocation)
             if context.abort_signal is not None:
@@ -2304,9 +2295,7 @@ class _Runtime:
         bound = with_abort_signal(self._invocation.controller.signal, context)
 
         async def abort() -> None:
-            record = await self._scheduler._session.read_on_line(
-                lambda: self._scheduler._storage.task(id, bound)
-            )
+            record = await self._scheduler._session.read_on_line(lambda line: line.task(id, bound))
             if record is None or record.get("owner") != self._invocation.task_id:
                 raise ValueError(f"Task {id} is not owned by task {self._invocation.task_id}")
             if record["state"]["status"] == "terminal":
@@ -2319,10 +2308,10 @@ class _Runtime:
     async def outcomes(self, ids: Sequence[TaskId], context: Context) -> list[TaskOutcome]:
         self._check()
 
-        async def read() -> list[TaskOutcome]:
+        async def read(line: Storage) -> list[TaskOutcome]:
             outcomes: list[TaskOutcome] = []
             for id in ids:
-                record = await self._scheduler._storage.task(id, context)
+                record = await line.task(id, context)
                 state = None if record is None else record["state"]
                 if state is None or state["status"] != "terminal":
                     raise ValueError(f"Task {id} is not terminal")
@@ -2355,7 +2344,7 @@ class _Runtime:
 
         async def read() -> Any:
             found = await self._scheduler._session.read_on_line(
-                lambda: self._scheduler._storage.entry(self._invocation.conversation_id, id, context)
+                lambda line: line.entry(self._invocation.conversation_id, id, context)
             )
             entry = None if found is None else found["entry"]
             if token is None or entry is None or entry.get("kind") == token.kind:

@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from harness_support import hold_line
 from session_support import ControlledStorage, context, flush
 from task_support import deferred, eventually, open_tasks
 
@@ -16,9 +17,7 @@ from pi_durable.tasks import define_task
 
 def one_phase(name: str, run: Any, abort: Any = None) -> Any:
     async def default_abort(_task: Any, runtime: Any, _context: Any) -> None:
-        await runtime.commit(
-            lambda: {"status": "terminal", "outcome": {"status": "aborted"}}, _context
-        )
+        await runtime.commit(lambda: {"status": "terminal", "outcome": {"status": "aborted"}}, _context)
 
     return define_task(
         {
@@ -89,17 +88,13 @@ async def test_reports_paused_running_and_empty_states_with_id_ordered_submissio
         lambda tx: tx.create_task(Held, None, {"ownership": {"kind": "conversation"}}), context
     )
     waiter = await root.commit(
-        lambda tx: tx.create_task(
-            Waiter, {"on": [held]}, {"ownership": {"kind": "conversation"}}
-        ),
+        lambda tx: tx.create_task(Waiter, {"on": [held]}, {"ownership": {"kind": "conversation"}}),
         context,
     )
 
     async def submissions(tx: Any) -> list[int]:
         entry = await tx.append_entry(root.id, {"kind": "test.mark"})
-        queued = await tx.create_submission(
-            {"conversationId": root.id, "type": "input", "status": "queued"}
-        )
+        queued = await tx.create_submission({"conversationId": root.id, "type": "input", "status": "queued"})
         placed = await tx.create_submission(
             {
                 "conversationId": root.id,
@@ -271,9 +266,7 @@ async def test_reports_a_held_outcome_as_completing_until_owned_work_drains() ->
 
     async def child_abort(_task: Any, runtime: Any, ctx: Any) -> None:
         await gate.promise
-        await runtime.commit(
-            lambda: {"status": "terminal", "outcome": {"status": "aborted"}}, ctx
-        )
+        await runtime.commit(lambda: {"status": "terminal", "outcome": {"status": "aborted"}}, ctx)
 
     Child = one_phase(
         "test.inspect-child",
@@ -283,6 +276,7 @@ async def test_reports_a_held_outcome_as_completing_until_owned_work_drains() ->
 
     async def owner_phase(task: Any, runtime: Any, ctx: Any) -> None:
         if task["state"]["checkpoint"]["phase"] == "spawn":
+
             async def spawn(tx: Any) -> dict[str, Any]:
                 child = await tx.create_task(
                     Child, None, {"ownership": {"kind": "task", "taskId": task["id"]}}
@@ -355,11 +349,14 @@ async def test_reports_closing_to_an_inspection_queued_before_the_seal() -> None
     harness.resume()
     await started.promise
 
-    held = storage.hold_commits()
+    # Group commit keeps the line moving while a commit is in storage, so holding Storage is not what holds an
+    # inspection behind a commit any more. One commit whose callback has not returned is the hold
+    # itself (upstream's ``holdLine``).
+    held = hold_line(harness)
     committing = asyncio.ensure_future(
         root.commit(lambda tx: tx.append_entry(root.id, {"kind": "test.mark"}), context)
     )
-    await held.entered.wait()
+    await held.entered.promise
     queued = asyncio.ensure_future(harness.inspect(context))
     await flush()
     closing = asyncio.ensure_future(harness.close(context))
@@ -377,6 +374,8 @@ async def test_reports_closing_to_an_inspection_queued_before_the_seal() -> None
         await closing
     with pytest.raises(RuntimeError, match="Harness is closed"):
         await harness.inspect(context)
+
+
 async def _state_is(harness: Any, value: str) -> bool:
     try:
         inspection = await harness.inspect(context)

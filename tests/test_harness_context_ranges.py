@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from harness_support import assistant, describe_message, system, tool_result, user
-from session_support import context
+from session_support import context, settle_line
 from task_support import completed, deferred, open_tasks
 
 from pi_durable import MemoryStorage
@@ -221,9 +221,7 @@ async def counting_setup(
     harness = opened["harness"]
     root = await harness.root(context)
     first = await root.commit(
-        lambda tx: tx.append_entry(
-            root.id, {"kind": "message", "model": [user("first")]}
-        ),
+        lambda tx: tx.append_entry(root.id, {"kind": "message", "model": [user("first")]}),
         context,
     )
     for index in range(20):
@@ -260,9 +258,7 @@ async def test_keeps_a_context_read_across_tasks_and_through_the_retention_perio
 
     async def child_run(_task: Any, runtime: Any, ctx: Any) -> None:
         async def write(tx: Any) -> None:
-            await tx.append_entry(
-                holder["root"].id, {"kind": "message", "model": [user("from child")]}
-            )
+            await tx.append_entry(holder["root"].id, {"kind": "message", "model": [user("from child")]})
 
         await runtime.commit(write, ctx)
         await read("child", runtime, ctx)
@@ -335,9 +331,7 @@ async def test_keeps_a_context_read_across_tasks_and_through_the_retention_perio
     harness = opened["harness"]
     harness.resume()
     options = {"ownership": {"kind": "conversation"}, "conversationId": opened["root"].id}
-    parent = await harness.commit(
-        lambda tx: tx.create_task(Parent, {}, options), context
-    )
+    parent = await harness.commit(lambda tx: tx.create_task(Parent, {}, options), context)
     assert (await harness.wait_for_task(parent, context))["state"]["outcome"] == {
         "status": "completed",
         "result": None,
@@ -345,12 +339,8 @@ async def test_keeps_a_context_read_across_tasks_and_through_the_retention_perio
     await opened["root"].wait_for_idle(context)
 
     async def probe(name: str) -> None:
-        id = await harness.commit(
-            lambda tx: tx.create_task(Probe, {"name": name}, options), context
-        )
-        assert (await harness.wait_for_task(id, context))["state"]["outcome"] == completed(None)[
-            "outcome"
-        ]
+        id = await harness.commit(lambda tx: tx.create_task(Probe, {"name": name}, options), context)
+        assert (await harness.wait_for_task(id, context))["state"]["outcome"] == completed(None)["outcome"]
         await opened["root"].wait_for_idle(context)
 
     await probe("idle")
@@ -535,13 +525,9 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
         assert extended["rows"] == 2
         assert extended["messages"][:3] == ["system:plan", "user:first", "assistant:old 0"]
 
-        fork = await root.fork(
-            holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx
-        )
+        fork = await root.fork(holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx)
         await append(fork, {"kind": "message", "model": [assistant("answer")]})
-        await append(
-            fork, {"kind": "host.system", "model": [system({"note": "Note."})]}
-        )
+        await append(fork, {"kind": "host.system", "model": [system({"note": "Note."})]})
         assert (await read(fork))["messages"] == [
             "user:first",
             "assistant:answer",
@@ -557,13 +543,9 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
             "system:note",
         ]
 
-        omitted = await root.fork(
-            holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx
-        )
+        omitted = await root.fork(holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx)
         await append(omitted, {"kind": "message", "model": [assistant("answer")]})
-        host = await append(
-            omitted, {"kind": "host.system", "model": [system({"legacy": "Legacy."})]}
-        )
+        host = await append(omitted, {"kind": "host.system", "model": [system({"legacy": "Legacy."})]})
         await append(
             omitted,
             {"kind": "edit", "edits": [{"target": host["id"], "action": "omit"}]},
@@ -578,9 +560,7 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
             "system:legacy",
         ]
 
-        empty = await root.fork(
-            holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx
-        )
+        empty = await root.fork(holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx)
         await append(empty, {"kind": "pi.system"})
         await append(empty, {"kind": "message", "model": [assistant("answer")]})
         assert (await read(empty))["messages"] == ["user:first", "assistant:answer"]
@@ -653,9 +633,7 @@ async def test_freezes_kept_entries_deeply_even_when_storage_freezes_them_shallo
     harness = opened["harness"]
     root = await harness.root(context)
     await root.commit(
-        lambda tx: tx.append_entry(
-            root.id, {"kind": "message", "model": [user("hello")]}
-        ),
+        lambda tx: tx.append_entry(root.id, {"kind": "message", "model": [user("hello")]}),
         context,
     )
     harness.resume()
@@ -681,9 +659,7 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None
     async def late_run(_task: Any, runtime: Any, ctx: Any) -> None:
         holder["storage"].hold_next_range_scan = scans.promise
         late = asyncio.ensure_future(runtime.context(holder["root"].id, ctx))
-        late.add_done_callback(
-            lambda done: done.exception() if not done.cancelled() else None
-        )
+        late.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         holder["late"] = late
         await runtime.commit(lambda: completed(None), ctx)
 
@@ -713,23 +689,21 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None
             "abort": lambda task, runtime, ctx: runtime.commit(abort_state, ctx),
         }
     )
-    opened = await counting_setup(
-        (Late, Probe), {"settings": {"context_retention_ms": 0}}
-    )
+    opened = await counting_setup((Late, Probe), {"settings": {"context_retention_ms": 0}})
     harness, root = opened["harness"], opened["root"]
     holder["root"], holder["storage"] = root, opened["storage"]
     harness.resume()
     options = {"ownership": {"kind": "conversation"}, "conversationId": root.id}
-    late_id = await harness.commit(
-        lambda tx: tx.create_task(Late, {}, options), context
-    )
+    late_id = await harness.commit(lambda tx: tx.create_task(Late, {}, options), context)
     assert (await harness.wait_for_task(late_id, context))["state"]["outcome"] == {
         "status": "completed",
         "result": None,
     }
-    probe_id = await harness.commit(
-        lambda tx: tx.create_task(Probe, {}, options), context
-    )
+    probe_id = await harness.commit(lambda tx: tx.create_task(Probe, {}, options), context)
+    # Upstream's ``runtime.commit()`` registers the step that ends the invocation in the body it runs
+    # synchronously; a Python coroutine is scheduled later, so the step is still queued when the test
+    # creates the probe. The line being idle is the seam that says it has run.
+    await settle_line(harness)
     scans.resolve()
     await asyncio.gather(holder["late"], return_exceptions=True)
     probe_start.resolve()
@@ -760,15 +734,11 @@ async def test_drops_an_idle_conversations_context_read_on_a_timer_when_nothing_
             "abort": lambda task, runtime, ctx: runtime.commit(abort_state, ctx),
         }
     )
-    opened = await open_tasks(
-        storage, [Probe], {"settings": {"context_retention_ms": 40}}
-    )
+    opened = await open_tasks(storage, [Probe], {"settings": {"context_retention_ms": 40}})
     harness = opened["harness"]
     root = await harness.root(context)
     first = await root.commit(
-        lambda tx: tx.append_entry(
-            root.id, {"kind": "message", "model": [user("first")]}
-        ),
+        lambda tx: tx.append_entry(root.id, {"kind": "message", "model": [user("first")]}),
         context,
     )
     for index in range(20):
@@ -783,9 +753,7 @@ async def test_drops_an_idle_conversations_context_read_on_a_timer_when_nothing_
     options = {"ownership": {"kind": "conversation"}, "conversationId": root.id}
 
     async def probe(name: str) -> None:
-        id = await harness.commit(
-            lambda tx: tx.create_task(Probe, {"name": name}, options), context
-        )
+        id = await harness.commit(lambda tx: tx.create_task(Probe, {"name": name}, options), context)
         assert (await harness.wait_for_task(id, context))["state"]["outcome"] == {
             "status": "completed",
             "result": None,

@@ -30,6 +30,14 @@ _Avoid_: free-threading support, thread-safe
 Safe for concurrent threads sharing one `Session` or `Storage`. Reserved: nothing claims it today.
 _Avoid_: free-threaded-clean
 
+**Group commit**:
+The invariant of the mutation line: the Session admits commits one at a time, a commit's logical admission — its
+write keys joining the unpublished write set — happens on the line, and its storage call runs off it. A job on the
+line therefore never reads a state older than what the line admitted before it, outcomes are delivered in line order,
+and nothing is published before it is durable. Several commits sharing one storage call is a consequence, never the
+point; a line that publishes before durability, or delivers an outcome out of line order, is wrong rather than slow.
+_Avoid_: batching, coalescing, write aggregation, flush
+
 **Submission**:
 A durable admission of user input, a passive entry write, or a continue.
 An input or a write is `queued` in the inbox, `placed` as an entry, then `done` or `unanswered`; a

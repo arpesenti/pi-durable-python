@@ -59,6 +59,7 @@ from ..types import (
     TaskQuery,
     TaskRecord,
 )
+from .keys import ALL_KEYS, GatedStorage, document_key
 from .observation import (
     ENDED,
     AttachedObservation,
@@ -69,9 +70,15 @@ from .observation import (
     session_closed_error,
 )
 from .transaction import LoadedDocument, Transaction, TransactionScope
+from .writer import PartSpec, PublishFailure, Writer
 
 #: Default document retention: ten minutes, as for kept contexts.
 _DEFAULT_DOCUMENT_RETENTION_MS = 600_000
+
+#: Jobs admitted to the line whose outcome is not delivered yet, beyond which the line waits. A
+#: count, not bytes: what waits is bounded by what one commit can hold (tool output by its output
+#: limits), times the count (spec §4).
+MAX_OUTSTANDING = 256
 
 _default_document_retention: int | float = _DEFAULT_DOCUMENT_RETENTION_MS
 
@@ -147,7 +154,7 @@ def _owner_task_of(loaded: LoadedDocument) -> TaskId | None:
     return scope["taskId"] if scope["kind"] == "task" else None
 
 
-def _ends_the_owner(writes: list[StorageWrite], owner_task_id: TaskId | None) -> bool:
+def _ends_the_owner(writes: Sequence[StorageWrite], owner_task_id: TaskId | None) -> bool:
     """Whether one of this commit's writes makes the owner task of a task document terminal.
 
     The one commit that ends a task document's owner is recognised by the task record it writes, not
@@ -201,10 +208,63 @@ class DocumentCacheSizes(TypedDict):
     sweeps: int
 
 
+@dataclass(slots=True)
+class _LineJob:
+    """One job on the line: its index in line order, and whether a touch of it waited for a gate."""
+
+    index: int
+    hit: bool = False
+
+
+@dataclass(slots=True)
+class _Ran:
+    """A line job's result: its value, delivered once ``after`` -- its commit's publication -- settles."""
+
+    value: Any
+    after: asyncio.Future[None] | None = None
+
+
+@dataclass(slots=True)
+class _LineEntry:
+    """A queued line job and the future its line part settles."""
+
+    job: _LineJob
+    ran: asyncio.Future[Any]
+
+
+class _WriterHost:
+    """What the writer needs of the Session: storage, the publication scope, and the failure latch."""
+
+    def __init__(self, session: SessionImpl) -> None:
+        self._session = session
+
+    async def commit(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        return await self._session._storage.commit_batches(batches, receive, context)  # noqa: SLF001
+
+    def publishing(self, publish: Callable[[], None], context: Context) -> Awaitable[None] | None:
+        return self._session._publishing(publish, context)  # noqa: SLF001
+
+    def failure(self) -> BaseException | None:
+        return self._session._failure  # noqa: SLF001
+
+    def fail(self, error: BaseException, at: int, own: Sequence[int]) -> None:
+        self._session.fail(error, at, own)
+
+    def report(self, error: BaseException, context: Context) -> None:
+        self._session.report(error, LISTENER)
+
+
 class _SessionHost:
     def __init__(self, session: SessionImpl) -> None:
         self._session = session
-        self.storage = cast(Storage, session._storage)  # noqa: SLF001
+        # A transaction's every read touches its key: it never observes what an earlier job admitted
+        # and the writer has not published.
+        self.storage = cast(Storage, session._gated)  # noqa: SLF001
 
     def now(self) -> int:
         return self._session._clock()
@@ -232,7 +292,18 @@ class _SessionHost:
 
 
 class SessionImpl:
-    """Session kernel over one guarded storage backend."""
+    """Session kernel over one guarded storage backend.
+
+    Only committed state is observable. The mutation line runs one job at a time -- a commit's
+    callback and settlement, or a read on the line; a commit with writes then joins the writer's
+    pending batch (logical admission) and the line goes on, so the storage of several commits
+    overlaps while their callbacks stay serial. The writer stores every commit admitted while no
+    call is in flight in one :meth:`~pi_durable.types.Storage.commit_batches` call off the line and
+    publishes them one by one, in line order, once Storage made them durable. No job observes what
+    an unpublished commit wrote: every read of a job touches its key and waits while an admitted
+    commit that writes it is unpublished, and a job that waits holds the line, so the unpublished
+    writes only shrink.
+    """
 
     def __init__(
         self,
@@ -250,7 +321,6 @@ class SessionImpl:
         self._attached_documents: dict[DocumentId, int] = {}
         self._document_sweep: _DocumentSweep | None = None
         self._sweep_jobs = 0
-        self._sweep_tasks: set[asyncio.Task[None]] = set()
         self._document_timers_unavailable = False
         self._watches: list[_WatchAttachment] = []
         # Host observers of one document address each, following the address as a watch does.
@@ -260,10 +330,27 @@ class SessionImpl:
         # The Session's own components follow every commit; a throw leaves their state behind storage.
         self._internal_listeners: list[Callable[[CommitPublication, Context], Any]] = []
         self._close_listeners: list[Callable[[], Any]] = []
-        self._line = asyncio.Lock()
+        # The end of the last line job: the line runs one job at a time. Never raises.
+        self._tail: asyncio.Future[None] = _settled_future(_current_loop())
+        # Line index of the next job; outcomes are delivered in this order.
+        self._next_index = 0
+        # The job on the line, while one runs.
+        self._current: _LineJob | None = None
+        # Settles once every job so far has its outcome delivered.
+        self._fence: asyncio.Future[None] = _settled_future(_current_loop())
+        self._last_delivered = -1
+        # Jobs that started on the line and have no outcome delivered yet (``MAX_OUTSTANDING``).
+        self._outstanding = 0
+        self._room: asyncio.Future[None] | None = None
+        # The line index whose outcome the failure is: every later job's outcome is ``SessionFailed``.
+        self._fail_at: int | None = None
+        # Later jobs whose outcome is their own error all the same: the other parts of a call that rejected.
+        self._own_outcomes: set[int] = set()
+        # Line jobs and outcome chains, kept strongly while the loop holds only a weak reference.
+        self._line_tasks: set[asyncio.Task[None]] = set()
+        loop = _current_loop()
         self._closing: asyncio.Future[None] | None = None
         self._failure: BaseException | None = None
-        loop = _current_loop()
         self._failed: asyncio.Future[SessionFailed] = loop.create_future()
         self._closed: asyncio.Future[SessionEnd] = loop.create_future()
         self._failed.add_done_callback(lambda future: future.exception())
@@ -285,6 +372,8 @@ class SessionImpl:
         self._clock = clock
         self._document_retention_ms = retention
         self._storage = GuardedStorage(storage, self)
+        self._gated = GatedStorage(cast(Storage, self._storage), self.touch)
+        self._writer = Writer(_WriterHost(self))
         self._host = _SessionHost(self)
         self._timers = host_timers(
             set_timer,
@@ -326,23 +415,37 @@ class SessionImpl:
     def failed(self) -> asyncio.Future[SessionFailed]:
         return self._failed
 
-    def fail(self, error: BaseException) -> None:
+    def fail(
+        self,
+        error: BaseException,
+        at: int | None = None,
+        own: Sequence[int] | None = None,
+    ) -> None:
         """Fail the Session once; the first failure wins and close listeners run immediately.
 
         A teardown signal is not a failure: cancellation and interpreter shutdown unwind the work
         that is running instead of ending the Session.
+
+        ``at`` is the line index of the job whose outcome the failure is -- by default the job on the
+        line -- so every later job's outcome becomes ``SessionFailed``; ``own`` names the later jobs
+        whose outcome is their own error all the same, the other parts of a storage call that
+        rejected (spec §10.1).
         """
 
         if not is_failure(error) or self._failure is not None:
             return
         self._failure = error
+        now = self._current.index if self._current is not None else self._last_delivered
+        self._fail_at = at if at is not None else now
+        if own is not None:
+            self._own_outcomes.update(own)
         if not self._failed.done():
             self._failed.set_exception(SessionFailed(error))
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._close_after_failure())
+        self._keep(loop.create_task(self._close_after_failure()))
         self.report(error, {"kind": "storage_failed"})
 
     async def _close_after_failure(self) -> None:
@@ -357,6 +460,235 @@ class SessionImpl:
         ``info`` defaults to a listener. A plain Session has no external report sink.
         """
 
+    # ── The mutation line ───────────────────────────────────────────────────
+
+    def touch(self, key: str) -> Awaitable[None] | None:
+        """Internal, on the line: wait while ``key`` has an unpublished writer.
+
+        For :data:`~pi_durable.session.keys.ALL_KEYS`, wait while anything is unpublished. Returns
+        ``None`` when there is nothing to wait for; otherwise an awaitable that checks the Session is
+        healthy once the writer published. A job's every read touches its key first, so it never
+        observes state an earlier job admitted and the writer has not published.
+        """
+
+        gate = self._writer.drained() if key == ALL_KEYS else self._writer.gate(key)
+        if gate is None:
+            return None
+        if self._current is not None:
+            self._current.hit = True
+        return self._wait_gate(gate)
+
+    async def _wait_gate(self, gate: asyncio.Future[None]) -> None:
+        await gate
+        self._assert_healthy()
+
+    @property
+    def line_sizes(self) -> dict[str, int]:
+        """Internal, for tests that bound memory: jobs with no outcome delivered yet, and keys with
+        an unpublished writer. Both are 0 once the line is idle.
+
+        Upstream reports a third size, the record cache's reads in flight; this port carries no
+        read-side record cache, so there is nothing to bound there.
+        """
+
+        return {
+            "outstanding": self._outstanding,
+            "unpublished": self._writer.unpublished,
+        }
+
+    def _enqueue(
+        self, work: Callable[[_LineJob], Awaitable[Any]], exempt: bool = False
+    ) -> Awaitable[Any]:
+        """Run ``work`` on the line, after every job before it, and deliver its outcome in line order.
+
+        The line part of a commit ends at logical admission, so the next callback runs while the
+        writer is still storing; the outcome comes once the job's commit, if it admitted one, is
+        published, and after every outcome before it. At most ``MAX_OUTSTANDING`` admitted jobs wait
+        for their delivery; beyond it the line waits.
+
+        ``exempt`` is upstream's ``#enqueue(work, true)``: a job that admitted no write and waited at
+        no gate is equivalent to having run before every unpublished commit, so its outcome is
+        delivered as soon as it has one rather than behind the outcomes of others. Whether it is such
+        a job is only known once it ran, which is why the exempt path looks at the line result first
+        (``session.ts:1645-1652``).
+        """
+
+        ran = self._queue_line(work, bounded=True)
+        before = self._fence
+        # One task, shared by the outcome fence and by the job's own waiter: a coroutine awaited
+        # twice would never resolve the second time.
+        outcome = asyncio.ensure_future(self._outcome_of(ran))
+        self._fence = self._chain(before, outcome)
+        if not exempt:
+            return self._deliver(ran.job, before, outcome)
+        return self._deliver_exempt(ran, before, outcome)
+
+    async def _maintain(self, work: Callable[[_LineJob], Awaitable[Any]]) -> Any:
+        """Run a job of the Session's own upkeep on the line: no outcome to deliver, so no fence."""
+
+        return await self._queue_line(work, bounded=False).ran
+
+    def _queue_line(self, work: Callable[[_LineJob], Awaitable[Any]], bounded: bool) -> _LineEntry:
+        loop = asyncio.get_running_loop()
+        job = _LineJob(index=self._next_index)
+        self._next_index += 1
+        ran: asyncio.Future[Any] = loop.create_future()
+        ran.add_done_callback(_consumed)
+        previous = self._tail
+
+        async def run() -> None:
+            await _quiet(previous)
+            if bounded:
+                while self._outstanding >= MAX_OUTSTANDING:
+                    if self._room is None:
+                        self._room = loop.create_future()
+                    await self._room
+                self._outstanding += 1
+            try:
+                ran.set_result(await self._on_line(job, work))
+            except BaseException as error:
+                if not ran.done():
+                    ran.set_exception(error)
+
+        self._tail = self._spawn(run())
+        return _LineEntry(job, ran)
+
+    async def _on_line(self, job: _LineJob, work: Callable[[_LineJob], Awaitable[Any]]) -> Any:
+        """Hold the line for ``job`` until its line part is done. Gates are its touches' own."""
+
+        self._current = job
+        try:
+            return await work(job)
+        finally:
+            self._current = None
+
+    async def _outcome_of(self, ran: _LineEntry) -> Any:
+        """The job's value, once its commit -- if it admitted one -- is published, or never will be."""
+
+        result: _Ran = await ran.ran
+        if result.after is not None:
+            await result.after
+        return result.value
+
+    def _chain(self, before: asyncio.Future[None], outcome: asyncio.Future[Any]) -> asyncio.Future[None]:
+        """A future that settles once every job so far has its outcome delivered."""
+
+        # Pending, not settled: a job behind this fence waits for the outcome before it, which is the
+        # ordering the fence exists for. Starting it settled would let a later job whose own outcome is
+        # ready -- a read behind a commit still in Storage -- go first (``session.ts:1632-1634``).
+        fence = _pending_future(asyncio.get_running_loop())
+
+        async def follow() -> None:
+            await _quiet(before)
+            await _quiet(outcome)
+            if not fence.done():
+                fence.set_result(None)
+
+        self._spawn(follow())
+        return fence
+
+    async def _deliver(
+        self,
+        job: _LineJob,
+        before: asyncio.Future[None],
+        outcome: asyncio.Future[Any],
+        fenced: bool = True,
+    ) -> Any:
+        try:
+            if fenced:
+                await before
+            value = await outcome
+        except BaseException as error:
+            self._delivered(job, fenced)
+            raise self._poison(job, error) from error
+        self._delivered(job, fenced)
+        poisoned = self._poisoned(job, None)
+        if poisoned is not None:
+            raise poisoned
+        return value
+
+    async def _deliver_exempt(
+        self,
+        entry: _LineEntry,
+        before: asyncio.Future[None],
+        outcome: asyncio.Future[Any],
+    ) -> Any:
+        """Deliver an exempt job's outcome once it is known whether it has to wait behind anything.
+
+        A job that wrote nothing and never touched a gate is equivalent to having run before every
+        unpublished commit, so its caller -- scheduler code, and scheduler code only -- is handed the
+        outcome without waiting for the outcomes of others. A job that wrote, or that waited at a gate,
+        or that ran close listeners waits like any other: no invocation may start on a reservation that
+        is not durable (``session.ts:1645-1652``, ``session.ts:480-493``).
+        """
+
+        try:
+            result: _Ran = await entry.ran
+            fenced = entry.job.hit or result.after is not None
+        except BaseException:
+            fenced = entry.job.hit
+        return await self._deliver(entry.job, before, outcome, fenced)
+
+    def _poison(self, job: _LineJob, error: BaseException) -> BaseException:
+        """The error the job gets: the Session's failure once anything failed, its own until then."""
+
+        return error if (poisoned := self._poisoned(job, error)) is None else poisoned
+
+    def _poisoned(self, job: _LineJob, error: BaseException | None) -> BaseException | None:
+        """``SessionFailed`` instead of ``error`` when ``job`` comes after the failure's boundary."""
+
+        if self._fail_at is None or job.index <= self._fail_at or job.index in self._own_outcomes:
+            return error
+        return SessionFailed(self._failure)
+
+    def _delivered(self, job: _LineJob, fenced: bool = True) -> None:
+        """Job ``job`` has its outcome: let the line go on past ``MAX_OUTSTANDING``.
+
+        Only a delivery that waited behind the outcomes before it marks the line as delivered: an
+        exempt job ran as if before every unpublished commit, so it says nothing about where the
+        failure's boundary falls (``session.ts:1722-1724``).
+        """
+
+        if fenced:
+            self._last_delivered = job.index
+        self._outstanding -= 1
+        room = self._room
+        if room is not None and self._outstanding < MAX_OUTSTANDING:
+            self._room = None
+            if not room.done():
+                room.set_result(None)
+
+    def _spawn(self, coroutine: Any) -> asyncio.Future[None]:
+        """Run ``coroutine`` as a task the loop must not collect early; settles when it is over."""
+
+        loop = asyncio.get_running_loop()
+        settled: asyncio.Future[None] = _pending_future(loop)
+        task = loop.create_task(coroutine)
+        self._keep(task)
+
+        def done(finished: asyncio.Task[None]) -> None:
+            self._line_tasks.discard(finished)
+            if not settled.done():
+                settled.set_result(None)
+
+        task.add_done_callback(done)
+        return settled
+
+    def _keep(self, task: asyncio.Task[None]) -> None:
+        """Keep a strong reference: the loop holds only a weak one to a task it runs."""
+
+        self._line_tasks.add(task)
+        task.add_done_callback(self._line_tasks.discard)
+
+    async def _drained(self) -> None:
+        """A ``*`` barrier: once every part admitted so far is published, or never will be."""
+
+        drained = self._writer.drained()
+        if drained is not None:
+            await drained
+
+    # ── Commits ─────────────────────────────────────────────────────────────
+
     async def commit(
         self,
         change: Callable[[Transaction], Any],
@@ -370,77 +702,100 @@ class SessionImpl:
         context: Context,
         scope: TransactionScope | None = None,
     ) -> Any:
-        try:
-            self.assert_usable()
-        except Exception as error:
-            raise error
-        async with self._line:
-            self._assert_healthy()
-            signal = context.abort_signal
-            if signal is not None:
-                signal.raise_if_aborted()
-            tx = Transaction(self._host, context, scope)
-            try:
-                result = await change(tx)
-                self._assert_healthy()
-            except BaseException:
-                await tx.settle_failure()
-                self._sweep_documents()
-                raise
-            try:
-                writes = await tx.settle_success()
-            except BaseException:
-                self._sweep_documents()
-                raise
-            if not writes:
-                tx.discard()
-                self._sweep_documents()
-                return result
-            if self._read_only:
-                # Refused before Storage: the Session stays healthy, and the caller sees why.
-                tx.discard()
-                self._sweep_documents()
-                raise ReadOnlySession("a commit with writes")
-            try:
-                seq = await self._store_one_batch(writes, context)
-            except BaseException:
-                tx.discard()
-                raise
-            try:
-                documents = tx.adopt(seq)
-            except BaseException as error:
-                self.fail(error)
-                raise
-            for document in documents:
-                self._touch_document(_record_address_id(document["record"]))
-            self._publishing(partial(self._publish, seq, writes, documents, context), context)
-            self._sweep_documents()
-            return result
+        self.assert_usable()
+        return await self._enqueue(partial(self._run_commit, change, context, scope))
 
-    async def _store_one_batch(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        """Store one commit batch through the batched call and return its sequence.
+    async def commit_internal(
+        self,
+        change: Callable[[Transaction], Any],
+        context: Context,
+    ) -> Any:
+        """``commit_with`` for a commit of the scheduler's own whose outcome goes only to scheduler code.
 
-        The Session commits one batch at a time until group commit (#42) puts several in one call.
-        A batch Durable's own rules refuse is a resolved outcome, not a thrown error: nothing of it
-        is stored, so it fails the Session and raises here, which is what a storage that threw the
-        refusal did from inside the guard before the batched call was the only commit shape.
+        When it writes nothing and waited at no gate its outcome is delivered at once, ahead of the
+        outcomes of other jobs: it is equivalent to having run before every unpublished commit. One
+        that writes is never exempt -- its outcome waits for its own publication and for every earlier
+        outcome, so no invocation starts on a reservation that is not durable. It takes no scope and no
+        deferral, because it is not a caller's commit (``session.ts:486-493``).
         """
 
-        received: list[Seq] = []
+        self.assert_usable()
+        return await self._enqueue(partial(self._run_commit, change, context, None), exempt=True)
 
-        def receive(index: int, seq: Seq) -> None:
-            received.append(seq)
+    async def _run_commit(
+        self,
+        change: Callable[[Transaction], Any],
+        context: Context,
+        scope: TransactionScope | None,
+        job: _LineJob,
+    ) -> _Ran:
+        """One commit's line part: its callback, its settlement, and its logical admission."""
 
-        result = await self._storage.commit_batches(
-            [writes], receive, without_abort_signal(context)
+        self._assert_healthy()
+        signal = context.abort_signal
+        if signal is not None:
+            signal.raise_if_aborted()
+        tx = Transaction(self._host, context, scope)
+        try:
+            result = await change(tx)
+            self._assert_healthy()
+        except BaseException:
+            await tx.settle_failure()
+            self._sweep_documents()
+            raise
+        try:
+            writes = await tx.settle_success()
+        except BaseException:
+            self._sweep_documents()
+            raise
+        if not writes:
+            tx.discard()
+            self._sweep_documents()
+            return _Ran(result)
+        if self._read_only:
+            # Refused before Storage: the Session stays healthy, and the caller sees why.
+            tx.discard()
+            self._sweep_documents()
+            raise ReadOnlySession("a commit with writes")
+        # Logical admission: the writer stores it, off the line, and the line goes on. Its keys join
+        # the unpublished write set here, so a later job that touches one waits for its publication.
+        part = self._writer.admit(
+            PartSpec(
+                index=job.index,
+                writes=writes,
+                keys=tx.write_keys(),
+                context=context,
+                publish=partial(self._adopt, tx, writes, context),
+                discard=tx.discard,
+            )
         )
-        if result["stored"] == 0 or not received:
-            error = result.get("refused", RuntimeError("Storage refused the commit batch"))
-            self.fail(error)
-            raise error
-        return received[-1]
+        self._sweep_documents()
+        return _Ran(result, part.outcome)
 
-    def _publishing(self, publish: Callable[[], None], context: Context) -> None:
+    def _adopt(
+        self,
+        tx: Transaction,
+        writes: Sequence[StorageWrite],
+        context: Context,
+        seq: Seq | None,
+    ) -> PublishFailure | None:
+        """Publish a stored commit: adopt it in memory and run its publication.
+
+        A throw of the adoption leaves memory behind durable state; the writer fails the Session with
+        it and publishes no later part of the call.
+        """
+
+        assert seq is not None
+        try:
+            documents = tx.adopt(seq)
+        except Exception as error:
+            return PublishFailure("adoption", error)
+        failure = self._publish(seq, writes, documents, context)
+        for document in documents:
+            self._touch_document(_record_address_id(document["record"]))
+        return None if failure is None else PublishFailure("listener", failure)
+
+    def _publishing(self, publish: Callable[[], None], context: Context) -> Awaitable[None] | None:
         """Run one commit's publication inside the storage's own scope, or directly without one.
 
         The optional ``publishing`` member (see
@@ -448,13 +803,15 @@ class SessionImpl:
         publication inside that batch, so what the publication marks lands together. No bundled
         backend has one, so the Session normally publishes directly. A storage that throws instead
         of running the publication is reported and the publication runs anyway: the commit is
-        stored, so it must be published.
+        stored, so it must be published. Returns ``None`` when it ran at once, else an awaitable that
+        settles once it ran -- the writer publishes the next part only then.
         """
 
         scope = self._storage.publishing
         if scope is None:
             publish()
-            return
+            return None
+        done: asyncio.Future[None] = _pending_future(_current_loop())
         ran = False
 
         def once() -> None:
@@ -462,19 +819,30 @@ class SessionImpl:
             if ran:
                 return
             ran = True
-            publish()
+            try:
+                publish()
+            finally:
+                if not done.done():
+                    done.set_result(None)
 
         try:
             scope(once, context)
         except BaseException as error:
             self.report(error, LISTENER)
             once()
+        return None if ran else done
 
-    async def read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
+    async def read_on_line(self, job: Callable[[Storage], Awaitable[Any]]) -> Any:
+        """Run a read-only job on the mutation line, reading through the gated Storage view.
+
+        Its reads wait for the publication of what the line admitted before them, and its outcome
+        comes after theirs.
+        """
+
         self.assert_usable()
-        return await self._read_on_line(job)
+        return await self._enqueue(partial(self._read_job, job))
 
-    async def read_queued_before_close(self, job: Callable[[], Awaitable[Any]]) -> Any:
+    async def read_queued_before_close(self, job: Callable[[Storage], Awaitable[Any]]) -> Any:
         """Run a read admitted before ``close()`` sealed admission; a later read rejects.
 
         The Harness uses this for ``inspect()``: an inspection already queued on the Session line at
@@ -485,14 +853,13 @@ class SessionImpl:
         self._assert_healthy()
         if self._closing is not None:
             raise self._closed_error()
-        return await self._read_on_line(job)
+        return await self._enqueue(partial(self._read_job, job))
 
-    async def _read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
-        async with self._line:
-            self._assert_healthy()
-            if self._closed.done():
-                raise self._closed_error()
-            return await job()
+    async def _read_job(self, read: Callable[[Storage], Awaitable[Any]], _job: _LineJob) -> _Ran:
+        self._assert_healthy()
+        if self._closed.done():
+            raise self._closed_error()
+        return _Ran(await read(self._gated))
 
     async def context(
         self,
@@ -535,11 +902,11 @@ class SessionImpl:
             return
         loop = asyncio.get_running_loop()
         closing: asyncio.Future[None] = loop.create_future()
-        closing.add_done_callback(lambda future: future.exception())
+        closing.add_done_callback(_consumed)
         self._closing = closing
         self._notify_close()
         try:
-            loop.create_task(self._run_close())
+            self._keep(loop.create_task(self._run_close()))
         except BaseException:
             self._closing = None
             raise
@@ -556,26 +923,7 @@ class SessionImpl:
                 await self.before_close()
             except Exception as close_error:
                 self.report(close_error)
-            async with self._line:
-                # After the last publication: every commit admitted before the seal has settled, so
-                # a commit observer's end follows the last publication it was handed.
-                commit_observers, self._commit_observers = self._commit_observers, []
-                closed = self._failure if self._failure is not None else session_closed_error()
-                for observer in commit_observers:
-                    observer.close_session(closed)
-                self._internal_listeners.clear()
-                self._documents.clear()
-                self._idle_documents.clear()
-                self._attached_documents.clear()
-                self._observers.clear()
-                try:
-                    await self._storage.close(without_abort_signal(BACKGROUND_CONTEXT))
-                except BaseException as close_error:
-                    error = close_error
-                    if self._failure is None:
-                        self._failure = close_error
-                        self.report(close_error, {"kind": "storage_failed"})
-                    raise
+            await self._maintain(self._close_job)
         except BaseException as caught:
             error = caught
         finally:
@@ -588,6 +936,33 @@ class SessionImpl:
                 else:
                     self._closing.set_exception(error)
 
+    async def _close_job(self, _job: _LineJob) -> None:
+        """The line part of close: drain what the writer still owes, then drop the trackers and close Storage.
+
+        Every commit admitted before the seal settled, and the writes at close went through the
+        writer, so no storage call is in flight when the backend closes.
+        """
+
+        await self._drained()
+        # After the last publication: every commit admitted before the seal has settled, so a commit
+        # observer's end follows the last publication it was handed.
+        commit_observers, self._commit_observers = self._commit_observers, []
+        closed = self._failure if self._failure is not None else session_closed_error()
+        for observer in commit_observers:
+            observer.close_session(closed)
+        self._internal_listeners.clear()
+        self._documents.clear()
+        self._idle_documents.clear()
+        self._attached_documents.clear()
+        self._observers.clear()
+        try:
+            await self._storage.close(without_abort_signal(BACKGROUND_CONTEXT))
+        except BaseException as close_error:
+            if self._failure is None:
+                self._failure = close_error
+                self.report(close_error, {"kind": "storage_failed"})
+            raise
+
     def _settle_closed(self, end: SessionEnd) -> None:
         """Settle ``closed``, once, with the end the Session ended by."""
 
@@ -596,8 +971,6 @@ class SessionImpl:
 
     def _notify_close(self) -> None:
         self._cancel_document_sweep()
-        for task in list(self._sweep_tasks):
-            task.cancel()
         listeners = self._close_listeners
         self._close_listeners = []
         for listener in listeners:
@@ -643,10 +1016,8 @@ class SessionImpl:
 
         self.assert_usable()
         self._internal_listeners.append(listener)
-        return (
-            lambda: self._internal_listeners.remove(listener)
-            if listener in self._internal_listeners
-            else None
+        return lambda: (
+            self._internal_listeners.remove(listener) if listener in self._internal_listeners else None
         )
 
     def subscribe_close(self, listener: Callable[[], Any]) -> Callable[[], None]:
@@ -657,17 +1028,24 @@ class SessionImpl:
     def _publish(
         self,
         seq: Seq,
-        writes: list[StorageWrite],
+        writes: Sequence[StorageWrite],
         documents: list[DocumentCommitChange],
         context: Context,
-    ) -> None:
+    ) -> BaseException | None:
+        """Publish one stored commit to memory and to the Session's observers.
+
+        Returns the error the first of the Session's own observers threw, or ``None``: the commit is
+        durable, so a failing observer neither fails the commit nor skips the others, and the writer
+        fails the Session with it once the host listeners had the commit.
+        """
+
         if (
             not self._internal_listeners
             and not self._commit_observers
             and not self._watches
             and not self._observers
         ):
-            return
+            return None
         changes: list[CommitChange] = [
             cast(CommitChange, write)
             for write in writes
@@ -700,8 +1078,14 @@ class SessionImpl:
                 # listener never starts to deliver it (spec §9.1).
                 self._release_pin(entry)
                 watch.end_after_delivery()
+        failures: list[BaseException] = []
+
+        def keep(error: BaseException) -> None:
+            if not failures:
+                failures.append(error)
+
         for listener in list(self._internal_listeners):
-            contained(partial(listener, publication, context), self.fail)
+            contained(partial(listener, publication, context), keep)
         for observer in list(self._commit_observers):
             # A commit observer mirrors what Storage made durable, in line order, and in no
             # particular order with the watch listeners. It is read at delivery: an observer that an
@@ -709,6 +1093,7 @@ class SessionImpl:
             # it was attached for (§9.1).
             if observer.attached:
                 observer.advance(publication, context)
+        return failures[0] if failures else None
 
     def _follow_address(
         self,
@@ -740,7 +1125,7 @@ class SessionImpl:
         self,
         entry: _WatchAttachment,
         documents: list[DocumentCommitChange],
-        writes: list[StorageWrite],
+        writes: Sequence[StorageWrite],
         context: Context,
     ) -> None:
         """Hand one observer every change of this commit at its address, unfolded and in line order.
@@ -802,7 +1187,12 @@ class SessionImpl:
         address: DocumentAddress,
         context: Context,
     ) -> LoadedDocument | None:
-        cached = None if self._read_only else self._documents.get(address_id)
+        # What an unpublished commit wrote at the address is in neither the cache nor what Storage
+        # shows yet: wait for its publication first.
+        gate = self.touch(document_key(address_id))
+        if gate is not None:
+            await gate
+        cached = self._documents.get(address_id)
         if cached is not None and cached.value_version == definition.version:
             self._touch_document(address_id)
             return cached
@@ -829,9 +1219,11 @@ class SessionImpl:
     async def unload_documents(self) -> None:
         """Drop every loaded document value; later access cold-loads from Storage."""
 
-        async with self._line:
+        async def drop(_job: _LineJob) -> None:
             self._documents.clear()
             self._idle_documents.clear()
+
+        await self._maintain(drop)
 
     # ── Document reads and observation ─────────────────────────────────────
 
@@ -855,16 +1247,19 @@ class SessionImpl:
         definition = token.definition
         resolved = resolve_address(definition, args)
         context = args[resolved.next_argument]
-        # A cached document serves its committed revision without waiting for an in-flight commit,
-        # which holds the mutation line until Storage settles.
+        # A cached document serves its committed revision without waiting for an in-flight commit.
         cached = self._documents.get(resolved.id)
         if cached is not None and cached.value_version == definition.version:
             self._touch_document(resolved.id)
             _validate_document(definition, cached)
             return cached.value
-        async with self._line:
+
+        async def load(_job: _LineJob) -> _Ran:
             self._assert_healthy()
             loaded = await self._load_document(definition, resolved.id, resolved.address, context)
+            return _Ran(loaded)
+
+        loaded = await self._enqueue(load)
         if loaded is None:
             return None
         _validate_document(definition, loaded)
@@ -879,6 +1274,10 @@ class SessionImpl:
         reaches the observer in line order. An absent address attaches nothing and answers ``None``.
         The detach is idempotent and unpins the document.
         """
+
+        definition = token.definition
+        resolved = resolve_address(definition, args)
+        context = args[resolved.next_argument]
 
         definition = token.definition
         resolved = resolve_address(definition, args)
@@ -945,16 +1344,19 @@ class SessionImpl:
                 signal.raise_if_aborted()
 
         try:
-            async with self._line:
+
+            async def acquire(_job: _LineJob) -> _Ran:
                 self._assert_healthy()
                 raise_if_cancelled()
-                loaded = await self._load_document(
-                    definition, resolved.id, resolved.address, context
-                )
+                loaded = await self._load_document(definition, resolved.id, resolved.address, context)
                 raise_if_cancelled()
                 if loaded is None:
-                    return None
-                attached = attach(loaded)
+                    return _Ran(None)
+                return _Ran(attach(loaded))
+
+            attached = await self._enqueue(acquire)
+            if attached is None:
+                return None
             if cancelled:
                 cancel(attached)
                 raise_if_cancelled()
@@ -1045,9 +1447,10 @@ class SessionImpl:
         if not isinstance(at_value, int) or isinstance(at_value, bool) or at_value < 1:
             raise TypeError("Session.snapshot_as_of() requires an entry ID")
         context = args[resolved.next_argument + 1]
-        async with self._line:
+
+        async def read(_job: _LineJob) -> _Ran:
             self._assert_healthy()
-            stored_entry = await self._storage.entry(conversation_id, EntryId(at_value), context)
+            stored_entry = await self._gated.entry(conversation_id, EntryId(at_value), context)
             if stored_entry is None:
                 raise ValueError(f"Entry {at_value} is not visible from conversation {conversation_id}")
             address = dict(resolved.address)
@@ -1055,15 +1458,17 @@ class SessionImpl:
                 "kind": "conversation",
                 "conversationId": stored_entry["entry"]["conversationId"],
             }
-            record = await self._storage.find_document(
+            record = await self._gated.find_document(
                 cast(DocumentAddress, address), stored_entry["commitSeq"], context
             )
             if record is None:
-                return None
-            stored = await self._storage.document(record["id"], stored_entry["commitSeq"], context)
+                return _Ran(None)
+            stored = await self._gated.document(record["id"], stored_entry["commitSeq"], context)
             if stored is None:
                 raise ValueError(f"Historical document {record['id']} ({record['kind']}) cannot be read")
-            return materialize_document(definition, stored)
+            return _Ran(materialize_document(definition, stored))
+
+        return await self._enqueue(read)
 
     @property
     def document_cache_sizes(self) -> DocumentCacheSizes:
@@ -1169,25 +1574,24 @@ class SessionImpl:
             sweep.disarm()
 
     def _queue_sweep_job(self, sweep: _DocumentSweep) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        task = loop.create_task(self._run_sweep_job(sweep))
-        self._sweep_tasks.add(task)
-        task.add_done_callback(self._sweep_tasks.discard)
+        """Put the sweep on the line where it was called, the way upstream's ``#maintain`` does.
 
-    async def _run_sweep_job(self, sweep: _DocumentSweep) -> None:
-        try:
-            async with self._line:
-                if self._document_sweep is sweep:
-                    self._document_sweep = None
-                if self._closing is None:
-                    self._sweep_documents()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
+        Upstream's scheduled sweep runs ``#maintain`` synchronously inside the callback it hands
+        ``queueMicrotask`` (``session.ts:1021-1031``), and ``#maintain`` attaches the job to ``#tail``
+        the moment it is called (``session.ts:1667-1677``). Queueing a task here instead would insert
+        a turn upstream does not have, and that turn is a race: the sweep's place on the line would be
+        decided by which of it and a resuming caller reached the tail first. Nothing awaits the job, so
+        its failure is retrieved, not carried -- and ``_closing`` is what keeps a sweep fired during
+        close from evicting anything.
+        """
+
+        async def sweep_documents(_job: _LineJob) -> None:
+            if self._document_sweep is sweep:
+                self._document_sweep = None
+            if self._closing is None:
+                self._sweep_documents()
+
+        self._queue_line(sweep_documents, bounded=False)
 
     def _sweep_documents(self) -> None:
         """On the line: evict the idle documents whose retention passed, then schedule the next."""
@@ -1208,24 +1612,34 @@ class SessionImpl:
         """Run after close seals admission and before the line closes Storage; a Harness joins tasks here."""
 
     async def write_at_close(self, writes: Callable[[], Sequence[StorageWrite]]) -> None:
-        """Internal, for ``before_close()``: on the line, after every commit admitted before the
-        seal has settled, write what ``writes()`` returns straight to Storage.
+        """Internal, for ``before_close()``: through the writer, after every commit admitted before
+        the seal has settled, store what ``writes()`` returns.
 
         Nothing is published, since the Session is closing; a failed Session writes nothing.
         """
 
-        async def job() -> None:
+        async def store(job: _LineJob) -> None:
+            await self._drained()
             if self._failure is not None:
                 return
             batch = list(writes())
-            if batch:
-                await self._store_one_batch(batch, BACKGROUND_CONTEXT)
+            if not batch:
+                return
+            part = self._writer.admit(
+                PartSpec(
+                    index=job.index,
+                    writes=batch,
+                    keys=[],
+                    context=BACKGROUND_CONTEXT,
+                    publish=lambda _seq: None,
+                    discard=lambda: None,
+                )
+            )
+            await part.outcome
 
-        async with self._line:
-            await job()
+        await self._maintain(store)
 
     # ── Internal ───────────────────────────────────────────────────────────
-
 
 
 class GuardedStorage:
@@ -1251,7 +1665,13 @@ class GuardedStorage:
         self._assert_healthy()
         if self._closing:
             raise RuntimeError("Session is closed")
-        call = asyncio.ensure_future(run())
+        # Spawned, not awaited inline: close waits for every call underway, and the task boundary is
+        # what lets a close that begins meanwhile reach Storage before a read between two pages can
+        # start the next one (group-commit document §3.4).
+        call: asyncio.Future[Any] = asyncio.ensure_future(run())
+        # Registered for close alone; the caller has the result too. A call nobody waits for must not
+        # report an unhandled rejection.
+        call.add_done_callback(_consumed)
         self._underway.add(call)
         try:
             result = await call
@@ -1271,15 +1691,34 @@ class GuardedStorage:
         self._assert_healthy()
         return result
 
-    async def commit_batches(
-        self, batches: Any, receive: CommitReceipt, context: Context
-    ) -> CommitResult:
-        return cast(
-            CommitResult,
-            await self._call(
-                None, lambda: self._storage.commit_batches(batches, receive, context)
-            ),
-        )
+    async def commit_batches(self, batches: Any, receive: CommitReceipt, context: Context) -> CommitResult:
+        """Guarded like every call, but its outcome is the writer's to judge.
+
+        It publishes the batches it received first, then fails the Session for a refusal or a
+        rejection, and for a Session that failed meanwhile (group-commit document §3.3): a storage
+        error here is not this guard's to latch.
+        """
+
+        self._assert_healthy()
+        if self._closing:
+            raise RuntimeError("Session is closed")
+        call: asyncio.Future[None] = _current_loop().create_future()
+        # The caller has the result; this one is only for close. A call nobody waits for must not
+        # report an unhandled rejection.
+        call.add_done_callback(_consumed)
+        self._underway.add(call)
+        try:
+            result = await self._storage.commit_batches(batches, receive, context)
+        except BaseException as error:
+            if not call.done():
+                call.set_exception(error)
+            raise
+        else:
+            if not call.done():
+                call.set_result(None)
+            return result
+        finally:
+            self._underway.discard(call)
 
     async def mint_id(self) -> int:
         return cast(int, await self._call(None, lambda: self._storage.mint_id()))
@@ -1419,6 +1858,38 @@ def _current_loop() -> asyncio.AbstractEventLoop:
         return asyncio.get_event_loop()
     except RuntimeError:
         return asyncio.new_event_loop()
+
+
+def _settled_future(loop: asyncio.AbstractEventLoop) -> asyncio.Future[None]:
+    """A future no job can fail: the line and the outcome fence start settled."""
+
+    future = _pending_future(loop)
+    future.set_result(None)
+    return future
+
+
+def _pending_future(loop: asyncio.AbstractEventLoop) -> asyncio.Future[None]:
+    """A future that only ever settles successfully: nobody awaits its failure."""
+
+    future: asyncio.Future[None] = loop.create_future()
+    future.add_done_callback(lambda settled: settled.exception() if not settled.cancelled() else None)
+    return future
+
+
+async def _quiet(future: asyncio.Future[Any]) -> None:
+    """Await a chained future without carrying its failure onward."""
+
+    try:
+        await future
+    except Exception:
+        pass
+
+
+def _consumed(future: asyncio.Future[Any]) -> None:
+    """Retrieve a settled future's exception: nobody has to await every queued job's result."""
+
+    if not future.cancelled():
+        future.exception()
 
 
 async def _await_with_context(awaitable: Awaitable[Any], context: Context) -> Any:

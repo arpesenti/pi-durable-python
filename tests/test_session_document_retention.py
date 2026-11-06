@@ -122,7 +122,7 @@ def open_session(
 async def settle_line(session: SessionImpl) -> None:
     """Let the line run what is queued on it: an eviction job, then return."""
 
-    await session.read_on_line(_noop)
+    await session.read_on_line(lambda _line: _noop())
 
 
 async def bump(session: SessionImpl, conversation_id: ConversationId, by: int = 1) -> None:
@@ -610,7 +610,7 @@ async def test_follows_a_harness_settings_change_at_the_next_use() -> None:
         await harness.snapshot(CounterDoc, root.id, context)
 
         async def settled() -> bool:
-            await harness.read_on_line(lambda: asyncio.sleep(0))
+            await harness.read_on_line(lambda _line: asyncio.sleep(0))
             return harness.document_cache_sizes["cached"] == 0
 
         await eventually(settled)

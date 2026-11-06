@@ -205,7 +205,24 @@ async def test_catches_an_entry_dropped_by_the_first_page() -> None:
 
 
 async def test_ends_with_the_error_that_failed_the_harness() -> None:
-    """Upstream: "ends with the error that failed the Harness"."""
+    """Upstream: "end with the error that failed the Harness".
+
+    Upstream's body as shipped (``test/harness-observers.test.ts:135``)::
+
+        storage.failNextCommit(failure);
+        await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context))
+            .rejects.toThrow("disk gone");
+        await harness.closed;
+        expect(graph.calls).toEqual([{ end: { kind: "failed", error: failure } }]);
+
+    It awaits ``harness.closed`` without closing anything: ``fail()`` closes the failed Session
+    itself (``src/session/session.ts:446-457`` — "Seal first, so a report handler that calls back
+    finds the Session failed"). A follower's end arrives from a close listener
+    (``session.ts:1538-1541``), and ``#notifyClose()`` runs the close listeners synchronously inside
+    ``close()`` (``session.ts:827``, ``:833-842``). The end therefore belongs to the close the
+    failure armed, and upstream has no point at which the commit has rejected while no end came —
+    which is why this case does not assert one.
+    """
 
     storage = ControlledStorage()
     harness = (await open_tasks(storage, []))["harness"]
@@ -217,9 +234,9 @@ async def test_ends_with_the_error_that_failed_the_harness() -> None:
     storage.fail_next_commit(failure)
     with pytest.raises(RuntimeError, match="storage is gone"):
         await append(root, "never")
+    # Upstream waits for the end the failed Session gave itself, instead of closing by hand.
+    await harness.closed
     assert recorder.calls == []
-    assert recorder.ends == []
-    await harness.close(context)
     assert recorder.ends == [{"kind": "failed", "error": failure}]
 
 

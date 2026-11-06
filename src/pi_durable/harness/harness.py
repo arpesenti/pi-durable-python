@@ -241,7 +241,7 @@ class ConversationHandleImpl:
     ) -> Page[EntryRecord, Any]:
         bounded = {"conversationId": self.id, **dict(query)}
         return await self._harness.read_on_line(
-            lambda: self._harness.storage.scan_entries(cast(Any, bounded), limit, cursor, context)
+            lambda line: line.scan_entries(cast(Any, bounded), limit, cursor, context)
         )
 
     async def fork(self, at: EntryId, options: Mapping[str, Any], context: Context) -> ConversationHandleImpl:
@@ -360,15 +360,11 @@ class Harness(SessionImpl):
             signal.raise_if_aborted()
         snapshot = cast(RegistryReader, options["registry"]).snapshot()
         missing = [
-            task.definition.name
-            for task in BUILTIN_TASKS
-            if snapshot.task(task.definition.name) is None
+            task.definition.name for task in BUILTIN_TASKS if snapshot.task(task.definition.name) is None
         ]
         if missing:
             names = ", ".join(missing)
-            raise RuntimeError(
-                f"Registry lacks built-in tasks {names}; create it with create_registry()"
-            )
+            raise RuntimeError(f"Registry lacks built-in tasks {names}; create it with create_registry()")
         harness = cls(storage, options, context)
         try:
             await harness._tasks.open(context)
@@ -464,7 +460,7 @@ class Harness(SessionImpl):
         await self._tasks.retry(id, context)
 
     async def get_task(self, id: TaskId, context: Context) -> TaskRecord | None:
-        return await self.read_on_line(lambda: self.storage.task(id, context))
+        return await self.read_on_line(lambda line: line.task(id, context))
 
     @property
     def scheduler_index_sizes(self) -> dict[str, int]:
@@ -473,7 +469,7 @@ class Harness(SessionImpl):
         return self._tasks.index_sizes
 
     async def inspect(self, context: Context) -> HarnessInspection:
-        async def read() -> HarnessInspection:
+        async def read(_line: Storage) -> HarnessInspection:
             scheduling, tasks = await self._tasks.inspect(
                 cast(RegistryReader, self._options["registry"]).snapshot()
             )
@@ -519,7 +515,7 @@ class Harness(SessionImpl):
 
     async def conversation(self, id: ConversationId, context: Context) -> ConversationHandleImpl | None:
         self.assert_usable()
-        record = await self.read_on_line(lambda: self.storage.conversation(id, context))
+        record = await self.read_on_line(lambda line: line.conversation(id, context))
         return None if record is None else ConversationHandleImpl(record["id"], self)
 
     async def create_conversation(
@@ -577,9 +573,7 @@ class Harness(SessionImpl):
 
     # ── Submissions ────────────────────────────────────────────────────────
 
-    async def submit(
-        self, conversation_id: ConversationId, submission: Any, context: Context
-    ) -> Submission:
+    async def submit(self, conversation_id: ConversationId, submission: Any, context: Context) -> Submission:
         return await self._submissions.submit(conversation_id, submission, context)
 
     async def admit(
@@ -619,7 +613,7 @@ class Harness(SessionImpl):
         binding: Mapping[str, Any],
         context: Context,
     ) -> ConversationHandle | None:
-        record = await self.read_on_line(lambda: self.storage.conversation(id, context))
+        record = await self.read_on_line(lambda line: line.conversation(id, context))
         return None if record is None else BoundConversation(id, self, binding)
 
     # ── Not yet ported ─────────────────────────────────────────────────────
@@ -628,8 +622,8 @@ class Harness(SessionImpl):
         """Sum every conversation's committed ``pi.usage`` into the Session total."""
 
         conversations = await self.read_on_line(
-            lambda: scan_all(
-                lambda cursor: self.storage.scan_conversations({}, _SCAN_PAGE_SIZE, cursor, context)
+            lambda line: scan_all(
+                lambda cursor: line.scan_conversations({}, _SCAN_PAGE_SIZE, cursor, context)
             )
         )
         total = cast(UsageState, UsageDoc.definition.initial())
@@ -667,7 +661,6 @@ class Harness(SessionImpl):
 
         self.assert_usable()
         return await self._graph.watch(context)
-
 
 
 def _bind_context(binding: Mapping[str, Any], context: Context) -> Context:

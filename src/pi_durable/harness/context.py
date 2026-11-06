@@ -78,7 +78,7 @@ class ContextRange(TypedDict):
 class ContextSession(Protocol):
     """The Session seam a context read needs: run a job on the mutation line."""
 
-    async def read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any: ...
+    async def read_on_line(self, job: Callable[[Storage], Awaitable[Any]]) -> Any: ...
 
 
 async def capture_context_bounds(
@@ -114,7 +114,9 @@ async def read_context(
 ) -> ContextView:
     """Read one conversation's committed context: bounds on the Session line, entries off it."""
 
-    bounds = await session.read_on_line(lambda: capture_context_bounds(storage, conversation_id, context, at))
+    bounds = await session.read_on_line(
+        lambda line: capture_context_bounds(line, conversation_id, context, at)
+    )
     return await derive_context(storage, conversation_id, bounds, context)
 
 
@@ -194,7 +196,9 @@ async def read_context_from(
 ) -> tuple[ContextView, ContextRange | None]:
     """Read the context, reusing ``previous``: with the same head, only newer entries are scanned."""
 
-    bounds = await session.read_on_line(lambda: capture_context_bounds(storage, conversation_id, context, at))
+    bounds = await session.read_on_line(
+        lambda line: capture_context_bounds(line, conversation_id, context, at)
+    )
     if bounds is None:
         return empty_view(), None
     freeze_json(bounds["head"])

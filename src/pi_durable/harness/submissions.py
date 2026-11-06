@@ -16,7 +16,7 @@ from ..ids import ConversationId, SubmissionId
 from ..json import JsonValue, copy_json
 from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
-from ..types import EntryDraft, SubmissionCreate, SubmissionRecord
+from ..types import EntryDraft, Storage, SubmissionCreate, SubmissionRecord
 from .inbox import (
     InboxDoc,
     QueueModes,
@@ -71,8 +71,7 @@ def check_input_entry(entry: InputEntry) -> None:
     kind = entry.get("kind")
     if not isinstance(kind, str) or not kind or kind.startswith("pi."):
         raise TypeError(
-            "An input entry's kind must be a non-empty string not starting with \"pi.\", "
-            f"got {kind!r}"
+            f'An input entry\'s kind must be a non-empty string not starting with "pi.", got {kind!r}'
         )
 
 
@@ -147,9 +146,7 @@ class Submissions:
         )
 
     async def _record(self, id: SubmissionId, context: Context) -> SubmissionRecord | None:
-        return await self._session.read_on_line(
-            lambda: self._session.storage.submission(id, context)
-        )
+        return await self._session.read_on_line(lambda line: line.submission(id, context))
 
     async def get(self, id: SubmissionId, context: Context) -> Submission | None:
         record = await self._record(id, context)
@@ -164,8 +161,8 @@ class Submissions:
     async def wait(self, id: SubmissionId, context: Context) -> SettledSubmissionRecord:
         self._resume()
 
-        async def find() -> dict[str, Any]:
-            record = await self._session.storage.submission(id, context)
+        async def find(line: Storage) -> dict[str, Any]:
+            record = await line.submission(id, context)
             if record is None:
                 raise ValueError(f"Submission {id} does not exist")
             if is_settled(record):

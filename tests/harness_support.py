@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any, cast
 
-from session_support import context
+from session_support import Deferred, context
 
 from pi_durable import MemoryStorage
 from pi_durable.harness.define import define_extension, define_tool, section
@@ -24,6 +25,34 @@ def tool(name: str, description: str | None = None) -> ToolRegistration:
             "execute": lambda *_args: None,
         }
     )
+
+
+class HeldLine:
+    """A held Session line: :attr:`entered` settles once the holding commit runs, ``release()`` lets it go."""
+
+    def __init__(self) -> None:
+        self.entered = Deferred()
+        self._released = Deferred()
+
+    def release(self) -> None:
+        self._released.resolve()
+
+    async def hold(self, _tx: Any) -> None:
+        self.entered.resolve()
+        await self._released.promise
+
+
+def hold_line(harness: Any) -> HeldLine:
+    """Hold the mutation line with a commit whose callback waits; the jobs queued after it start on release.
+
+    Upstream's ``holdLine`` (``test/harness-tasks.test.ts:91``). Group commit stores off the line, so a
+    held Storage call no longer holds the line: a test that wants the line held commits a callback that
+    waits for it.
+    """
+
+    held = HeldLine()
+    asyncio.ensure_future(harness.commit(held.hold, context))
+    return held
 
 
 async def open_harness(

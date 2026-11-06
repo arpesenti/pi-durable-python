@@ -222,12 +222,12 @@ class ConversationViews:
 
         bounds = resolve_window(window)
 
-        async def job() -> Any:
+        async def job(line: Storage) -> Any:
             self._session.assert_usable()
             mount = self._mounts.get(id)
             if mount is None:
-                mount = await self._build(id, context)
-            entries, before = await load_window(self._storage, id, bounds, context)
+                mount = await self._build(line, id, context)
+            entries, before = await load_window(line, id, bounds, context)
             value = mounted_view(mount.conversation, entries, before, mount.docs)
             holder: dict[str, Windowed] = {}
             detached = False
@@ -243,7 +243,7 @@ class ConversationViews:
                 if not mount.observers and self._mounts.get(id) is mount:
                     del self._mounts[id]
 
-            observer = create(value, detach, self._storage, self)
+            observer = create(value, detach, line, self)
             if asyncio.iscoroutine(observer):
                 observer = await observer
             # Close or cancellation may begin while the mount hydrates; register nothing then.
@@ -261,8 +261,12 @@ class ConversationViews:
 
         return await self._session.read_on_line(job)
 
-    async def _build(self, id: ConversationId, context: Context) -> Mount:
-        conversation = await self._storage.conversation(id, context)
+    async def _build(
+        self, storage: Storage, id: ConversationId, context: Context
+    ) -> Mount:
+        """Hydrate a mount on the line, through the line's ``storage``."""
+
+        conversation = await storage.conversation(id, context)
         if conversation is None:
             raise RuntimeError(f"Conversation {id} does not exist")
         docs: dict[str, JsonObject] = {}

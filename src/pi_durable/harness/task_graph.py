@@ -176,11 +176,11 @@ class TaskGraphView:
         create: Callable[[TaskGraph, Callable[[], None], TaskGraphView], Any],
         context: Context,
     ) -> Any:
-        async def job() -> Any:
+        async def job(line: Storage) -> Any:
             self._session.assert_usable()
             mount = self._mount
             if mount is None:
-                value, records = await self._build(context)
+                value, records = await self._build(line, context)
                 mount = GraphMount(value=value, records=records)
             detached = False
 
@@ -214,7 +214,7 @@ class TaskGraphView:
         if self._mount is None or self._closed:
             return
 
-        async def job() -> None:
+        async def job(_line: Storage) -> None:
             mount = self._mount
             if mount is None:
                 return
@@ -259,13 +259,17 @@ class TaskGraphView:
         for observer in list(mount.observers):
             contained(partial(observer.advance, call, frame_context), self.report)
 
-    async def _build(self, context: Context) -> tuple[TaskGraph, dict[str, dict[str, Any]]]:
+    async def _build(
+        self, storage: Storage, context: Context
+    ) -> tuple[TaskGraph, dict[str, dict[str, Any]]]:
+        """Hydrate the task graph, on the line: every read waits for what the line admitted before it."""
+
         records: list[TaskRecord] = []
         for status in LIVE_STATUSES:
             records.extend(
                 await scan_all(
                     partial(
-                        self._storage.scan_tasks,
+                        storage.scan_tasks,
                         {"status": status},
                         SCAN_PAGE_SIZE,
                         context=context,
@@ -278,7 +282,7 @@ class TaskGraphView:
         for record in records:
             owned = await scan_all(
                 partial(
-                    self._storage.scan_conversations,
+                    storage.scan_conversations,
                     {"ownerTaskId": record["id"]},
                     SCAN_PAGE_SIZE,
                     context=context,
