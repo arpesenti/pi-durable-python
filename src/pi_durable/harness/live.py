@@ -497,7 +497,13 @@ def clear_progress(slot: Any) -> None:
 
 
 async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome: dict[str, Any]) -> None:
-    """Harness cleanup for a terminal outcome the scheduler writes itself (faulted or orphaned)."""
+    """Harness cleanup for a terminal outcome the scheduler writes itself (faulted or orphaned).
+
+    Only an abort handler is faulted for the limit here -- the built-in phases end themselves -- so the
+    task keeps the meaning it had: an aborted run still ends ``aborted`` with the limit as its detail,
+    and an aborted compaction is no failure. Past the limit the abort handler may have died doing the
+    cleanup, so it is not attempted again (spec §5.4).
+    """
 
     if record["kind"] == TOOL_TASK_KIND:
         live = await tx.doc(LiveDoc, record["conversationId"])
@@ -506,14 +512,20 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
             finish_slot(slot)
         remove_nested_slots(live, record["id"])
         return
+    error = outcome.get("error") or {}
+    detail = error.get("detail") if outcome.get("status") == "faulted" else None
+    cut_off = isinstance(detail, Mapping) and detail.get("reason") == "restart_limit"
     if record["kind"] == COMPACTION_TASK_KIND:
-        failure_text = (
-            str(cast(Mapping[str, Any], outcome.get("error") or {}).get("message", ""))
-            if outcome.get("status") == "faulted"
-            else str(outcome.get("reason", ""))
-        )
+        live = await tx.doc(LiveDoc, record["conversationId"])
+        if cut_off:
+            remove_compaction_status(live, record["id"])
+            return
         fail_compaction_status(
-            await tx.doc(LiveDoc, record["conversationId"]), record["id"], failure_text
+            live,
+            record["id"],
+            str(error.get("message", ""))
+            if outcome.get("status") == "faulted"
+            else str(outcome.get("reason", "")),
         )
         return
     if record["kind"] not in RUN_TASK_KINDS:
@@ -524,16 +536,17 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
         return
     from .generation import convert_partial
 
-    await convert_partial(tx, live, record["conversationId"])
+    # Cut off, the abort handler may have died converting the partial: the run ends without it.
+    if not cut_off:
+        await convert_partial(tx, live, record["conversationId"])
     if outcome.get("status") == "faulted":
-        error = outcome.get("error") or {}
         end_run(
             tx,
             live,
             record["id"],
             {
                 "status": "unanswered",
-                "reason": "faulted",
+                "reason": "aborted" if cut_off else "faulted",
                 "detail": error.get("message", error_message(error)),
             },
         )

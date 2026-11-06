@@ -230,13 +230,32 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `test_harness_blocked.py::test_faults_an_extension_task_cut_off_restart_limit_times_instead_of_running_it_again`
   is `test/harness-blocked.test.ts:136`, faulting an extension's task with the message
   `Task <id> (<kind>) was cut off 3 times without progress` and one `task_faulted` report of reason
-  `restart_limit`; `tests/test_harness_restart_failure.py` translates the three upstream cases of
-  `test/harness-restart-failure.test.ts` for the built-in kinds — a tool call settled with an error
-  result carrying the `restart_limit` diagnostic and a task failed with that detail, a compaction
-  failed into `compactionFailure`, and a generation ending its run `unanswered` with `runFailure`
-  reason `restart_limit` — each also reported `task_interrupted` with its `restarts`, and
-  `test_harness_after_run.py::test_ends_an_answered_run_completed_without_a_failure_once_finish_is_cut_off`
-  is the answered case, which ends `completed` with no failure and keeps what is queued. Deleted with
+  `restart_limit`; `tests/test_harness_restart_failure.py` translates all 18 cases of
+  `test/harness-restart-failure.test.ts` -- nothing in that file is left untranslated. Six came with
+  the built-in kinds: a tool call settled with an error result carrying the `restart_limit`
+  diagnostic and a task failed with that detail, a compaction failed into `compactionFailure`, and a
+  generation ending its run `unanswered` with `runFailure` reason `restart_limit`, each also reported
+  `task_interrupted` with its `restarts`. The other 12 cover the charged attempt under `settings.retry`
+  (kept partial, backoff, the run ending `interrupted` with every partial kept, retries disabled, a
+  clean close that is not a crash and resends, a generation sleeping in a retry or waiting for its
+  tools that is not charged), the crash-then-clean-close charging a request once, the limit ending a run
+  that keeps being cut off while charging, the partial dropped past the limit where converting it may
+  be what fails, an aborted run whose abort handler is cut off, and `task_interrupted` reporting. The
+  answered case is
+  `test_harness_after_run.py::test_ends_an_answered_run_completed_without_a_failure_once_finish_is_cut_off`,
+  which ends `completed` with no failure and keeps what is queued. Two port notes this suite forced:
+  `settle_scheduler_outcome` distinguishes a task cut off at the limit from one that merely faulted, as
+  upstream `live.ts:421-447` does, so an abort handler cut off at the limit ends its run `aborted` with
+  the limit as its detail rather than `faulted`, skips a cleanup that may be what cut the task off, and
+  fails a cut-off compaction into no failure at all; and `_cancel_deferred` reports a *failure* but
+  re-raises `asyncio.CancelledError` (`generation.ts:589-596`), because aborting in Node is not
+  cancelling -- vitest abandons a handler that never settles, while asyncio must be allowed to cancel
+  one or the task can never end. The compaction half of that distinction had **no coverage at all**:
+  upstream's file never faults a compaction for the limit, so deleting the `cutOff` branch from
+  `settle_scheduler_outcome` left the whole suite green. `test_harness_restart_failure.py::test_removes_a_cut_off_compaction_without_failing_it`
+  is therefore **port-authored, not translated** -- it is the port's own case for `live.ts:421-447`, and
+  disabling that branch reddens it on the `compactionFailure` assertion. It is the nineteenth case in a
+  file whose other eighteen are upstream's, and it is not counted as upstream coverage. Deleted with
   it: the parked state, its `restart_limit` blocked reason of `BlockedReason` and `TaskInspection`,
   `TaskScheduler.retry`, `Harness.retry_task`, and the wake exclusion, all of which 1.5.0 removed
   (`Harness.retryTask()`, the `restart_limit` blocked reason, and the `task_parked` report are gone
