@@ -18,6 +18,7 @@ from typing import Any, NotRequired, TypedDict, cast
 
 from ..context import Context
 from ..entries import AssistantEntry, ResetEntry, SystemEntry, UserEntry
+from ..errors import is_failure
 from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue, copy_json
 from ..providers import (
@@ -1294,7 +1295,14 @@ def _deferred_of(checkpoint: Mapping[str, Any]) -> Mapping[str, Any] | None:
 
 
 async def _cancel_deferred(runtime: Any, polled: Mapping[str, Any], context: Context) -> None:
-    """Cancel a deferred response no attempt will poll again; a failure is reported, never thrown."""
+    """Cancel a deferred response no attempt will poll again; a failure is reported, never thrown.
+
+    Only a *failure* is reported: ``CancelledError`` and the other teardown signals are how a task is
+    ended at all, so they keep unwinding (``errors.is_failure``). Upstream's ``catch`` at
+    ``generation.ts:589-596`` cannot express the difference -- aborting in Node is not cancelling, and
+    vitest abandons a handler that never settles rather than cancelling it -- so swallowing everything
+    here would leave a killed host's abort invocation un-cancellable forever.
+    """
 
     ref = cast(ModelRef, polled["model"])
     model = runtime.models.get_model(ref["provider"], ref["modelId"])
@@ -1306,6 +1314,8 @@ async def _cancel_deferred(runtime: Any, polled: Mapping[str, Any], context: Con
         )
     except BaseException as error:
         # A provider call such as cancelling a deferred response is a host callback.
+        if not is_failure(error):
+            raise
         runtime.report(error, {"kind": "host", "callback": "models"})
 
 
