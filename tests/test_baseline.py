@@ -343,6 +343,23 @@ def test_every_port_additions_row_has_the_table_arity() -> None:
     )
 
 
+def test_every_spec_section_row_has_the_table_arity() -> None:
+    """A spec-section claim counts only if it renders as one: a row of the header's two cells.
+
+    A second row appended to a row with `||` is one physical line holding two rows, so the rendered
+    table shows it as one cell run and `spec_section_status()` reads the statuses concatenated.
+    The `tested` claim of the row before it then rests on the text of the row smuggled into it, which
+    no reader of the rendered matrix and no check of its cells can see.
+    """
+
+    wrong = [cells for cells in matrix_table("Spec sections") if len(cells) != 2]
+    joined = "; ".join(" | ".join(cell[:40] for cell in cells) for cells in wrong)
+    assert not wrong, (
+        "these Spec sections rows do not render as the 2-cell table rows the section's header "
+        f"declares: {joined}"
+    )
+
+
 # --- The decision records bound this baseline -------------------------------------------------
 
 ADR_0001 = ADR_DIR / "0001-parity-baseline-and-boundary.md"

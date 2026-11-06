@@ -11,7 +11,10 @@ contract behind section 4.
 [`docs/adr/0002-upstream-1-4-0-scope.md`](./docs/adr/0002-upstream-1-4-0-scope.md), and
 [`docs/adr/0003-upstream-1-5-0-scope.md`](./docs/adr/0003-upstream-1-5-0-scope.md).
 
-**Audit report:** [`docs/parity-report.md`](./docs/parity-report.md).
+**Audit reports:** [`docs/parity-report.md`](./docs/parity-report.md) is the v1.4.0 audit record and
+states that baseline only;
+[`docs/parity-report-1.5.0.md`](./docs/parity-report-1.5.0.md) is this baseline's record and the one
+owner of the v1.5.0 exclusion record.
 
 This file is the parity contract. Every public export and spec section gets a row. A row may
 not be marked `tested` until the Python implementation exists, its translated test exists, and CI
@@ -371,7 +374,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
-| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes; #43) |
+| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes — still owed, and #43 no longer owes it: that ticket shipped the `WatchCall` half of the retag and merged without this one, and nothing in `src/` or `tests/` carries the name. The port has no Chord host to hand one (ADR 0003), so #52 names its owner) |
 | `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Observation` | type | `Observation` | test_session_observers.py, test_harness_observers.py | tested (an attached `Observer` — the value at attachment, the idempotent `detach()`, and no pin left behind; #44) |
 | `Observer` | type | `Observer` | test_session_observers.py, test_harness_observers.py | tested (the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph: attached atomically on the line, every change unfolded in line order, `ended` by the owner it observes and `failed` by the close; #44) |
@@ -644,7 +647,7 @@ SQLite backend and migrations.
 | 4 Transactions and storage ownership | planned (group commit: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound, and outcomes in line order — see the vendored group-commit document; #42) |
 | 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
 | 5 Tasks | tested |
-| 5.1 Definition | planned (`TaskRuntime.entries()`, the `options` a commit takes, and the `kind`-tagged `ReportFrom`; #33, #47, #50) |
+| 5.1 Definition | planned (the `kind`-tagged `ReportFrom` landed with #33. What 1.5.0 still owes here is the `options` a commit takes — `TaskRuntime.commit` takes none, and that window is #47's — and `TaskRuntime.entries()`, which #50's continue work landed without and no open ticket holds) |
 | 5.2 Effect sandwich | tested |
 | 5.3 Terminal tasks | tested |
 | 5.4 Scheduler, abort, and ownership | planned (a task cut off `restart_limit` times in a row ends instead of parking, with the per-task-kind outcome and `task_interrupted`, and the scheduler decides in recorded regions; #48, #49) |
@@ -654,7 +657,7 @@ SQLite backend and migrations.
 | 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
 | 7.1 Extensions, registry, and agent resolution | tested (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup, and the registry is never touched for it; test_harness_tools.py, test_harness_tools_recovery.py) |
 | 7.2 Hooks | planned (`afterTool` on every result the tool task writes, `beforeProviderRequest`, `afterRun` with `RunSummary` and `RunEndTask`, and `HookApi.entry()`/`entries()`; #36, #48) |
-| 7.3 Tools | planned (parameters as plain JSON Schema closed by default with pi-schema's validator wording is #51, deferred tool progress is #47, and `ConversationHandle.submit(tx, ...)` is #50. `unoffered` slots and the hidden call's own task are tested in test_harness_tools.py and test_harness_live_migrations.py; #36) |
+| 7.3 Tools | planned (deferred tool progress is #47: `ToolApi.commit` takes no `options`, and a tool's `details()` partial is not yet stored on section 4.1's deferred window. Parameters as plain JSON Schema closed by default with pi-schema's validator wording landed with #51, and `ConversationHandle.submit(tx, ...)` with #50: test_harness_submit_in_commit.py, over the rule in `harness/submissions.py`. `unoffered` slots and the hidden call's own task are tested in test_harness_tools.py and test_harness_live_migrations.py; #36) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
@@ -667,7 +670,7 @@ SQLite backend and migrations.
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the status the live document lists: test_harness_compaction.py, test_harness_live_migrations.py; #36) |
 | 9 Document observation and Chord | tested |
-| 9.1 Watches | tested (`WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35; and the `Observer` beside it — `advance(call, context)` / `end(end)` attached atomically on the line, its detach idempotent, `ended` only by an observed owner that ended and `failed` by the Session's close, with the commit observer handed exactly what Storage stored: test_session_observers.py, test_harness_observers.py. A task document's watch ends with the task that owns it: the commit that makes the task terminal retires the document, and the watch ends `ended` once that retirement has been delivered and returned, while a watch whose listener never started owes a call that never arrives and so is ended only by the Session's close (`ended`) or failure (`failed`) — and an ended watch keeps nothing of its Session alive, proven on weakrefs: test_harness_observers.py; #54. Supersedes the 1.4.0 Document state section, whose state getters #44 deleted) || 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
+| 9.1 Watches | tested (`WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35; and the `Observer` beside it — `advance(call, context)` / `end(end)` attached atomically on the line, its detach idempotent, `ended` only by an observed owner that ended and `failed` by the Session's close, with the commit observer handed exactly what Storage stored: test_session_observers.py, test_harness_observers.py. A task document's watch ends with the task that owns it: the commit that makes the task terminal retires the document, and the watch ends `ended` once that retirement has been delivered and returned, while a watch whose listener never started owes a call that never arrives and so is ended only by the Session's close (`ended`) or failure (`failed`) — and an ended watch keeps nothing of its Session alive, proven on weakrefs: test_harness_observers.py; #54. Supersedes the 1.4.0 Document state section, whose state getters #44 deleted) |
 | 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
 | 9.3 Conversation view | planned (1.5.0: the entry window with `before`, the `ConversationWindow` bounds, and `ConversationTranscript` are tested in test_harness_view.py and test_conversation_transcript.py; a run as the view shows it is translated in test_harness_view_run.py, where the assertions the deleted agent event adapter carried now ride on the view, and upstream's remaining `test/harness-view-run.test.ts` cases — streamed-partial cost and the run failure — await #47 and #48) |
 | 9.4 Task graph view | tested (the vendored 9.4, re-keyed from the 9.5 this port carried and from the retired Agent events section #46 deletes: translated in test_harness_task_graph.py, and the graph observer of #44 mirrors each publication on the line, a blocked reason re-derived with no commit, in test_harness_observers.py) |
@@ -936,15 +939,17 @@ cases skip by design, and every remaining deviation is explicit. It is that base
 it stays as written: a later sync writes beside it, never over it.
 
 **The v1.5.0 exclusion record has one owner: the dated v1.5.0 audit report,
-`docs/parity-report-1.5.0.md`, which #52 writes when this sync's suites are green.** That report —
+[`docs/parity-report-1.5.0.md`](./docs/parity-report-1.5.0.md).** That report —
 not this matrix and not the 1.4.0 record — names the suites this baseline adds (`group-commit`,
 `deferred-commit`, `deferred-progress`, `observers`, `transcript`, `run-failure`, `turn-limit`,
 `after-run`, `continue`, `submit-in-commit`, `idle-scope`, and `restart-failure` among them), every
-upstream case deliberately left untranslated, and every 1.5.0 deviation and exclusion. Until it
-exists, an exclusion this baseline takes is recorded only where a row must record it: the `excluded`
-rows above, each with its reason, and ADR 0003. Anything about 1.5.0 — an exclusion or a completion
-claim — that the 1.4.0 record carries before that report is written is provisional: it moves to
-`docs/parity-report-1.5.0.md`, so the same fact is never signed off twice in two places.
+upstream case deliberately left untranslated, and every 1.5.0 deviation and exclusion. It exists
+now, carrying what each porting ticket observed at its own commit; #52 is the audit that signs it
+off, and until it does a completion claim there is provisional. An exclusion this baseline takes is
+recorded there, and where a row must record it: the `excluded` rows above, each with its reason, and
+ADR 0003. Anything about 1.5.0 — an exclusion or a completion claim — that the 1.4.0 record carries
+is provisional: it belongs in `docs/parity-report-1.5.0.md`, so the same fact is never signed off
+twice in two places and the 1.4.0 record states only the baseline it audited.
 
 **What `test_types.py` proves is an annotation-compile contract, not behaviour.** The rows whose
 `Tests` cell cites it, alone or beside a behavioural suite, cite it for the shapes it pins: each is

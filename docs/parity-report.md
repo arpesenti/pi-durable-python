@@ -13,6 +13,18 @@ what remains different.
 **Scope records:** [ADR 0001](./adr/0001-parity-baseline-and-boundary.md) (baseline and boundary)
 and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 
+> **What this record is.** It is the v1.4.0 audit as it closed at tag `v1.4.0`, and it is read that
+> way: every claim below — the 61-suite result, the suite list, the file names it cites, the
+> deviations, the seams each guarantee is proved on, and the line above that every contract row is
+> `tested` or `excluded` — states that baseline, not the tree at a later one. Two of the files it
+> names are gone with the surfaces upstream deleted at 1.5.0: `test_harness_events.py` and
+> `test_session_states.py`. A later sync writes beside this file and never over it. The v1.5.0
+> record has one owner,
+> [`parity-report-1.5.0.md`](./parity-report-1.5.0.md): the suites this baseline deleted or remapped
+> (`harness-events` went with the agent event stream, and the state-getter suite `session-states`
+> went with the getters), the content the telemetry bullet below counts on the event stream for, and
+> every 1.5.0 exclusion and completion claim are recorded there and read from there.
+
 ## Result
 
 - All 61 in-scope upstream `test/*.test.ts` suites have a Python translation.
@@ -43,6 +55,7 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-compaction` | `test_harness_compaction.py` |
 | `harness-context` | `test_harness_context.py`, `test_harness_context_ranges.py` |
 | `harness-conversations` | `test_harness_conversations.py` |
+| `harness-events` | `test_harness_events.py` |
 | `harness-failed-run-inbox` | `test_harness_failed_run_inbox.py` |
 | `harness-generation-recovery` | `test_harness_generation_recovery.py` |
 | `harness-host-inputs` | `test_harness_host_inputs.py` |
@@ -53,7 +66,7 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-lifecycle` | `test_harness_lifecycle.py`, `test_harness_lifecycle_observations.py` |
 | `harness-live-deltas` | `test_harness_live_deltas.py` |
 | `harness-nested-tools-restart` | `test_harness_nested_tools_restart.py` |
-| `harness-nested-tools` | `test_harness_nested_tools.py` |
+| `harness-nested-tools` | `test_harness_nested_tools.py`, `test_harness_events.py` |
 | `harness-ownership` | `test_harness_ownership.py`, `test_harness_scheduler_retention.py`, `test_harness_tasks_recovery.py` |
 | `harness-prompt` | `test_harness_prompt.py` |
 | `harness-registry` | `test_harness_registry_agent.py` |
@@ -62,7 +75,6 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-sleep` | `test_harness_sleep.py` |
 | `harness-scheduler-retention` | `test_harness_scheduler_retention.py` |
 | `harness-storage-failure` | `test_harness_storage_failure.py` |
-| `harness-observers` | `test_harness_observers.py` |
 | `harness-structured-output` | `test_harness_structured_output.py` |
 | `harness-structured` | `test_harness_tasks.py`, `test_harness_ownership.py`, `test_harness_structured_cycles.py` |
 | `harness-submissions` | `test_harness_submissions.py`, `test_harness_inbox.py` |
@@ -72,7 +84,6 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `harness-tools-recovery` | `test_harness_tools_recovery.py` |
 | `harness-tools` | `test_harness_tools.py` |
 | `harness-view` | `test_harness_view.py` |
-| `harness-view-run` | `test_harness_view_run.py`, `test_harness_nested_tools.py`, `test_harness_compaction.py`, `test_session_document_retention.py` |
 | `jsonl-storage` | `test_jsonl_storage.py` |
 | `memory-storage` | `test_memory_storage.py` |
 | `provider-session-cache-e2e` | `test_provider_session_cache_e2e.py` (live case skipped without credentials) |
@@ -81,8 +92,7 @@ and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 | `session-document-retention` | `test_session_document_retention.py` |
 | `session-documents` | `test_session_documents.py` |
 | `session-forks` | `test_session_forks.py` |
-| `session-observers` | `test_session_observers.py` |
-| `session-states` | `test_session_observers.py`, `test_session_document_retention.py`, `test_session_checkpoints_migrations.py` (upstream 1.5.0 deletes the state getters this suite tested; where each of its guarantees is proved now is itemised in "Cases completed in this audit") |
+| `session-states` | `test_session_states.py` |
 | `session-tables` | `test_session_tables.py` |
 | `session-watches` | `test_session_watches.py` |
 | `spec-usage` | `test_spec_usage.py` (compile-checked examples, as upstream) |
@@ -179,18 +189,6 @@ Three gaps were found while translating the last deferred cases and were fixed i
   orchestrator/worker/reviewer cycle, a diamond, and a longer cycle.
 - `spec-usage`: the spec's usage examples are now a typed Python module, so mypy checks them the
   way the upstream TypeScript compile does; the test asserts the translation exists.
-- `conversation-transcript` and the windowed `harness-view`: every upstream case in both suites is
-  translated — 16 in `test_conversation_transcript.py` and 23 in `test_harness_view.py`, each named
-  for its upstream case — covering the entry window a conversation view carries (`from`, `min`,
-  `max`, `before`), the bounds refused at attach, the one splice that drops past `max` while setting
-  `before`, one window per attached consumer, and `ConversationTranscript`'s `earlier` marker, gaps,
-  page-by-page fills, shared loads, retried loads, and `resume`. Two of those cases carry
-  observer-only assertions and one a garbage-collection probe; all three are named in **Remaining
-  deviations**. The new upstream `test/conversation-view-bench.ts` is excluded as a benchmark helper.
-  The window is read only through `Conversation.watch(context, window)` and
-  `ConversationTranscript.resume`, the two seams upstream v1.5.0 has: `Conversation.viewState()` is
-  gone from upstream `src/`, so the port's `view_state` getter and its `ConversationViews.state`
-  mount are deleted here rather than carried into #44.
 
 ## Section 12: API footguns
 
@@ -227,40 +225,12 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   fake clients in the adapter suites.
 - **Code Mode, images, Cloudflare, PowerShell, Windows, benchmarks.** Out of scope by
   [ADR 0001](./adr/0001-parity-baseline-and-boundary.md); the excluded upstream suites and the
-  benchmark helpers in `testing` are listed as `excluded` in `PARITY.md`. The new 1.5.0
-  `test/conversation-view-bench.ts` is a benchmark helper over the windowed view and is excluded on
-  the same basis; the window shapes it measures are asserted behaviorally in
-  `test_harness_view.py`.
-- **The streamed-partials half of `harness-view-run` waits for #47 and #48.** Upstream v1.5.0 adds
-  `test/harness-view-run.test.ts` — "a run as the conversation view shows it" and "streamed
-  partials", 14 cases that read run state (`pi.live`, `pi.inbox`, streamed partials, tool slots)
-  out of the windowed view's operations. #46 translated the run cases there — they are where the
-  assertions the deleted agent event adapter carried now ride — in `test_harness_view_run.py`, and
-  the nested-call and compaction cases of that file in `test_harness_nested_tools.py`,
-  `test_harness_compaction.py`, and `test_session_document_retention.py`. What remains is the
-  "streamed partials" describe — the per-commit cost of a growing partial, a watcher's memory over a
-  long stream, and the run-failure and restart-cutoff states — which belongs to #47 and #48. The two
-  upstream cases that read `runFailure` are not translated here for the same reason: the port carries
-  no run-failure state until #48 lands it.
-- **The deleted agent event adapter's own batching bound is not carried over.** `MAX_PENDING_EVENT_BATCHES`
-  (100 undelivered batches before one snapshot replaced them) was the deleted adapter's private rule,
-  owned by no seam the port keeps, and upstream v1.5.0 deletes it with the section, so no case is kept
-  for the number itself. What a host could observe through it — that a consumer which falls behind
-  converges on a single bounded delivery rather than promising every transition — is asserted on the
-  windowed view in `test_harness_view.py`: `test_folds_undelivered_commits_into_one_call_whose_ops_reach_the_newest_view`
-  (101 undelivered commits arrive as one call whose operations reach the newest view),
-  `test_bounds_an_overflow_replacement_by_max`,
-  `test_keeps_the_newest_min_of_a_commit_that_appends_more_than_max_at_once`, and
-  `test_lets_a_long_lived_watch_drop_the_entries_that_left_its_window`. The same holds for the
-  adapter's event vocabulary (`tool_execution_start`/`update`/`end`, `message_start`/`update`/`end`,
-  `run_start`/`run_end`, `turn_start`/`turn_end`): it was the deleted module's rendering of committed
-  state, and the state itself is asserted where it lives — `pi.live`, the entry window, the task graph
-  and reports.
+  benchmark helpers in `testing` are listed as `excluded` in `PARITY.md`.
 - **Telemetry and pi-ai client identity.** `HarnessOptions.telemetry`, `DURABLE_TELEMETRY_SCHEMA`,
   `HarnessOptions.identity`, and `DEFAULT_HARNESS_IDENTITY` are excluded by
   [ADR 0002](./adr/0002-upstream-1-4-0-scope.md): they describe pi-ai and pi-telemetry integration
   with no normative spec section, and their observable content is available through `on_report`,
-  `inspect()`, the task graph, and the view.
+  `inspect()`, the task graph, the view, and the event stream.
 - **IndexedDB and Workers.** `IndexedDbStorage` and `test-workers/*` are browser and Cloudflare
   backends, excluded with the adapters they exercise (ADR 0002).
 - **Timers.** Python's default `set_timer` arms an asyncio timer for both foreground and background
@@ -271,21 +241,6 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   finished subtrees" counts `Set` iterations with a patched prototype. Python has no equivalent
   hook, so the same invariant is covered by the `scheduler_index_sizes` assertions in
   `test_harness_scheduler_retention.py` and `test_harness_scheduler_indexes.py`.
-- **A window's dropped entries are proven by what a watch holds, not by a GC probe.** The upstream
-  view case "lets a long-lived watch drop the entries that left its window" keeps a `WeakRef` to an
-  entry that fell out of the window and asserts it is collected. CPython does not weak-reference a
-  `list` or a `dict`, and collection is not observable in a test, so
-  `test_harness_view.py::test_lets_a_long_lived_watch_drop_the_entries_that_left_its_window`
-  asserts the same retention property from the watch's own value: the published window no longer
-  holds the first entry and its `before` names it, which is what would otherwise pin the object.
-- **The observer half of two window cases waits for #44.** Upstream `test/harness-view.test.ts`
-  proves one window per attached consumer with both `watchConversation` and `observeConversation`:
-  the case "gives each observer its own window over one mount" attaches its narrow consumer as an
-  observer, and "rejects window bounds that are not integers or put `max` below `min`" asserts one
-  `observeConversation(id, recorder, context, { max: 0 })` rejection. `ConversationViews.attach`
-  already takes one window per attached consumer — watches are the consumers that exist today — so
-  `test_harness_view.py` translates both through `watch(context, window)` alone, and #44 (`Observers
-  attach on the line`) adds the observer assertions under the same names.
 - **JavaScript realms and thenables.** The two containment cases that use another realm or a
   hand-written thenable become one Python test over a plain awaitable and a rejected coroutine;
   Python has one await protocol and no cross-realm promises.
@@ -298,82 +253,3 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `test_harness_compaction.py`, and `test_harness_registry_agent.py`.
 - **Persisted shapes.** Records stay camelCase; Python-facing objects are snake_case. This is the
   documented naming deviation in `PARITY.md`, not a semantic difference.
-- **A task cut off at open reports nothing until #49.** Upstream v1.5.0 has no parked task: its case
-  `test/harness-blocked.test.ts:136` faults an extension's task cut off `settings.restart_limit`
-  times in a row at open and reports `{kind: "task_faulted", reason: "restart_limit"}` with the
-  message `Task <id> (<kind>) was cut off 3 times without progress`. The port still parks — the
-  parked state, its `restart_limit` blocked reason, `retry_task()`, and the wake exclusion are #49's
-  to delete — and 1.5.0 carries no report kind for a task that is blocked but not ended, so the
-  `task_parked` report #34 deleted has no replacement yet.
-  `test_harness_blocked.py::test_interim_parked_task_reports_nothing_until_49` is the port-side
-  interim case that stands in for the upstream one until #49 replaces it.
-- **The state getters' suite, translated rather than dropped.** Upstream 1.5.0 deletes
-  `documentState()`, `ConversationHandle.viewState()`, the task-graph state getter, and
-  `subscribeCommits()`, so `test_session_states.py` went with them. Each guarantee it carried is
-  proved again on the seams that replaced them:
-  - an absent address attaches nothing → `test_session_observers.py::test_returns_none_for_an_absent_address_and_attaches_nothing`;
-  - the value at attachment, one call per stored publication with its own operations, and the line's
-    atomicity → `test_starts_at_the_committed_value_and_advances_at_each_stored_publication_with_its_ops`
-    and `test_attaches_atomically_on_the_line_a_commit_queued_before_it_is_in_its_value`;
-  - independent attachments, and nothing after a detach → `test_gets_nothing_after_detach_which_is_idempotent_and_unpins_the_document`
-    and `test_gets_nothing_of_the_commit_when_another_observer_detached_it_first`;
-  - the delivered value is the object the publication and the snapshot carry, unfrozen and uncopied →
-    `test_hands_the_very_committed_value_the_publication_and_the_snapshot_carry`;
-  - a fork copy hydrated cold for an observer → `test_hydrates_a_definition_free_fork_copy_for_an_observer`;
-  - a migration shown whole, and a document cached by an older token →
-    `test_session_checkpoints_migrations.py::test_sends_observers_of_an_older_shape_a_root_replacement`
-    and `test_session_document_retention.py::test_keeps_a_reloaded_newer_version_cached_while_an_older_observer_is_attached`;
-  - continuing after the cache is emptied → `test_continues_from_the_value_it_holds_once_the_cache_is_emptied`;
-  - the close's seal, and a commit that settles behind it →
-    `test_takes_nothing_from_a_commit_that_settles_after_the_close_sealed_it`;
-  - a retired incarnation held by nothing →
-    `test_session_document_retention.py::test_keeps_no_value_of_a_document_retired_for_good_while_an_observer_is_attached`.
-  Two of its cases need no proving any more: the `Delivery(kind, sequence)` counter was a property of
-  the deleted state subscription — an observer is handed a `WatchCall`, which carries no sequence —
-  and the retirement's `null` value was superseded by #43, which made a retirement a value call with
-  the last value and `retired` set, so the observer half is `test_follows_a_conversation_documents_address_through_a_retirement_into_its_recreation`
-  and the watch half lives in `test_session_watches.py`.
-- **The task document's watch, ended by its owner, landed with #54.** All seven upstream
-  `harness-observers` task-document cases — `:290`, `:331`, `:352`, `:373`, `:386`, `:417` and
-  `:441` — are translated, one for one, in `tests/test_harness_observers.py`: the commit that makes
-  the owner task terminal releases the watch's pin and ends it `ended` once the retirement it
-  published has been delivered
-  (`test_delivers_the_retirement_of_the_commit_that_ends_its_task_then_ends_ended`, whose single
-  delivered call is that retirement — the value held before the commit, no operations, `retired` set,
-  and the address absent for good afterwards;
-  `test_keeps_no_task_document_watch_alive_once_its_task_ended`, whose weakref half proves the ended
-  watch keeps neither itself in the Session's cache nor anything of the Harness); a watch whose
-  listener never started stays open after its task ended, until the Harness's close ends it `ended`
-  (`test_a_watch_never_started_when_its_task_ends_ends_with_the_close_keeping_nothing`) or a storage
-  failure ends it `failed` with that error
-  (`test_a_watch_never_started_when_its_task_ends_fails_with_the_harness`); a watch busy in an earlier
-  call fails with the Harness *before* its retirement is ever delivered
-  (`test_a_watch_busy_in_an_earlier_call_when_its_task_ends_fails_before_its_retirement_call`); a
-  watch whose retirement call is still running ends only after that call returns
-  (`test_a_watch_whose_retirement_call_runs_when_its_task_ends_ends_only_after_it_returns`, which
-  asserts `closed` unsettled while the call runs rather than that both events happen); and every
-  change a listener was handed across the end is strict JSON carrying nothing of the Harness, which
-  the Harness's own collection then proves
-  (`test_hands_listeners_changes_that_keep_nothing_of_the_harness`). No case of the family is left
-  deferred: `EXCLUDED_WATCH_CASES` is gone, and the module docstring records that all fifteen upstream
-  cases are translated. The one case of that family that observes rather than watches, `:308` — "an
-  observer gets the retirement, then its end, at the publication of the commit that ends the task" —
-  #44 implemented for real, so `ended` was reachable for an observed owner that ended before this
-  ticket made it reachable for a watch.
-- **Two cases here have no upstream counterpart and are named for what they prove.**
-  `test_harness_observers.py::test_catches_an_entry_dropped_by_the_first_page` is the observing face
-  of #45's window drop: upstream proves a drop only from a watch, and the bounded window is #45's
-  surface, so the observer is proved to take the same drop — the entry its window opened on leaves its
-  value by one splice, and the same change moves the `before` marker — and to be handed exactly the
-  calls the watch of the same mount is handed. Its sibling in `test_harness_view.py`,
-  `test_gives_a_rebuilt_mount_the_entries_its_predecessor_never_held`, replaced this ticket's earlier
-  case for the flat active-range mount, which #45's window superseded: it now proves on the observer
-  seam that a mount dropped with its last consumer is rebuilt from Storage, head marker and all.
-- **A retired value's garbage collection is measured through the cache.** Upstream's "keeps no value
-  of a document retired for good, while still attached" keeps only a `WeakRef` of the value and
-  expects the collector to take it. CPython cannot take a weak reference to the plain `dict` a
-  document value is, so the same guarantee is measured where the Session itself holds the value:
-  `document_cache_sizes` empty in
-  `test_session_document_retention.py::test_keeps_no_value_of_a_document_retired_for_good_while_an_observer_is_attached`.
-  Where an object *can* be weakly held — the host's own observer — the upstream collection case is
-  translated directly: `test_keeps_no_detached_observer_alive`.
