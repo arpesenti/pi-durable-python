@@ -469,6 +469,9 @@ class TaskScheduler:
         self._edges: dict[ConversationId, TaskId | None] = {}
         self._settled: dict[TaskId, dict[str, Any]] = {}
         self._drop_queue: set[Node] = set()
+        # Nodes chain loads installed for jobs whose commits are not published yet, with how many such
+        # jobs: the sweep keeps them, as work a pending commit creates below them needs them.
+        self._pins: dict[Node, int] = {}
         self._below: dict[Node, set[Node]] = {}
         self._roots: set[ConversationId] = set()
         self._unloaded: set[TaskId] = set()
@@ -1004,35 +1007,7 @@ class TaskScheduler:
             if self._closing:
                 return
             queued = await self._load_scopes(cascade)
-            marks: dict[TaskId, dict[str, Any]] = {}
-
-            def mark(record: Mapping[str, Any], reason: str | None) -> None:
-                staged = marks.get(record["id"])
-                if staged is not None and staged["reason"] is None:
-                    return
-                if record.get("abortRequested") and (record.get("abortReason") is None or reason is not None):
-                    return
-                marks[record["id"]] = {"record": record, "reason": reason}
-
-            for id in list(self._intent):
-                owner = self._live.get(id)
-                if owner is None:
-                    continue
-                restart = owner.get("abortReason") == "restart" and not failed_outcome(owner)
-                for step in self._walk_down(id, enter=lambda below: below not in self._intent):
-                    live = step["live"]
-                    if live is not None and not step["node"]["background"]:
-                        mark(live, "restart" if restart else None)
-            for id in checks:
-                waiter = self._live.get(id)
-                if waiter is None or waiter["state"]["status"] != "waiting":
-                    continue
-                if not await self._any_failed(waiter["state"]["on"]):
-                    continue
-                for member in waiter["state"]["on"]:
-                    record = self._live.get(member)
-                    if record is not None and not failed_outcome(record):
-                        mark(record, None)
+            marks = await self._marks(checks)
             for mark_value in marks.values():
                 tx.set_task(with_abort_mark(mark_value["record"], mark_value["reason"]))
             for id in queued:
@@ -1049,19 +1024,84 @@ class TaskScheduler:
         self._schedule_wake()
         self._settle_idle()
 
+    async def _marks(self, checks: Sequence[TaskId]) -> dict[TaskId, dict[str, Any]]:
+        """The abort marks one reconcile pass stages, planned in a decision region.
+
+        A mark rewrites the whole record, so the record it copies is read as a task record, keyed:
+        a commit of the task that is not published yet makes the region wait and run again, rather
+        than stage a mark over a stale checkpoint.
+        """
+
+        ended: dict[TaskId, AnyTaskRecord | None] = {}
+        while True:
+            plan = await self._region(lambda: self._plan_marks(checks, ended), self._reload_scopes)
+            if "missing" in plan:
+                for id in plan["missing"]:
+                    ended[id] = await self._storage.task(id, self._context)
+                continue
+            return cast(dict[TaskId, dict[str, Any]], plan["marks"])
+
+    def _plan_marks(
+        self, checks: Sequence[TaskId], ended: Mapping[TaskId, AnyTaskRecord | None]
+    ) -> dict[str, Any]:
+        """``_marks``' decision region; the ``failFast`` members it needs from Storage first, when
+        ``ended`` lacks them.
+        """
+
+        marks: dict[TaskId, dict[str, Any]] = {}
+
+        def mark(found: Mapping[str, Any], reason: str | None) -> None:
+            record = self._live_record(found["id"])
+            if record is None:
+                return
+            staged = marks.get(record["id"])
+            if staged is not None and staged["reason"] is None:
+                return
+            if record.get("abortRequested") and (record.get("abortReason") is None or reason is not None):
+                return
+            marks[record["id"]] = {"record": record, "reason": reason}
+
+        self._record(INTENT_KEY)
+        for id in list(self._intent):
+            owner = self._live_record(id)
+            if owner is None:
+                continue
+            # Only an owner abandoned after a restart, and nothing else, passes its reason on.
+            restart = owner.get("abortReason") == "restart" and not failed_outcome(owner)
+            for step in self._walk_down(id, enter=lambda below: below not in self._intent):
+                live = step["live"]
+                if live is not None and not step["node"]["background"]:
+                    mark(live, "restart" if restart else None)
+        missing: list[TaskId] = []
+        for id in checks:
+            waiter = self._live_record(id)
+            if waiter is None or waiter["state"]["status"] != "waiting":
+                continue
+            failed = False
+            for member in waiter["state"]["on"]:
+                record = self._live_record(member)
+                if record is None:
+                    if member not in ended:
+                        missing.append(member)
+                        continue
+                    record = ended[member]
+                if record is not None and failed_outcome(record):
+                    failed = True
+            if not failed:
+                continue
+            # Every other live task: the failed one keeps its own outcome.
+            for member in waiter["state"]["on"]:
+                record = self._live_record(member)
+                if record is not None and not failed_outcome(record):
+                    mark(record, None)
+        if missing:
+            return {"missing": missing}
+        return {"marks": marks}
+
     def _reconcile_work(self) -> bool:
         """Whether a reconcile pass would have work: a cascade, held outcomes, or ``failFast`` waits."""
 
         return bool(self._cascade_pending or self._finalize_checks or self._fail_fast_checks)
-
-    async def _any_failed(self, ids: Sequence[TaskId]) -> bool:
-        for id in ids:
-            record = self._live.get(id)
-            if record is None:
-                record = await self._storage.task(id, self._context)
-            if record is not None and failed_outcome(record):
-                return True
-        return False
 
     async def _finalize(self, tx: Transaction) -> None:
         round_ids = list(self._finalize_checks)
@@ -1123,6 +1163,7 @@ class TaskScheduler:
                     node = node_of(record)
                     if record["state"]["status"] == "terminal":
                         self._settle(id, node)
+                        self._pin(id)
                     self._schedule_reconcile()
                 passed.append(id)
                 at = parent_of(node)
@@ -1136,6 +1177,7 @@ class TaskScheduler:
                     record = await self._storage.conversation(conversation, self._context)
                     edge = record["owner"]["taskId"] if record is not None and "owner" in record else None
                     self._set_edge(conversation, edge)
+                    self._pin(conversation_node(conversation))
                     self._schedule_reconcile()
                 at = None if edge is None else {"task": edge}
         for id in passed:
@@ -1178,9 +1220,28 @@ class TaskScheduler:
 
         loop.call_soon(lambda: self._spawn(queued()))
 
+    def _pin(self, node: Node) -> None:
+        """Keep ``node``, which a chain load of the job on the line installed, until that job's commit
+        is published or fails: work it creates below the node needs it, and the sweep would drop it as
+        unneeded before then.
+        """
+
+        self._pins[node] = self._pins.get(node, 0) + 1
+
+        def release() -> None:
+            count = self._pins[node] - 1
+            if count > 0:
+                self._pins[node] = count
+                return
+            del self._pins[node]
+            self._drop_if_unneeded(node)
+
+        self._session.on_job_end(release)
+
     def _sweep(self) -> None:
         for node in list(self._drop_queue):
-            if node in self._below:
+            # Queued again once its pins go.
+            if node in self._below or node in self._pins:
                 continue
             if isinstance(node, str):
                 conversation = conversation_of(node)
@@ -1918,6 +1979,7 @@ class TaskScheduler:
             "roots": len(self._roots),
             "unloaded": len(self._unloaded),
             "drop_queue": len(self._drop_queue),
+            "pins": len(self._pins),
         }
 
     async def inspect(self, snapshot: RegistrySnapshot) -> tuple[str, list[TaskInspection]]:
@@ -2214,33 +2276,80 @@ class TaskScheduler:
     ) -> None:
         if invocation.mode == "abort":
             raise RuntimeError(f"Abort handler of task {current['id']} cannot wait")
-        overlay = _overlay_of(tx)
-        targets: list[TaskId] = []
-        for id in on:
-            member = (
-                overlay["tasks"].get(id)
-                or self._live.get(id)
-                or (await self._storage.task(id, self._context))
+        # Owned work is found by walks down, which need the chains of every live task loaded.
+        await self._load_scopes(False)
+        # Tasks in ``on`` that are not live, read from Storage: terminal, or missing.
+        ended: dict[TaskId, AnyTaskRecord | None] = {}
+        while True:
+            checked = await self._region(
+                lambda: self._check_wait(current, on, policy, _overlay_of(tx), ended),
+                self._reload_scopes,
             )
+            if checked is None:
+                return
+            if "missing" in checked:
+                for id in checked["missing"]:
+                    ended[id] = await self._storage.task(id, self._context)
+                continue
+            raise checked["error"]
+
+    def _check_wait(
+        self,
+        current: ErasedRunningTask,
+        on: Sequence[TaskId],
+        policy: str,
+        overlay: dict[str, Any],
+        ended: Mapping[TaskId, AnyTaskRecord | None],
+    ) -> dict[str, Any] | None:
+        """``_validate_wait``'s decision region: why the wait is refused, ``None`` when it may be
+        stored, or the tasks in ``on`` it needs from Storage first, when ``ended`` lacks them.
+
+        Each record it reads is read through :meth:`_live_record`, so a wait admitted behind another
+        task's unpublished wait waits for that publication and decides again: the second of two
+        opposite waits is refused rather than stored, which is what keeps the wait-for graph acyclic.
+        """
+
+        targets: list[TaskId] = []
+        missing: list[TaskId] = []
+        for id in on:
+            member = overlay["tasks"].get(id) or self._live_record(id)
             if member is None:
-                raise ValueError(f"Task {id} does not exist")
+                if id not in ended:
+                    missing.append(id)
+                    continue
+                stored = ended[id]
+                if stored is None:
+                    return {"error": ValueError(f"Task {id} does not exist")}
+                member = stored
             if policy == "failFast" and member.get("owner") != current["id"]:
-                raise ValueError(
-                    f"Task {current['id']} can wait failFast only on tasks it owns; {id} is not one"
-                )
+                return {
+                    "error": ValueError(
+                        f"Task {current['id']} can wait failFast only on tasks it owns; {id} is not one"
+                    )
+                }
+            # A live child already holds the waiter (task-owned tasks are never background): waiting
+            # on it adds no edge. A terminal task has no edges.
             if member["state"]["status"] != "terminal" and member.get("owner") != current["id"]:
                 targets.append(id)
+        if missing:
+            return {"missing": missing}
         if not targets:
-            return
-        cycle = await self._wait_cycle(current["id"], targets, overlay)
-        if cycle is not None:
-            path = " -> ".join(str(id) for id in [current["id"], *cycle])
-            raise ValueError(f"Task {current['id']} cannot wait on {cycle[0]}: {path} is a wait cycle")
+            return None
+        cycle = self._wait_cycle(current["id"], targets, overlay)
+        if cycle is None:
+            return None
+        path = " -> ".join(str(id) for id in [current["id"], *cycle])
+        return {
+            "error": ValueError(
+                f"Task {current['id']} cannot wait on {cycle[0]}: {path} is a wait cycle"
+            )
+        }
 
-    async def _wait_cycle(
-        self, task: TaskId, on: Sequence[TaskId], overlay: dict[str, Any]
-    ) -> list[TaskId] | None:
-        await self._load_scopes(False)
+    def _wait_cycle(self, task: TaskId, on: Sequence[TaskId], overlay: dict[str, Any]) -> list[TaskId] | None:
+        """The path from a member of ``on`` back to ``task``, if the wait would close a cycle (spec
+        section 5.1). Part of a decision region: every record it reads is read keyed.
+        """
+
         from_map: dict[TaskId, TaskId | None] = {}
         walked: set[TaskId] = set()
         pending: list[TaskId] = []
@@ -2265,7 +2374,7 @@ class TaskScheduler:
             id = pending.pop()
             if id == task:
                 return path(id)
-            record = overlay["tasks"].get(id) or self._live.get(id)
+            record = overlay["tasks"].get(id) or self._live_record(id)
             if record is None or record["state"]["status"] == "terminal":
                 continue
             if record["state"]["status"] == "waiting" and not record.get("abortRequested"):

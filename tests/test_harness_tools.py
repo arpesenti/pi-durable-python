@@ -23,6 +23,7 @@ from tool_support import (
     all_entries,
     calls,
     chat_setup,
+    open_chat,
     result_text,
     results,
     run,
@@ -1144,3 +1145,54 @@ async def test_ends_the_run_after_the_handoff_when_the_round_also_terminates() -
     assert setup.faux.call_count == 1
     assert await result["harness"].snapshot(LiveDoc, result["root"].id, context) == {}
     await result["harness"].close(context)
+
+
+async def _generation_task(harness: HarnessType, conversation_id: Any) -> Any:
+    """The run's ``pi.generation`` task, the one whose abort handler answers the calls it never started."""
+
+    page = await harness.commit(
+        lambda tx: tx.scan_tasks({"conversationId": conversation_id}, 100), context
+    )
+    found = [task for task in page["items"] if task["kind"] == "pi.generation"]
+    assert len(found) == 1, found
+    return found[0]["id"]
+
+
+async def test_answers_the_calls_an_aborted_round_never_started_with_their_own_aborted_result() -> None:
+    """1.5.0's built-in entries, the half of the ``pi.tool-result`` producer list 1.5.0 rewrote: the
+    calls a sequential round never started -- still in its ``pending``, and offered by its request --
+    get their own ``aborted`` result from the run's abort handler, beside the one the call that was
+    running writes itself.
+    """
+
+    setup = chat_setup()
+    # Sequential, so the round starts `a` and leaves `b` pending: the call that never started.
+    setup.settings["tool_execution"] = "sequential"
+    started = asyncio.Event()
+
+    async def hold(_args: Any, _api: Any, call_context: Any) -> Any:
+        started.set()
+        await aborted(call_context.abort_signal)
+        return {"output": []}
+
+    async def answer_b(_args: Any, _api: Any, _call_context: Any) -> Any:
+        return {"output": []}
+
+    add_tool(setup.registry, tool("a", hold))
+    add_tool(setup.registry, tool("b", answer_b))
+    setup.faux.set_responses([calls(["a", {}, "c1"], ["b", {}, "c2"]), DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await root.submit({"type": "input", "content": "go"}, context)
+    await started.wait()
+    # The round is in flight with `b` unstarted: the run itself is interrupted here, not one tool.
+    generation = await _generation_task(harness, root.id)
+    assert await harness.abort_task(generation, context) == "marked"
+    settled = await harness.wait_for_task(generation, context)
+    assert settled["state"]["outcome"]["status"] == "aborted"
+    texts = [result_text(item) for item in results(await all_entries(root))]
+    # The running call writes its own result; the one that never started gets the handler's.
+    assert any("Tool a was aborted" in text for text in texts), texts
+    assert any("Tool b was aborted" in text for text in texts), texts
+    await harness.close(context)

@@ -1,49 +1,27 @@
 """The upstream ``test/harness-group-commit.test.ts`` cases this ticket owns (v1.5.0).
 
-The four kept cases are written and pass. The module also carries the deferral record below, so what
-the port does not translate is named in the tree rather than only in a commit body, which does not
-survive cleaning up the worktrees.
+Upstream `test/harness-group-commit.test.ts` declares 17 cases and executes 17. This module runs 16
+of them -- :123, :159, :197, :226, :259, :281, :324, :363, :404, :446, :491, :608, :626, :699, :714
+and :758 -- none skipped, none expected to fail, none stubbed. What it does not run is named below,
+and the mutation that breaks each landed case's own mechanism is recorded with the commit that landed
+it.
 
-Cases this module does NOT run, named so the record survives the worktrees
-------------------------------------------------------------------------
+Cases this module does NOT run
+------------------------------
 
-Upstream `test/harness-group-commit.test.ts` declares 17 cases and executes 17. This module translates
-9 of them -- :123, :159, :259, :363, :404, :446, :699, :714 and :758 -- and names the rest rather than
-stubbing them.
+* `:646` -- "reads no task record from Storage for more live and awaited tasks than the record cache's
+  count": excluded outright, because this port has no read-side record cache and no ``CachedStorage``,
+  so the component the case measures does not exist. Recorded the same way in ``PARITY.md``, next to
+  its sibling ``session-group-commit.test.ts:635``.
 
-Five are #48's group-commit cases and run here: `:259`, `:699`, `:714`, `:758` (the line, its keys and
-its publications) and, since the scheduler's decision region and its `membershipKeys()` landed, `:123`,
-`:159`, `:363`, `:404` and `:446`. Four of those are mutation-checked: with `Harness.membership_keys()`
-returning no keys, `:123`, `:363`, `:404` and `:446` fail, so none of them passes without the commit
-declaring the memberships its task changes alter. `:159` settles either way -- its ordering is decided
-by the line, not by a membership key -- and is kept for that ordering, not as evidence of the keys.
+Cases that run but are NOT evidence of the mechanism they name
+--------------------------------------------------------------
 
-Seven remain #48's, named with what each still needs:
-
-* `:197` -- "ends a child before its next phase when its owner's abort mark is unpublished at its step"
-  and `:226` -- "refuses the second of two opposite waits admitted behind each other": both need a
-  second gate inside a *runtime* commit's region (upstream `commitWith`, `src/harness/scheduler.ts:2939`),
-  which this port gates only for the current record, not for the wait graph a commit installs.
-* `:281` -- "runs a migration once although its reservation waits for an unpublished write of the task"
-  and `:324` -- "reports a failed migration once although its reservation waits for an unpublished
-  write of the task": both need the reservation's migration decision to be decided once and applied
-  after the region stands; this port resolves and reports inside the pass, so a region rerun would
-  migrate or report twice.
-* `:491` -- "keeps the nodes a chain load installed for an unpublished creation through the sweep":
-  needs upstream's `#pin()` (`src/harness/scheduler.ts:1412`), which holds a node a chain load
-  installed until the job that loaded it publishes, and the `pins` size it reports. The port has
-  neither, so the sweep of a job whose commit is still unpublished can drop what it just loaded.
-* `:608` -- "marks a child in a cascade from its current record, not one its pending commit replaces"
-  and `:626` -- "marks the other tasks of a failFast wait from their current records": both need the
-  reconcile pass's mark plan in its own region (`#marks()`, `src/harness/scheduler.ts:1074`); this port
-  reads the records it marks inside the commit's apply, so a mark can still be built from a record an
-  admitted commit replaced.
-
-Excluded outright, with its reason -- no read-side record cache, no `CachedStorage` in this port, so the
-component the case measures does not exist (recorded the same way in `PARITY.md`, next to its sibling
-`session-group-commit.test.ts:635`):
-
-* `:646` -- "reads no task record from Storage for more live and awaited tasks than the record cache's count"
+* `:626` -- "marks the other tasks of a failFast wait from their current records": it stays green with
+  the reconcile pass's mark plan taken out of its decision region -- `TaskScheduler._marks` calling
+  `_plan_marks` directly, and `mark()` copying the record from the bare `_live` map instead of through
+  `_live_record`, both stubs together -- so it is kept for the ``failFast`` coverage of upstream
+  `#marks()` (`src/harness/scheduler.ts:1070`), not as proof of that region.
 """
 
 from __future__ import annotations
@@ -59,7 +37,10 @@ from typing import Any, cast
 from session_support import ControlledStorage, context, flush, observe_commits, observe_commits_as_host
 from task_support import aborted, deferred, eventually, open_tasks
 
+from pi_durable.harness.define import define_extension
+from pi_durable.harness.registry import create_registry
 from pi_durable.session.keys import ROOTS_KEY, owned_key
+from pi_durable.session.session import SessionImpl
 from pi_durable.tasks import define_task
 
 
@@ -453,13 +434,33 @@ async def test_reserves_the_live_work_of_the_owner_above_an_ancestor_whose_end_i
     await harness.close(context)
 
 
+async def _race(gate: Any, signal: Any) -> None:
+    """Upstream's ``Promise.race([gate.promise, aborted(signal)])``."""
+
+    waiting = asyncio.ensure_future(gate.promise)
+    stopping = asyncio.ensure_future(aborted(signal))
+    try:
+        await asyncio.wait({waiting, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        if waiting.done() and not waiting.cancelled():
+            waiting.result()
+        elif stopping.done() and not stopping.cancelled():
+            stopping.result()
+    finally:
+        waiting.cancel()
+        stopping.cancel()
+        for pending in (waiting, stopping):
+            if pending.done() and not pending.cancelled():
+                pending.exception()
+
+
 def _hold(name: str, ran: list[str], gates: dict[str, Any]) -> Any:
-    """Upstream ``Hold``: holds until its named gate opens, then completes; its abort ends ``aborted``."""
+    """Upstream ``Hold``: holds until its named gate opens or it is aborted, then completes; its
+    abort handler ends it ``aborted``."""
 
     async def wait(task: Any, runtime: Any, ctx: Any) -> None:
         key = task["input"]["name"]
         ran.append(key)
-        await gates[key].promise
+        await _race(gates[key], runtime.signal)
         outcome = {"status": "terminal", "outcome": {"status": "completed", "result": None}}
         await runtime.commit(lambda: outcome, ctx)
 
@@ -482,6 +483,44 @@ async def _status_is(harness: Any, id: Any, status: str) -> bool:
 
     record = await harness.get_task(id, context)
     return record is not None and record["state"]["status"] == status
+
+
+async def _running_phase_is(harness: Any, id: Any, phase: str) -> bool:
+    """Whether the task is ``running`` at ``phase``, for an ``eventually`` check."""
+
+    record = await harness.get_task(id, context)
+    return (
+        record is not None
+        and record["state"]["status"] == "running"
+        and record["state"]["checkpoint"]["phase"] == phase
+    )
+
+
+def _two_phases(name: str, ran: list[str], gates: dict[str, Any]) -> Any:
+    """Upstream ``TwoPhases``: commits its next phase, returns once ``<name>.return`` opens; the
+    next phase counts its run and completes."""
+
+    async def one(task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda: {"status": "running", "checkpoint": {"phase": "two"}}, ctx)
+        await gates[f"{task['input']['name']}.return"].promise
+
+    async def two(task: Any, runtime: Any, ctx: Any) -> None:
+        ran.append(f"{task['input']['name']}.two")
+        outcome = {"status": "terminal", "outcome": {"status": "completed", "result": None}}
+        await runtime.commit(lambda: outcome, ctx)
+
+    async def abort(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda: {"status": "terminal", "outcome": {"status": "aborted"}}, ctx)
+
+    return define_task(
+        {
+            "name": name,
+            "version": 1,
+            "initial": lambda input: {"phase": "one", "input": input},
+            "phases": {"one": one, "two": two},
+            "abort": abort,
+        }
+    )
 
 
 def _conversation_ownership() -> dict[str, Any]:
@@ -590,4 +629,494 @@ async def test_holds_an_owner_whose_end_follows_a_creation_below_its_child_pendi
     gates["d"].resolve()
     settled = await harness.wait_for_task(built["p"], context)
     assert settled["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def test_ends_a_child_before_its_next_phase_when_its_owner_s_abort_mark_is_unpublished() -> None:
+    """Upstream ``harness-group-commit.test.ts`` :197: the child's step reads the intent set, which
+    the owner's still-unpublished abort mark changes, so it ends before phase two ever runs.
+    """
+
+    storage = ControlledStorage()
+    ran: list[str] = []
+    gates: dict[str, Any] = {"o": deferred(), "t.return": deferred()}
+    Hold = _hold("gc.hold.mark", ran, gates)
+    TwoPhases = _two_phases("gc.two.phases.mark", ran, gates)
+    opened = await open_tasks(storage, [Hold, TwoPhases])
+    harness, root = opened["harness"], await opened["harness"].root(context)
+    harness.resume()
+
+    async def tree(tx: Any) -> dict[str, Any]:
+        owner = await tx.create_task(Hold, {"name": "o"}, _conversation_ownership())
+        child = await tx.create_task(TwoPhases, {"name": "t"}, _task_ownership(owner))
+        return {"owner": owner, "child": child}
+
+    built = await root.commit(tree, context)
+    await eventually(lambda: _running_phase_is(harness, built["child"], "two"))
+    # The owner's abort mark is admitted and stays unpublished while the child's phase returns.
+    held = storage.hold_commits()
+    marking = asyncio.ensure_future(harness.abort_task(built["owner"], context))
+    await held.entered.wait()
+    # The child's phase returns: its step reads the intent set, which the unpublished mark changes.
+    gates["t.return"].resolve()
+    await flush()
+    assert ran.count("t.two") == 0
+    held.release()
+    assert await marking == "marked"
+    child = await harness.wait_for_task(built["child"], context)
+    assert child["state"]["outcome"]["status"] == "aborted"
+    owner = await harness.wait_for_task(built["owner"], context)
+    assert owner["state"]["outcome"]["status"] == "aborted"
+    assert ran.count("t.two") == 0
+    await harness.close(context)
+
+
+async def _both_running(harness: Any, x: Any, y: Any) -> bool:
+    """Whether both tasks read ``running``, for an ``eventually`` check."""
+
+    return await _status_is(harness, x, "running") and await _status_is(harness, y, "running")
+
+
+def _waits(name: str, gates: dict[str, Any], refusals: dict[str, BaseException]) -> Any:
+    """Upstream ``Waits``: once its gate opens, waits on the task its memo names; records why a
+    refused wait was refused, then completes."""
+
+    async def wait(task: Any, runtime: Any, ctx: Any) -> None:
+        await gates[task["input"]["name"]].promise
+        on = await runtime.memo("on", ctx)
+        try:
+            await runtime.commit(
+                lambda: {
+                    "status": "waiting",
+                    "checkpoint": {"phase": "done"},
+                    "on": [on],
+                    "policy": "allSettled",
+                },
+                ctx,
+            )
+        except BaseException as error:
+            refusals[task["input"]["name"]] = error
+            outcome = {"status": "terminal", "outcome": {"status": "completed", "result": None}}
+            await runtime.commit(lambda: outcome, ctx)
+
+    async def done(_task: Any, runtime: Any, ctx: Any) -> None:
+        outcome = {"status": "terminal", "outcome": {"status": "completed", "result": None}}
+        await runtime.commit(lambda: outcome, ctx)
+
+    async def abort(_task: Any, runtime: Any, ctx: Any) -> None:
+        await runtime.commit(lambda: {"status": "terminal", "outcome": {"status": "aborted"}}, ctx)
+
+    return define_task(
+        {
+            "name": name,
+            "version": 1,
+            "initial": lambda input: {"phase": "wait", "input": input},
+            "phases": {"wait": wait, "done": done},
+            "abort": abort,
+        }
+    )
+
+
+async def test_refuses_the_second_of_two_opposite_waits_admitted_behind_each_other() -> None:
+    """Upstream ``harness-group-commit.test.ts`` :226: the wait-cycle check is a decision region, so
+    the second of two opposite waits admitted behind each other sees the first and is refused.
+    """
+
+    storage = ControlledStorage()
+    gates: dict[str, Any] = {"x": deferred(), "y": deferred()}
+    refusals: dict[str, BaseException] = {}
+    Waits = _waits("gc.waits.opposite", gates, refusals)
+    opened = await open_tasks(storage, [Waits])
+    harness, root = opened["harness"], await opened["harness"].root(context)
+
+    async def pair(tx: Any) -> dict[str, Any]:
+        x = await tx.create_task(Waits, {"name": "x"}, _conversation_ownership())
+        y = await tx.create_task(Waits, {"name": "y"}, _conversation_ownership())
+        return {"x": x, "y": y}
+
+    built = await root.commit(pair, context)
+    # Each waits on the other, named in a memo.
+    async def note(tx: Any) -> None:
+        records = [await tx.task(built["x"]), await tx.task(built["y"])]
+        tx.set_task({**records[0], "memos": {"on": built["y"]}})
+        tx.set_task({**records[1], "memos": {"on": built["x"]}})
+
+    await root.commit(note, context)
+    harness.resume()
+    await eventually(lambda: _both_running(harness, built["x"], built["y"]))
+    # X's wait is admitted and unpublished; then Y's, which must see it and be refused.
+    held = storage.hold_commits()
+    gates["x"].resolve()
+    await held.entered.wait()
+    gates["y"].resolve()
+    # Both wait commits are on the line and neither is published: Y's is parked at the region's gate
+    # on X's write. The Session's own bound (group-commit document §3.4) is what says so.
+    session = cast(SessionImpl, harness)
+    await eventually(lambda: session.line_sizes == {"outstanding": 2, "unpublished": 1})
+    held.release()
+    await harness.wait_for_task(built["y"], context)
+    assert "wait cycle" in str(refusals.get("y"))
+    assert "x" not in refusals
+    x = await harness.wait_for_task(built["x"], context)
+    assert x["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def _until_aborted(signal: Any) -> None:
+    """Upstream's ``untilAborted``: settle once the invocation is signalled."""
+
+    if signal is None:
+        return
+    event = asyncio.Event()
+    signal.add_listener(event.set)
+    if signal.aborted:
+        return
+    await event.wait()
+
+
+async def _gate_fails(gate: Any) -> str:
+    await gate.promise
+    return "fail"
+
+
+async def _race_failed(gate: Any, signal: Any) -> str | None:
+    """Upstream's ``Promise.race([gate.promise.then(() => "fail"), untilAborted(signal)])``."""
+
+    failing = asyncio.ensure_future(_gate_fails(gate))
+    stopping = asyncio.ensure_future(_until_aborted(signal))
+    try:
+        done, _pending = await asyncio.wait(
+            {failing, stopping}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for finished in done:
+            if finished is failing and not failing.cancelled():
+                return failing.result()
+            if finished is stopping and not stopping.cancelled():
+                stopping.result()
+                return None
+        return None
+    finally:
+        failing.cancel()
+        stopping.cancel()
+        for pending in (failing, stopping):
+            if pending.done() and not pending.cancelled():
+                pending.exception()
+
+
+def _gate(gates: dict[str, Any], name: str) -> Any:
+    """Upstream's ``gate(name)``: the named gate, created once on first use."""
+
+    found = gates.get(name)
+    if found is None:
+        found = deferred()
+        gates[name] = found
+    return found
+
+
+def _probe(name: str, runtimes: dict[str, Any], gates: dict[str, Any]) -> Any:
+    """Upstream ``Probe``: holds until aborted, its runtime exposed; fails once its gate opens. Its
+    abort handler holds too."""
+
+    async def hold(task: Any, runtime: Any, ctx: Any) -> None:
+        key = task["input"]["name"]
+        runtimes[key] = runtime
+        if await _race_failed(_gate(gates, key), runtime.signal) != "fail":
+            return
+        await runtime.commit(
+            lambda: {"status": "terminal", "outcome": {"status": "failed", "error": {"message": "gate"}}}, ctx
+        )
+
+    async def abort(_task: Any, runtime: Any, _ctx: Any) -> None:
+        await _until_aborted(runtime.signal)
+
+    return define_task(
+        {
+            "name": name,
+            "version": 1,
+            "initial": lambda input: {"phase": "hold", "n": 0},
+            "phases": {"hold": hold},
+            "abort": abort,
+        }
+    )
+
+
+def _waiter(name: str, probe: Any) -> Any:
+    """Upstream ``Waiter``: creates the probes ``x`` and ``y`` and waits on them ``failFast``."""
+
+    async def spawn(task: Any, runtime: Any, ctx: Any) -> Any:
+        async def build(tx: Any) -> dict[str, Any]:
+            on: list[Any] = []
+            for member in ("x", "y"):
+                on.append(await tx.create_task(probe, {"name": member}, _task_ownership(task["id"])))
+            return {"status": "waiting", "checkpoint": {"phase": "done"}, "on": on, "policy": "failFast"}
+
+        return await runtime.commit(build, ctx)
+
+    async def done(_task: Any, runtime: Any, ctx: Any) -> None:
+        outcome = {"status": "terminal", "outcome": {"status": "completed", "result": None}}
+        await runtime.commit(lambda: outcome, ctx)
+
+    async def abort(_task: Any, runtime: Any, _ctx: Any) -> None:
+        await _until_aborted(runtime.signal)
+
+    return define_task(
+        {
+            "name": name,
+            "version": 1,
+            "initial": lambda input: {"phase": "spawn"},
+            "phases": {"spawn": spawn, "done": done},
+            "abort": abort,
+        }
+    )
+
+
+async def _race_mark(
+    storage: ControlledStorage,
+    harness: Any,
+    name: str,
+    runtimes: dict[str, Any],
+    mark: Callable[[], Awaitable[Any]],
+) -> None:
+    """Upstream ``raceMark``: advance probe ``name`` to ``n = 1`` while the mark-writing commit is in
+    flight, and run a reconcile pass meanwhile."""
+
+    held_mark = storage.hold_commits()
+    marking = asyncio.ensure_future(mark())
+    await held_mark.entered.wait()
+    prepared: list[bool] = []
+
+    def advance() -> dict[str, Any]:
+        prepared.append(True)
+        return {"status": "running", "checkpoint": {"phase": "hold", "n": 1}}
+
+    advancing = runtimes[name].commit(advance, context)
+    await eventually(lambda: bool(prepared))
+    await flush()
+    # Global idle schedules a reconcile pass, which reaches the line while both are unpublished.
+    waiting = asyncio.ensure_future(harness.wait_for_idle(context))
+    waiting.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+    await flush()
+    held_advance = storage.hold_commits()
+    held_mark.release()
+    await held_advance.entered.wait()
+    await flush()
+    held_advance.release()
+    await asyncio.gather(marking, advancing)
+    await flush()
+
+
+async def _abort_requested(harness: Any, id: Any) -> bool:
+    record = await harness.get_task(id, context)
+    return record is not None and record.get("abortRequested") is True
+
+
+async def test_marks_a_child_in_a_cascade_from_its_current_record() -> None:
+    """Upstream ``harness-group-commit.test.ts`` :608: the cascade marks the child from the record it
+    has now -- the ``n = 1`` checkpoint its own admitted commit writes -- not the one it replaces.
+    """
+
+    storage = ControlledStorage()
+    runtimes: dict[str, Any] = {}
+    gates: dict[str, Any] = {}
+    Probe = _probe("gc.probe.cascade", runtimes, gates)
+    opened = await open_tasks(storage, [Probe])
+    harness, root = opened["harness"], await opened["harness"].root(context)
+
+    async def tree(tx: Any) -> dict[str, Any]:
+        parent = await tx.create_task(Probe, {"name": "p"}, _conversation_ownership())
+        child = await tx.create_task(Probe, {"name": "c"}, _task_ownership(parent))
+        return {"parent": parent, "child": child}
+
+    built = await root.commit(tree, context)
+    harness.resume()
+    await eventually(lambda: "c" in runtimes)
+    await flush()
+    await _race_mark(storage, harness, "c", runtimes, lambda: harness.abort_task(built["parent"], context))
+    await eventually(lambda: _abort_requested(harness, built["child"]))
+    record = await harness.get_task(built["child"], context)
+    assert record is not None
+    assert record["state"]["checkpoint"] == {"phase": "hold", "n": 1}
+    await harness.close(context)
+
+
+async def test_marks_the_other_tasks_of_a_fail_fast_wait_from_their_current_records() -> None:
+    """Upstream ``harness-group-commit.test.ts`` :626: the ``failFast`` pass marks the waiter's other
+    tasks from their current records, not the ones their pending commits replace.
+    """
+
+    storage = ControlledStorage()
+    runtimes: dict[str, Any] = {}
+    gates: dict[str, Any] = {}
+    Probe = _probe("gc.probe.fail-fast", runtimes, gates)
+    Waiter = _waiter("gc.fail-fast.waiter", Probe)
+    opened = await open_tasks(storage, [Probe, Waiter])
+    harness, root = opened["harness"], await opened["harness"].root(context)
+    await root.commit(
+        lambda tx: tx.create_task(Waiter, None, _conversation_ownership()), context
+    )
+    harness.resume()
+    await eventually(lambda: "x" in runtimes and "y" in runtimes)
+    await flush()
+    y = runtimes["y"].task_id
+
+    async def fail_x() -> None:
+        _gate(gates, "x").resolve()
+
+    await _race_mark(storage, harness, "y", runtimes, fail_x)
+    await eventually(lambda: _abort_requested(harness, y))
+    record = await harness.get_task(y, context)
+    assert record is not None
+    assert record["state"]["checkpoint"] == {"phase": "hold", "n": 1}
+    await harness.close(context)
+
+
+def _migrating(name: str, migrations: list[int], failure: str | None) -> Any:
+    """Upstream ``V2``: a version 2 definition whose ``migrate`` counts its runs, and throws when the
+    case wants the failed report."""
+
+    async def hold(_task: Any, runtime: Any, ctx: Any) -> Any:
+        outcome = {"status": "terminal", "outcome": {"status": "completed", "result": None}}
+        return await runtime.commit(lambda: outcome, ctx)
+
+    def migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
+        migrations.append(1)
+        if failure is not None:
+            raise RuntimeError(failure)
+        return {"input": input, "checkpoint": checkpoint}
+
+    return define_task(
+        {
+            "name": name,
+            "version": 2,
+            "initial": lambda input: {"phase": "hold"},
+            "phases": {"hold": hold},
+            "abort": lambda _task, _runtime, _ctx: None,
+            "migrate": migrate,
+        }
+    )
+
+
+async def test_runs_a_migration_once_although_its_reservation_waits_for_an_unpublished_write() -> None:
+    """Upstream ``harness-group-commit.test.ts`` :281: the reservation's region reruns, but the task
+    is migrated once, because the migration is applied only once the decision stands.
+    """
+
+    storage = ControlledStorage()
+    migrations: list[int] = []
+    V2 = _migrating("gc.migrated", migrations, None)
+    registry = create_registry()
+    registry.install(define_extension({"name": "v2", "tasks": [V2]}))
+    opened = await open_tasks(storage, [], {"registry": registry})
+    harness, root = opened["harness"], await opened["harness"].root(context)
+    id = await root.commit(
+        lambda tx: tx.create_task(V2, {"name": "m"}, _conversation_ownership()), context
+    )
+    # Stored at version 1, and written again by a commit that is in flight when the reservation reads it.
+    held = storage.hold_commits()
+
+    async def write(tx: Any) -> None:
+        record = await tx.task(id)
+        tx.set_task({**record, "version": 1, "memos": {"touched": True}})
+
+    writing = asyncio.ensure_future(root.commit(write, context))
+    await held.entered.wait()
+    harness.resume()
+    await flush()
+    assert migrations == []
+    held.release()
+    await writing
+    settled = await harness.wait_for_task(id, context)
+    assert settled["state"]["outcome"]["status"] == "completed"
+    assert len(migrations) == 1
+    await harness.close(context)
+
+
+async def test_reports_a_failed_migration_once_although_its_reservation_waits_for_an_unpublished_write() -> (
+    None
+):
+    """Upstream ``harness-group-commit.test.ts`` :324: a ``migrate`` that throws is reported once, even
+    though the reservation's region reruns.
+    """
+
+    storage = ControlledStorage()
+    migrations: list[int] = []
+    V2 = _migrating("gc.unmigratable", migrations, "cannot migrate")
+    registry = create_registry()
+    registry.install(define_extension({"name": "v2", "tasks": [V2]}))
+    opened = await open_tasks(storage, [], {"registry": registry})
+    harness, root = opened["harness"], await opened["harness"].root(context)
+    infos = opened["infos"]
+    id = await root.commit(
+        lambda tx: tx.create_task(V2, {"name": "m"}, _conversation_ownership()), context
+    )
+    held = storage.hold_commits()
+
+    async def write(tx: Any) -> None:
+        record = await tx.task(id)
+        tx.set_task({**record, "version": 1})
+
+    writing = asyncio.ensure_future(root.commit(write, context))
+    await held.entered.wait()
+    harness.resume()
+    await flush()
+    held.release()
+    await writing
+    await eventually(lambda: len(migrations) > 0)
+    await flush()
+    assert len(migrations) == 1
+    assert len([info for info in infos if info["kind"] == "migration_failed"]) == 1
+    await harness.close(context)
+
+
+async def test_keeps_the_nodes_a_chain_load_installed_for_an_unpublished_creation_through_the_sweep() -> None:
+    """Upstream ``harness-group-commit.test.ts`` :491: a chain load installs a node for the job on the
+    line, and the sweep keeps it -- pinned -- until that job's commit is published or fails.
+    """
+
+    storage = ControlledStorage()
+    ran: list[str] = []
+    gates: dict[str, Any] = {}
+    Hold = _hold("gc.hold.pin", ran, gates)
+    opened = await open_tasks(storage, [Hold])
+    harness, root = opened["harness"], await opened["harness"].root(context)
+    harness.resume()
+
+    async def tree(tx: Any) -> dict[str, Any]:
+        b = await tx.create_task(Hold, {"name": "b"}, _conversation_ownership())
+        c = await tx.create_conversation(_task_ownership(b))
+        return {"b": b, "c": c["id"]}
+
+    built = await root.commit(tree, context)
+    _gate(gates, "b").resolve()
+    await harness.wait_for_task(built["b"], context)
+    await harness.close(context)
+    # After reopen, B and C's edge are known only once a chain load reads them.
+    opened = await open_tasks(storage.reopen(), [Hold])
+    harness = opened["harness"]
+    def sizes() -> dict[str, int]:
+        return harness.scheduler_index_sizes
+    assert sizes()["settled"] == 0
+    conversation = await harness.conversation(built["c"], context)
+    assert conversation is not None
+    held = storage.hold_commits()
+    creating = asyncio.ensure_future(
+        conversation.commit(
+            lambda tx: tx.create_task(Hold, {"name": "d"}, _conversation_ownership()), context
+        )
+    )
+    await held.entered.wait()
+    # The admission loaded B; the sweep that load scheduled has run on the line since, and kept it.
+    await harness.wait_for_idle(context)
+    await flush()
+    assert sizes()["settled"] == 1
+    assert sizes()["pins"] > 0
+    held.release()
+    await creating
+    # Published below a known chain: nothing is left to load, and no pin is left.
+    assert sizes()["unloaded"] == 0
+    assert sizes()["pins"] == 0
+    assert await _settled(harness.wait_for_idle(context)) is False
+    harness.resume()
+    _gate(gates, "d").resolve()
+    await harness.wait_for_idle(context)
     await harness.close(context)

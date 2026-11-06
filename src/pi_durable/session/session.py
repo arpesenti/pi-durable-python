@@ -267,6 +267,8 @@ class _LineJob:
 
     index: int
     hit: bool = False
+    # Called once its outcome settles: its commit published, or never to be (:meth:`SessionImpl.on_job_end`).
+    ends: list[Callable[[], None]] | None = None
 
 
 @dataclass(slots=True)
@@ -547,6 +549,33 @@ class SessionImpl:
         await gate
         self._assert_healthy()
 
+    def on_job_end(self, end: Callable[[], None]) -> None:
+        """Internal, on the line: run ``end`` once the job on the line has its outcome.
+
+        Off the line, ``end`` runs at once: there is no job to wait for. The scheduler pins the nodes
+        a chain load installed for the job on the line this way, so the sweep keeps them until the
+        job's commit is published or fails.
+        """
+
+        job = self._current
+        if job is None:
+            end()
+            return
+        if job.ends is None:
+            job.ends = [end]
+        else:
+            job.ends.append(end)
+
+    def _ended(self, job: _LineJob) -> None:
+        """The job's outcome settled: run what waited for it (:meth:`on_job_end`)."""
+
+        ends = job.ends
+        if ends is None:
+            return
+        job.ends = None
+        for end in ends:
+            end()
+
     @property
     def line_sizes(self) -> dict[str, int]:
         """Internal, for tests that bound memory: jobs with no outcome delivered yet, and keys with
@@ -583,6 +612,9 @@ class SessionImpl:
         # One task, shared by the outcome fence and by the job's own waiter: a coroutine awaited
         # twice would never resolve the second time.
         outcome = asyncio.ensure_future(self._outcome_of(ran))
+        # The job's own outcome, not its delivery: what :meth:`on_job_end` registered runs as soon as
+        # the commit published, or never will, not once the caller's turn behind the fence arrives.
+        outcome.add_done_callback(lambda _done: self._ended(ran.job))
         self._fence = self._chain(before, outcome)
         if not exempt:
             return self._deliver(ran.job, before, outcome)
