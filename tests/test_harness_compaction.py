@@ -1604,10 +1604,13 @@ async def test_compacts_a_fork_whose_cut_falls_on_a_parent_entry() -> None:
     assert kept == [text("u3", 100), text("a3", 100)]
     # The parent is untouched.
     assert "pi.compaction" not in await kinds(chat.root)
-    # The fork's view keeps the parent entries the summary kept.
-    state = await fork.view_state(context)
-    assert state.value["entries"] == view["entries"]
-    state.dispose()
+    # The fork's view shows the parent entries in ID order, the summary after them, its head on a
+    # parent entry.
+    watch = await fork.watch(context)
+    assert watch.value["entries"] == await all_entries(fork)
+    assert watch.value["entries"][-1] == view["head"]
+    assert any(entry["id"] == u3["id"] for entry in watch.value["entries"])
+    await watch.stop()
     await chat.harness.close(context)
 
 
@@ -2118,18 +2121,26 @@ async def test_loses_an_application_edit_placed_while_a_compaction_summarizes() 
     await chat.harness.close(context)
 
 
-async def test_keeps_the_kept_entries_mounted_in_the_conversation_view() -> None:
+async def test_appends_the_summary_to_the_conversation_view_in_place_its_head_on_a_kept_entry() -> None:
     chat = await open_compaction()
     await history(chat)
-    state = await chat.root.view_state(context)
+    watch = await chat.root.watch(context)
+    before = watch.value["entries"]
+
+    async def listener(_call: Any, _context: Any) -> None:
+        return None
+
+    watch.start(listener)
     chat.faux.summaries.append(summary())
     await result(chat, await chat.root.compact(None, context))
-    await eventually(
-        lambda: state.value["entries"]
-        and state.value["entries"][0]["kind"] == "pi.compaction"
-    )
-    assert state.value["entries"] == (await chat.root.context(context))["entries"]
-    state.dispose()
+    await eventually(lambda: watch.value["entries"][-1]["kind"] == "pi.compaction")
+    # Nothing leaves the window: the summary is appended where it was written.
+    assert watch.value["entries"][: len(before)] == before
+    assert watch.value["entries"] == await all_entries(chat.root)
+    head = (await chat.root.context(context))["head"]
+    assert watch.value["entries"][-1] == head
+    assert any(entry["id"] == head["head"] for entry in watch.value["entries"])
+    await watch.stop()
     await chat.harness.close(context)
 
 

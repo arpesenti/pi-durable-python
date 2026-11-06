@@ -112,9 +112,19 @@ must see every transition persists those facts separately.
 _Avoid_: buffered frames, replay, event batch, snapshot
 
 **Conversation view**:
-A fixed structural mount of one conversation's active entries and built-in documents.
-It advances only from committed publications and keeps at most one mount per conversation.
-_Avoid_: snapshot, projection
+The value one consumer of one conversation sees: that conversation plus its own entry window and
+the built-in documents, mounted structurally so an unchanged part is the same object between
+revisions. It advances only from committed publications, and the conversation keeps one mount that
+every consumer shares.
+_Avoid_: snapshot, projection, transcript
+
+**Entry window**:
+The range of recent entries a conversation view carries: at most `max` of them, at least `min` while
+they exist, starting at `from` when one is given, with `before` naming the entry just beneath the
+first one. Each attached consumer gets its own window over the shared mount; bounds are validated
+when the consumer attaches, not per commit. The whole transcript is never mounted: a client pages
+past a window with `ConversationTranscript`.
+_Avoid_: slice, page, buffer
 
 **Agent event stream**:
 The experimental adapter that translates one conversation's committed publications into events

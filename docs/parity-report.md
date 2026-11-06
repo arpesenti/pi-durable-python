@@ -177,6 +177,18 @@ Three gaps were found while translating the last deferred cases and were fixed i
   orchestrator/worker/reviewer cycle, a diamond, and a longer cycle.
 - `spec-usage`: the spec's usage examples are now a typed Python module, so mypy checks them the
   way the upstream TypeScript compile does; the test asserts the translation exists.
+- `conversation-transcript` and the windowed `harness-view`: every upstream case in both suites is
+  translated — 16 in `test_conversation_transcript.py` and 23 in `test_harness_view.py`, each named
+  for its upstream case — covering the entry window a conversation view carries (`from`, `min`,
+  `max`, `before`), the bounds refused at attach, the one splice that drops past `max` while setting
+  `before`, one window per attached consumer, and `ConversationTranscript`'s `earlier` marker, gaps,
+  page-by-page fills, shared loads, retried loads, and `resume`. Two of those cases carry
+  observer-only assertions and one a garbage-collection probe; all three are named in **Remaining
+  deviations**. The new upstream `test/conversation-view-bench.ts` is excluded as a benchmark helper.
+  The window is read only through `Conversation.watch(context, window)` and
+  `ConversationTranscript.resume`, the two seams upstream v1.5.0 has: `Conversation.viewState()` is
+  gone from upstream `src/`, so the port's `view_state` getter and its `ConversationViews.state`
+  mount are deleted here rather than carried into #44.
 
 ## Section 12: API footguns
 
@@ -213,7 +225,16 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   fake clients in the adapter suites.
 - **Code Mode, images, Cloudflare, PowerShell, Windows, benchmarks.** Out of scope by
   [ADR 0001](./adr/0001-parity-baseline-and-boundary.md); the excluded upstream suites and the
-  benchmark helpers in `testing` are listed as `excluded` in `PARITY.md`.
+  benchmark helpers in `testing` are listed as `excluded` in `PARITY.md`. The new 1.5.0
+  `test/conversation-view-bench.ts` is a benchmark helper over the windowed view and is excluded on
+  the same basis; the window shapes it measures are asserted behaviorally in
+  `test_harness_view.py`.
+- **`harness-view-run` is not translated by the windowed view.** Upstream v1.5.0 adds
+  `test/harness-view-run.test.ts` — "a run as the conversation view shows it" and "streamed
+  partials", 14 cases that read run state (`pi.live`, `pi.inbox`, streamed partials, tool slots)
+  out of the windowed view's operations. The window itself is #45's contract and is tested here;
+  these cases belong to the tickets that own what the view renders — #47 for the streamed answer and
+  its partials, #48 for the failure and restart-cutoff states — and no ticket claims the file yet.
 - **Telemetry and pi-ai client identity.** `HarnessOptions.telemetry`, `DURABLE_TELEMETRY_SCHEMA`,
   `HarnessOptions.identity`, and `DEFAULT_HARNESS_IDENTITY` are excluded by
   [ADR 0002](./adr/0002-upstream-1-4-0-scope.md): they describe pi-ai and pi-telemetry integration
@@ -229,6 +250,21 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   finished subtrees" counts `Set` iterations with a patched prototype. Python has no equivalent
   hook, so the same invariant is covered by the `scheduler_index_sizes` assertions in
   `test_harness_scheduler_retention.py` and `test_harness_scheduler_indexes.py`.
+- **A window's dropped entries are proven by what a watch holds, not by a GC probe.** The upstream
+  view case "lets a long-lived watch drop the entries that left its window" keeps a `WeakRef` to an
+  entry that fell out of the window and asserts it is collected. CPython does not weak-reference a
+  `list` or a `dict`, and collection is not observable in a test, so
+  `test_harness_view.py::test_lets_a_long_lived_watch_drop_the_entries_that_left_its_window`
+  asserts the same retention property from the watch's own value: the published window no longer
+  holds the first entry and its `before` names it, which is what would otherwise pin the object.
+- **The observer half of two window cases waits for #44.** Upstream `test/harness-view.test.ts`
+  proves one window per attached consumer with both `watchConversation` and `observeConversation`:
+  the case "gives each observer its own window over one mount" attaches its narrow consumer as an
+  observer, and "rejects window bounds that are not integers or put `max` below `min`" asserts one
+  `observeConversation(id, recorder, context, { max: 0 })` rejection. `ConversationViews.attach`
+  already takes one window per attached consumer — watches are the consumers that exist today — so
+  `test_harness_view.py` translates both through `watch(context, window)` alone, and #44 (`Observers
+  attach on the line`) adds the observer assertions under the same names.
 - **JavaScript realms and thenables.** The two containment cases that use another realm or a
   hand-written thenable become one Python test over a plain awaitable and a rejected coroutine;
   Python has one await protocol and no cross-realm promises.

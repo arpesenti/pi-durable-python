@@ -135,9 +135,9 @@ async def main() -> None:
         view = await conversation.context(BACKGROUND_CONTEXT)
         print([message["role"] for message in view["messages"]])  # ['user']
 
-        state = await conversation.view_state(BACKGROUND_CONTEXT)
-        print([entry["kind"] for entry in state.value["entries"]])  # ['pi.user']
-        state.dispose()
+        watch = await conversation.watch(BACKGROUND_CONTEXT)
+        print([entry["kind"] for entry in watch.value["entries"]])  # ['pi.user']
+        await watch.stop()
     finally:
         await harness.close(BACKGROUND_CONTEXT)
 

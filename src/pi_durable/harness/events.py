@@ -247,7 +247,7 @@ async def watch_events(
         holder["observer"] = observer
         return observer
 
-    await views.attach(conversation_id, create, context)
+    await views.attach(conversation_id, None, create, context)
     watch = holder["watch"]
     signal = context.abort_signal
     if signal is not None and signal.aborted:

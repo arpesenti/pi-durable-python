@@ -491,7 +491,9 @@ async def test_replaces_undelivered_batches_with_one_snapshot_after_100_pending_
     assert len(batches) == 1
     assert len(batches[0]) == 1
     assert batches[0][0]["type"] == "snapshot"
-    assert len(batches[0][0]["entries"]) == 101
+    # The stream renders the view it attaches, so its snapshot carries that view's own window: the
+    # default bounds hold the newest 50 of the 101 appends. #46 deletes the agent event stream.
+    assert len(batches[0][0]["entries"]) == 50
     await stream.stop()
     await harness.close(context)
 

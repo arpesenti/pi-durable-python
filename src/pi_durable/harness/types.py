@@ -66,6 +66,7 @@ from ..types import (
 
 if TYPE_CHECKING:
     from ..session.transaction import Transaction
+    from .view import ConversationWindow
 
 
 class ContextView(TypedDict):
@@ -938,9 +939,7 @@ class Conversation(Protocol):
 
     async def wait_for_idle(self, context: Context) -> None: ...
 
-    async def view_state(self, context: Context) -> Any: ...
-
-    async def watch(self, context: Context) -> Any: ...
+    async def watch(self, context: Context, window: ConversationWindow | None = None) -> Any: ...
 
 
 ConversationWatch: TypeAlias = WatchHandle[Any]

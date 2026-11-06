@@ -711,7 +711,7 @@ async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> 
     async def attach(_value: Any, _release: Any, _storage: Any, _views: Any) -> Any:
         return FailingObserver()
 
-    await harness._views.attach(root.id, attach, context)
+    await harness._views.attach(root.id, None, attach, context)
     watch = await root.watch(context)
     seen: list[Any] = []
     watch.start(lambda call, _context: seen.append(call["value"]))

@@ -367,7 +367,7 @@ wait for does. A task no definition can take is not active either: only a regist
 `harness.root()` creates or returns the root conversation; `create_conversation({"ownership": ...})`
 starts another; `fork()` copies a conversation at an entry. Each returns a stateless handle bound to
 the Harness: `submit`, `commit`, `entries`, `context`, `agent`, `configure`, `fork`, `compact`,
-`reset`, `abort`, `wait_for_idle`, `view_state`, and `watch`.
+`reset`, `abort`, `wait_for_idle`, and `watch`.
 
 <!-- example -->
 ```python
@@ -476,8 +476,10 @@ Only a blocking compaction makes the run wait; a background one runs beside it. 
 
 ### Observation
 
-- `conversation.view_state()` and `conversation.watch()` expose the conversation view: active
-  entries plus the built-in documents, advanced only by committed publications.
+- `conversation.watch(context, window)` exposes the conversation view: one consumer's `window` over
+  the transcript — the newest 50 entries by default, then appends, dropping the oldest past 100 —
+  plus the built-in documents, advanced only by committed publications. `ConversationTranscript`
+  pages a client past that window.
 - `harness.task_graph()` and `harness.watch_task_graph()` expose every live task, its waits, and
   the conversations it owns.
 - `watch_events(harness, conversation_id, context)` returns the experimental `AgentEventStream`

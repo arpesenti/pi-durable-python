@@ -189,6 +189,20 @@ def optional_extension(extension: str | None) -> dict[str, Any]:
     return {} if extension is None else {"extension": extension}
 
 
+def require_integer(value: object, label: str) -> int:
+    """``value`` as an integer at a numeric boundary; anything else, including a bool and a
+    fractional float, is refused.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ValueError(f"{label} must be an integer, got {value!r}")
+
+
 def request_stream_options(stream: Mapping[str, Any]) -> JsonObject:
     """Map Python-facing stream settings to the camelCase provider request shape."""
 
@@ -205,6 +219,7 @@ __all__ = [
     "optional_extension",
     "rejected",
     "request_stream_options",
+    "require_integer",
     "resolved",
     "scan_all",
     "task_checkpoint",

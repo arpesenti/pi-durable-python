@@ -213,11 +213,11 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `ConversationTranscript` | value | `ConversationTranscript` | — | planned (1.5.0: keeps a client's whole transcript over a windowed conversation view, with `load_earlier`, `fill_gap`, and `resume`; #45) |
-| `ConversationTranscriptOptions` | type | `ConversationTranscriptOptions` | — | planned (1.5.0: the loader and limits a transcript pages through; #45) |
-| `EntryLoader` | type | `EntryLoader` | — | planned (1.5.0: the `Conversation.entries()`-shaped query a transcript loads through; #45) |
-| `TranscriptItem` | type | `TranscriptItem` | — | planned (1.5.0: an entry, a `gap`, or the `earlier` marker; #45) |
-| `TranscriptView` | type | `TranscriptView` | — | planned (1.5.0: a conversation view plus its `items`; #45) |
+| `ConversationTranscript` | value | `ConversationTranscript` | test_conversation_transcript.py | tested (1.5.0: keeps a client's whole transcript over a windowed conversation view, with `load_earlier`, `fill_gap`, and `resume`.) |
+| `ConversationTranscriptOptions` | type | `ConversationTranscriptOptions` | test_conversation_transcript.py | tested (1.5.0: `page_size`, the entries one load fetches, default 50; exercised by the page-by-page fill, gap, and shared-load cases.) |
+| `EntryLoader` | type | `EntryLoader` | test_conversation_transcript.py | tested (1.5.0: the `Conversation.entries()`-shaped query a transcript loads through.) |
+| `TranscriptItem` | type | `TranscriptItem` | test_conversation_transcript.py | tested (1.5.0: an entry, a `gap`, or the `earlier` marker.) |
+| `TranscriptView` | type | `TranscriptView` | test_conversation_transcript.py | tested (1.5.0: a conversation view plus its `items`.) |
 
 ### `./harness/tool.ts` → `pi_durable.harness.tool`
 
@@ -247,7 +247,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `CompactionResult` | type | `CompactionResult` | test_harness_compaction.py | tested |
 | `CompactionSettings` | type | `CompactionSettings` | test_harness_compaction.py, test_harness_generation.py | tested |
 | `ContextView` | type | `ContextView` | test_harness_context.py | tested |
-| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py, test_harness_compaction.py, test_harness_view.py | tested (creation, fork, agent, context, entries, compact, reset, abort, idle waits, view, and watch) |
+| `Conversation` | type | `Conversation` | test_harness_conversations.py, test_harness_inbox.py, test_harness_ownership.py, test_harness_compaction.py, test_harness_view.py | tested (creation, fork, agent, context, entries, compact, reset, abort, idle waits, and the windowed `watch(context, window)`) |
 | `ConversationAbortOptions` | type | `ConversationAbortOptions` | test_harness_ownership.py | tested |
 | `ConversationCreateOptions` | type | `ConversationCreateOptions` | test_harness_conversations.py | tested |
 | `ConversationHandle` | type | `ConversationHandle` | test_harness_ownership.py | tested |
@@ -312,8 +312,8 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
-| `ConversationView` | type | `ConversationView` | test_harness_view.py | tested (the 1.4.0 active-transcript shape; the windowed view is #45) |
-| `ConversationWindow` | type | `ConversationWindow` | — | planned (1.5.0: `from`, `min` default 50, `max` default `2 * min`, validated per watch and per observer; #45) |
+| `ConversationView` | type | `ConversationView` | test_harness_view.py, test_conversation_transcript.py | tested (1.5.0: the mounted conversation plus this consumer's entry `window` — `entries`, `before`, and `docs`.) |
+| `ConversationWindow` | type | `ConversationWindow` | test_harness_view.py | tested (1.5.0: `from`, `min` default 50, `max` default `2 * min`, validated per attached consumer.) |
 
 ### `./session/session.ts` → `pi_durable.session.session`
 
@@ -644,7 +644,7 @@ SQLite backend and migrations.
 | --- | --- |
 | 1 Terms and invariants | planned (1.5.0: a stored commit publishes once Storage made it durable, in line order, even when the call later rejects; the line runs one commit callback at a time while their storage overlaps; a deferred commit reaches watches before Storage; #42, #47) |
 | 2 Core records | planned (1.5.0 retags the unions this section carries and adds the `continue` submission record, `RunFailure`, and `RunSummary`; #33, #48, #50) |
-| 2.1 Entries and context | planned (the conversation view is a window over the visible entries with head markers in place; `Conversation.context()` derives the model transcript; #45) |
+| 2.1 Entries and context | tested (1.5.0: the conversation view carries one consumer's entry window over the visible entries with head markers in place, and `Conversation.context()` derives the model transcript from the whole visible transcript — test_harness_view.py, test_harness_conversations.py, test_harness_compaction.py) |
 | 2.2 Public Harness surface | planned (one `Report` on `on_report`, the `observe_*` seams replacing the state getters and the commit subscription, `ConversationTranscript`, `read_only`, `max_turns`, `when_idle`, and `submit(tx, draft)`; #34, #44, #45, #46, #50) |
 | 3 Documents | tested (definitions, records, access, ownership, bases, versions, and forks across test_session_*; the audit report lists the section-to-suite mapping) |
 | 3.1 Definitions | tested (`checkpoint_when` is required on every definition; test_session_definitions.py) |
@@ -680,9 +680,9 @@ SQLite backend and migrations.
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the live status and in what `compaction_start` and `compaction_end` report: test_harness_compaction.py, test_harness_events.py; #36) |
 | 9 Document observation and Chord | tested |
-| 9.1 Watches | planned (the observer's `advance`/`end`, which #44 holds. `WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
+| 9.1 Watches | planned (the observer's `advance`/`end`, which #44 holds. `WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes; the conversation view's getter is already gone — upstream `Conversation` exposes only `watch(context, window?)` — and the document and task-graph getters remain #44's) |
 | 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
-| 9.3 Conversation view | planned (a per-watch, per-observer entry window with `before`, `ConversationWindow` bounds, and `ConversationTranscript`; everything a renderer draws is state here; #45, #46) |
+| 9.3 Conversation view | planned (1.5.0: the entry window with `before`, the `ConversationWindow` bounds, and `ConversationTranscript` are tested in test_harness_view.py and test_conversation_transcript.py; the per-observer window is #44's, the agent event stream renders through the view until #46 deletes it, and upstream `test/harness-view-run.test.ts` — a run as the view shows it — awaits #47 and #48) |
 | 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
 | 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |
 | 10 Storage contract | tested (`commit_batches(batches, receive, context)` is the protocol's only commit call — per-batch checks against the state the earlier batches left, one durability receipt per stored batch delivered before the call settles, and the refusal a resolved outcome beside a rejection that stores nothing — with the optional `publishing()` scope and the narrowed `mint_id()` monotonicity across reopen: test_storage_commit_batches.py over the memory, SQLite and JSONL backends, and no backend carries the retired single-write signature; #38, #41. The conformance suite carries the receipt contract itself — the group stored in order against the state its earlier batches left, the prefix a refusal keeps, a later batch its own actions refuse, a copy resolved against its predecessors, receipts checked one per stored batch by the wrapper every case runs through, and every case seeded through `commit_writes`; #39, #41. The durable backends' own depth landed with #40, which also pins that every backend module registers the same case list) |
@@ -773,8 +773,8 @@ request, cap and failure classification, background and blocking thresholds, ove
 and its retry, fork and inbox interactions, recovery across reopen, concurrent summaries, the
 one-compaction rule, and the older-head-marker edits. Its `compaction_start`/`compaction_end`
 ordering, late-joiner snapshots, and kept-entry view assertions now run through `watch_events` and
-`view_state` in the same file, alongside the same committed state checked through `pi.live`, the
-task outcome, submissions, and the context view.
+the windowed `watch(context, window)` in the same file, alongside the same committed state checked
+through `pi.live`, the task outcome, submissions, and the context view.
 
 The upstream `harness-prompt` suite is translated in `test_harness_prompt.py`: tagged, untagged,
 omitted, wrapped, failing, and cancelled section rendering; replay in place, deletion, and

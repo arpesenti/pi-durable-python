@@ -107,6 +107,13 @@ from .harness.tool import (
     ToolTaskInput,
     ToolTaskResult,
 )
+from .harness.transcript import (
+    ConversationTranscript,
+    ConversationTranscriptOptions,
+    EntryLoader,
+    TranscriptItem,
+    TranscriptView,
+)
 from .harness.types import (
     AfterFailedRun,
     Agent,
@@ -177,7 +184,7 @@ from .harness.types import (
     Wrap,
 )
 from .harness.usage import UsageDoc, UsageState
-from .harness.view import ConversationView
+from .harness.view import ConversationView, ConversationWindow
 from .providers import Model, Models
 from .session.session import DocumentState, SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
@@ -223,7 +230,10 @@ __all__ = [
     "ConversationInit",
     "ConversationRetryPolicy",
     "ConversationStreamOptions",
+    "ConversationTranscript",
+    "ConversationTranscriptOptions",
     "ConversationView",
+    "ConversationWindow",
     "ConversationWatch",
     "create_registry",
     "create_session",
@@ -244,6 +254,7 @@ __all__ = [
     "DocumentReader",
     "DocumentState",
     "Entry",
+    "EntryLoader",
     "EnvTarget",
     "Extension",
     "GenerationCheckpoint",
@@ -328,6 +339,8 @@ __all__ = [
     "TaskGraphWatch",
     "TaskInspection",
     "TaskRuntime",
+    "TranscriptItem",
+    "TranscriptView",
     "ToolControl",
     "ToolDiagnostic",
     "ToolEventCall",

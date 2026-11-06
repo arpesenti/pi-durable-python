@@ -55,7 +55,6 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     doc_state = await harness.document_state(Notes, context)
     doc_watch = await harness.watch_doc(Notes, context)
     assert doc_state is not None and doc_watch is not None
-    view_state = await root.view_state(context)
     view_watch = await root.watch(context)
     graph_state = await harness.task_graph(context)
     graph_watch = await harness.watch_task_graph(context)
@@ -66,9 +65,6 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
             frames.append(name)
 
     doc_state.subscribe(lambda value, ctx, delivery: state_listener(value, ctx, delivery, "docState"))
-    view_state.subscribe(
-        lambda value, ctx, delivery: state_listener(value, ctx, delivery, "viewState")
-    )
     graph_state.subscribe(
         lambda value, ctx, delivery: state_listener(value, ctx, delivery, "graphState")
     )
@@ -76,7 +72,7 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     view_watch.start(lambda _call, _ctx: frames.append("viewWatch"))
     graph_watch.start(lambda _call, _ctx: frames.append("graphWatch"))
     doc_value = doc_state.value
-    view_value = view_state.value
+    view_value = view_watch.value
 
     held = storage.hold_commits()
 
@@ -98,7 +94,7 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     await flush()
     assert frames == []
     assert doc_state.value is doc_value
-    assert view_state.value is view_value
+    assert view_watch.value is view_value
     assert graph_state.value == {"tasks": {}}
     assert await graph_watch.closed == {"kind": "ended"}
     assert await doc_watch.closed == {"kind": "ended"}
@@ -120,7 +116,6 @@ async def test_queued_view_and_graph_acquisitions_reject_at_the_seal() -> None:
     blocking = asyncio.ensure_future(harness.commit(blocker, context))
     await held.entered.wait()
     queued = {
-        "viewState": asyncio.ensure_future(root.view_state(context)),
         "watch": asyncio.ensure_future(root.watch(context)),
         "taskGraph": asyncio.ensure_future(harness.task_graph(context)),
         "watchTaskGraph": asyncio.ensure_future(harness.watch_task_graph(context)),
@@ -193,8 +188,6 @@ async def test_read_only_viewers_never_enable_scheduling() -> None:
     await root.agent(context)
     await root.context(context)
     await root.entries({}, 10, None, context)
-    view_state = await root.view_state(context)
-    view_state.dispose()
     view_watch = await root.watch(context)
     await view_watch.stop()
     graph_state = await harness.task_graph(context)

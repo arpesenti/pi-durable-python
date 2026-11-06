@@ -55,7 +55,7 @@ from .types import (
 )
 from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
-from .view import ConversationViews
+from .view import ConversationViews, ConversationWindow
 
 _SCAN_PAGE_SIZE = 256
 
@@ -275,11 +275,8 @@ class ConversationHandleImpl:
         draft: WriteSubmissionDraft = {"type": "write", "entry": cast(EntryDraft, entry)}
         await self.submit(draft, context)
 
-    async def view_state(self, context: Context) -> Any:
-        return await self._harness._views.state(self.id, context)
-
-    async def watch(self, context: Context) -> Any:
-        return await self._harness._views.watch(self.id, context)
+    async def watch(self, context: Context, window: ConversationWindow | None = None) -> Any:
+        return await self._harness._views.watch(self.id, context, window)
 
 
 class Harness(SessionImpl):
