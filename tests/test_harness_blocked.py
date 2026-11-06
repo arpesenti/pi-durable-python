@@ -338,17 +338,6 @@ async def test_keeps_an_abort_mark_admitted_before_close_in_the_record_close_wri
     await raw.close(context)
 
 
-# Awaiting the scheduler's region-recorded `task:<id>` decision re-read (PARITY.md 5.4, #48): the step
-# that ends the run invocation rereads its own task record ungated, so it writes back the copy from
-# before the abort mark and the mark is lost — the scheduler never reserves the abort handler, and no
-# cut-off, no restart and no fault happen. Upstream records the read, so the step gates behind the
-# publication of the mark the other call admitted.
-@pytest.mark.xfail(
-    strict=False,
-    reason="awaits the region-recorded task:<id> decision re-read (#48, and #49 for the restart-limit "
-    "fault it feeds): the run step's write is built from a record read before the abort mark was "
-    "published, so the mark never reaches the scheduler",
-)
 async def test_faults_a_task_whose_abort_handler_is_cut_off_restart_limit_times() -> None:
     path = _sqlite_path()
     aborts = [0]

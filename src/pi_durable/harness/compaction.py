@@ -649,9 +649,13 @@ def _start_run(runtime: Any) -> Any:
     """The Harness's ``start_run`` for a boundary a compaction-owned admission applies."""
 
     async def start_run(
-        tx: Transaction, conversation_id: ConversationId, live: Any, inputs: list[Any]
+        tx: Transaction,
+        conversation_id: ConversationId,
+        live: Any,
+        inputs: list[Any],
+        first: EntryId | None = None,
     ) -> None:
-        await start_generation(tx, conversation_id, live, inputs, runtime.registry)
+        await start_generation(tx, conversation_id, live, inputs, runtime.registry, first)
 
     return start_run
 

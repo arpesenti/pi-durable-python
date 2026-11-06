@@ -480,6 +480,13 @@ class Transaction:
     def staged_tasks(self) -> list[AnyTaskRecord]:
         return [task.write[1] for task in self._tasks.values() if task.write is not None]
 
+    def created_task_ids(self) -> list[TaskId]:
+        """Internal: the tasks this commit creates, as opposed to the records it replaces."""
+
+        return [
+            id for id, task in self._tasks.items() if task.write is not None and task.write[0] == "create"
+        ]
+
     def write_keys(self) -> list[str]:
         """The keys this commit writes, once settled, for the Session's unpublished write set.
 

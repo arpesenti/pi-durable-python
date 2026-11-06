@@ -592,12 +592,22 @@ class Harness(SessionImpl):
         return await self._submissions.abort(id, context, conversation_id)
 
     async def _start_run(
-        self, tx: Transaction, conversation_id: ConversationId, live: Any, inputs: list[Any]
+        self,
+        tx: Transaction,
+        conversation_id: ConversationId,
+        live: Any,
+        inputs: list[Any],
+        first: EntryId | None = None,
     ) -> None:
         registry = cast(RegistryReader, self._options["registry"]).snapshot()
-        await start_generation(tx, conversation_id, live, inputs, registry)
+        await start_generation(tx, conversation_id, live, inputs, registry, first)
 
     # ── Internal scheduler callbacks ───────────────────────────────────────
+
+    def membership_keys(self, tx: Transaction) -> Any:
+        """The ownership memberships a commit's task changes write, from the scheduler's index."""
+
+        return self._tasks.membership_keys(tx)
 
     async def _settle_outcome(self, tx: Transaction, record: TaskRecord, outcome: TaskOutcome) -> None:
         await settle_scheduler_outcome(tx, record, cast(Any, outcome))

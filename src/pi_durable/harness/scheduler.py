@@ -22,6 +22,7 @@ from ..context import (
 from ..errors import ReadOnlySession, error_message, is_failure
 from ..ids import ConversationId, TaskId
 from ..json import JsonValue, copy_json
+from ..session.keys import INTENT_KEY, ROOTS_KEY, owned_key, task_key
 from ..session.session import SessionImpl
 from ..session.transaction import Transaction
 from ..timers import Timers
@@ -184,6 +185,18 @@ def failed_outcome(record: Mapping[str, Any]) -> bool:
 def cancellation_intent(record: Mapping[str, Any]) -> bool:
     return record["state"]["status"] != "terminal" and (
         record.get("abortRequested") is True or failed_outcome(record)
+    )
+
+
+def intent_changes(previous: Mapping[str, Any] | None, next: Mapping[str, Any]) -> bool:
+    """Whether a staged record starts, changes, or clears cancellation intent, so a commit that writes
+    one also writes the intent set a decision region reads."""
+
+    return (
+        bool((previous or {}).get("abortRequested")) is not bool(next.get("abortRequested"))
+        or (previous or {}).get("abortReason") != next.get("abortReason")
+        or (previous is not None and failed_outcome(previous)) != failed_outcome(next)
+        or (previous is not None and cancellation_intent(previous)) != cancellation_intent(next)
     )
 
 
@@ -425,8 +438,65 @@ class TaskScheduler:
         self._closing = False
         self._dirty = False
         self._draining = False
+        # The keys the decision region underway reads (``_region``); set only while one runs.
+        self._reading: set[str] | None = None
         self._expiry_handle: asyncio.TimerHandle | None = None
         self._detached: set[asyncio.Task[Any]] = set()
+
+    # ── Decision regions ───────────────────────────────────────────────────
+
+    async def _region(
+        self,
+        decide: Callable[[], Any],
+        refresh: Callable[[], Awaitable[Any]] | None = None,
+    ) -> Any:
+        """Run ``decide``, a decision region (group-commit document §6).
+
+        ``decide`` is synchronous: it reads scheduler memory, records the keys it reads through
+        :meth:`_record`, and stages nothing. When one of them has an unpublished writer its result,
+        or its error, is dropped: once that writer publishes, ``refresh`` reloads the chains the
+        region walks and it runs again. Only a region that read nothing unpublished is applied. A
+        job that waits holds the line, so the unpublished writes only shrink and the runs converge.
+        """
+
+        while True:
+            keys: set[str] = set()
+            self._reading = keys
+            value: Any = None
+            failure: BaseException | None = None
+            try:
+                value = decide()
+            except BaseException as error:
+                if not is_failure(error):
+                    raise
+                failure = error
+            finally:
+                self._reading = None
+            gates = [gate for gate in (self._session.touch(key) for key in keys) if gate is not None]
+            if not gates:
+                if failure is not None:
+                    raise failure
+                return value
+            await asyncio.gather(*gates)
+            if refresh is not None:
+                await refresh()
+
+    def _record(self, key: str) -> None:
+        """In a decision region, note that it reads ``key``; anywhere else, nothing."""
+
+        if self._reading is not None:
+            self._reading.add(key)
+
+    def _live_record(self, id: TaskId) -> AnyTaskRecord | None:
+        """A live task's committed record, read by a decision region."""
+
+        self._record(task_key(id))
+        return self._live.get(id)
+
+    async def _reload_scopes(self) -> None:
+        """Load the chains a region walks, again after it waited: what was published may list new work."""
+
+        await self._load_scopes(False)
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -659,7 +729,7 @@ class TaskScheduler:
                 return {"result": "marked"}
             if invocation is None and current["state"]["status"] != "completing":
                 await self._load_scopes(False)
-                if not self._has_owned_live(id):
+                if not await self._region(lambda: self._has_owned_live(id), self._reload_scopes):
                     resolution = self._resolve(cast(RunnableTaskRecord, current), self._registry.snapshot())
                     if resolution["kind"] == "blocked":
                         await self._terminate(
@@ -687,7 +757,8 @@ class TaskScheduler:
         async def find(line: Storage) -> Any:
             if self._closing:
                 raise closed_error(self._session)
-            if id in self._live:
+            # Checked and registered on the line, so no terminal publication falls between them.
+            if await self._region(lambda: self._live_record(id) is not None):
                 return {"promise": self._task_waiters.add(id, context)}
             record = await line.task(id, context)
             if record is None:
@@ -1173,6 +1244,7 @@ class TaskScheduler:
         self, node: dict[str, Any], overlay: dict[str, Any] | None = None
     ) -> AnyTaskRecord | None:
         current = node
+        self._record(INTENT_KEY)
         while not current["background"]:
             owner = current.get("owner")
             if owner is None:
@@ -1266,6 +1338,7 @@ class TaskScheduler:
         pending: list[Node] = [start]
         while pending:
             at = pending.pop()
+            self._record(owned_key(at))
             children_sets = (self._below.get(at), None if links is None else links.get(at))
             for children in children_sets:
                 for child in children or ():
@@ -1312,6 +1385,7 @@ class TaskScheduler:
         return bool(self._owned_live(owner, overlay=overlay, first=True, done=done))
 
     def _in_scope(self, start: Up, scope: Scope, cross_background: bool = False) -> bool | None:
+        self._record(INTENT_KEY)
         for step in self._above(start):
             if "unknown" in step:
                 return None
@@ -1326,6 +1400,7 @@ class TaskScheduler:
         return self._cancelling_owner(start) is not None
 
     def _cancelling_owner(self, start: Up) -> AnyTaskRecord | None:
+        self._record(INTENT_KEY)
         if not self._intent:
             return None
         for step in self._above(start):
@@ -1550,35 +1625,25 @@ class TaskScheduler:
             # the first to run after a deadline.
             self._wake_due()
             self._unpark_raised()
+            # The candidates are chosen in a decision region: a record an earlier admitted commit
+            # replaced is reread once that commit publishes, so nothing is reserved on a stale one.
+            plan = await self._region(self._plan_reservation, self._reload_scopes)
+            for id in plan["dropped"]:
+                self._runnable.discard(id)
+            if plan["cascade"]:
+                self._cascade_pending = True
+                self._schedule_reconcile()
+            for id in plan["parked"]:
+                self._runnable.discard(id)
+                if id not in self._parked_tasks:
+                    # Newly parked without a commit, as after a lowered limit.
+                    asyncio.get_running_loop().call_soon(self._notify_blocked)
+                self._parked_tasks.add(id)
             snapshot: RegistrySnapshot | None = None
             limit = self._restart_limit()
-            for id in list(self._runnable):
-                record = self._live.get(id)
-                if record is None or record["state"]["status"] == "completing" or id in self._invocations:
-                    self._runnable.discard(id)
-                    continue
-                if self._waiting_on(record, True):
-                    self._runnable.discard(id)
-                    continue
-                # It returns at the first pass after its time comes, which the timer, resume(), or
-                # any change starts.
-                if self._not_due(record):
-                    self._runnable.discard(id)
-                    continue
-                # It returns when retry() clears its restart count, or after restart_limit rose.
-                if self._parked(record):
-                    self._runnable.discard(id)
-                    if id not in self._parked_tasks:
-                        # Newly parked without a commit, as after a lowered limit.
-                        asyncio.get_running_loop().call_soon(self._notify_blocked)
-                    self._parked_tasks.add(id)
-                    continue
-                runnable = record
+            for record in plan["ready"]:
+                id = record["id"]
                 mode: Literal["run", "abort"] = "abort" if record.get("abortRequested") else "run"
-                if mode == "run" and not record["background"] and self._below_cancelled(parent_of(record)):
-                    self._cascade_pending = True
-                    self._schedule_reconcile()
-                    continue
                 # An abort handler cut off restart_limit times would run forever; nothing is left to
                 # park it for.
                 if mode == "abort" and int(record.get("restarts") or 0) >= limit:
@@ -1598,7 +1663,7 @@ class TaskScheduler:
                     continue
                 if snapshot is None:
                     snapshot = self._registry.snapshot()
-                resolution = self._resolve(runnable, snapshot)
+                resolution = self._resolve(cast(RunnableTaskRecord, record), snapshot)
                 if resolution["kind"] == "blocked":
                     if mode == "abort" and record.get("abortReason") is None:
                         await self._terminate(
@@ -1607,7 +1672,7 @@ class TaskScheduler:
                             {"status": "orphaned", "reason": resolution["reason"]},
                         )
                     continue
-                if resolution["record"] is not runnable or record["state"]["status"] != "running":
+                if resolution["record"] is not record or record["state"]["status"] != "running":
                     tx.set_task(
                         with_state(
                             resolution["record"],
@@ -1642,6 +1707,141 @@ class TaskScheduler:
         if abandoned:
             self._dirty = True
         return reservations
+
+    def membership_keys(self, tx: Transaction) -> Any:
+        """The ownership memberships a commit's task and conversation changes write (group-commit
+        document §4.2), asked at its admission on the line, so a walk a pending commit would change waits.
+
+        For each task created or made terminal: every node from its parent up to and including the
+        nearest live task, or the root conversation, and the roots too when the walk reached one, as a
+        pending end may unlist the root a creation finds listed. For each conversation created under a
+        task: that task. And the intent set when a change sets, upgrades, or clears a mark or a held or
+        ended outcome other than ``completed``. Loads the chains it walks; the nodes it installs stay
+        until the commit is published.
+        """
+
+        tasks = tx.staged_tasks()
+        conversations = tx.staged_conversations()
+        if not tasks and all(record.get("owner") is None for record in conversations):
+            return []
+        return self._membership_keys(tx, tasks, conversations)
+
+    async def _membership_keys(
+        self,
+        tx: Transaction,
+        tasks: list[AnyTaskRecord],
+        conversations: list[dict[str, Any]],
+    ) -> list[str]:
+        keys: set[str] = set()
+        overlay = _overlay_of(tx)
+        created = set(tx.created_task_ids())
+        reached: dict[str, ConversationId | None] = {}
+        for record in tasks:
+            if intent_changes(self._live.get(record["id"]), record):
+                keys.add(INTENT_KEY)
+            if record["id"] not in created and record["state"]["status"] != "terminal":
+                continue
+            await self._load_chain(parent_of(record), overlay)
+            if await self._chain_keys(parent_node(record), overlay, keys, reached) is not None:
+                keys.add(ROOTS_KEY)
+        for conversation in conversations:
+            owner = (conversation.get("owner") or {}).get("taskId")
+            if owner is None:
+                continue
+            await self._load_chain({"task": owner}, overlay)
+            await self._chain_keys(owner, overlay, keys, reached)
+        return list(keys)
+
+    async def _chain_keys(
+        self,
+        start: Node,
+        overlay: dict[str, Any],
+        keys: set[str],
+        reached: dict[str, ConversationId | None],
+    ) -> ConversationId | None:
+        """Add the memberships from ``start`` up to and including the nearest live task, or the root
+        conversation, which it returns.
+
+        ``reached`` keeps, per node walked, where its walk ended, so a chain several tasks of a commit
+        share is walked once. Whether an ancestor is live can change under a pending commit, so it is
+        read after a touch of the ancestor's record: a pending end must not stop the chain early.
+        Ownership fields are immutable, so they are not keyed.
+        """
+
+        walked: list[str] = []
+        root: ConversationId | None = None
+        node: Node | None = start
+        while node is not None:
+            key = owned_key(node)
+            if key in reached:
+                # Walked up from here already, for another task of the commit.
+                root = reached[key]
+                break
+            keys.add(key)
+            walked.append(key)
+            if isinstance(node, str):
+                conversation = conversation_of(node)
+                edges = overlay.get("edges")
+                if edges is not None and conversation in edges:
+                    node = edges[conversation]
+                elif conversation in self._edges:
+                    node = self._edges[conversation]
+                else:
+                    break
+                if node is None:
+                    root = conversation
+                continue
+            staged = overlay["tasks"].get(cast(TaskId, node))
+            record = staged if staged is not None else self._live.get(cast(TaskId, node))
+            if staged is None:
+                gate = self._session.touch(task_key(cast(TaskId, node)))
+                if gate is not None:
+                    await gate
+                    # It may have ended meanwhile, and its node been swept: load the chain above it again.
+                    await self._load_chain({"task": cast(TaskId, node)}, overlay)
+                    record = self._live.get(cast(TaskId, node))
+            if record is not None and record["state"]["status"] != "terminal":
+                break
+            above: dict[str, Any] | None = record or self._settled.get(cast(TaskId, node))
+            node = None if above is None else parent_node(above)
+        for walked_key in walked:
+            reached[walked_key] = root
+        return root
+
+    def _plan_reservation(self) -> dict[str, Any]:
+        """A reservation pass's decision region: the candidates it drops, and the records to reserve.
+
+        Iterating the candidates is not keyed: a pass that misses a task a pending commit makes
+        runnable only delays it. A record it does read is keyed, so a reservation never stands on a
+        record an admitted commit has replaced.
+        """
+
+        dropped: list[TaskId] = []
+        parked: list[TaskId] = []
+        ready: list[AnyTaskRecord] = []
+        cascade = False
+        for id in list(self._runnable):
+            if id in self._invocations:
+                dropped.append(id)
+                continue
+            record = self._live_record(id)
+            if record is None or record["state"]["status"] == "completing":
+                dropped.append(id)
+                continue
+            # It returns once what it waits for ends, its record changes, or the work below it ends.
+            if self._waiting_on(record, True) or self._not_due(record):
+                dropped.append(id)
+                continue
+            # It returns when retry() clears its restart count, or after restart_limit rose.
+            if self._parked(record):
+                parked.append(id)
+                continue
+            if not record.get("abortRequested") and not record["background"]:
+                if self._below_cancelled(parent_of(record)):
+                    cascade = True
+                    continue
+            ready.append(record)
+        return {"dropped": dropped, "parked": parked, "cascade": cascade, "ready": ready}
 
     def _waiting_on(self, record: Mapping[str, Any], first: bool = False) -> list[TaskId]:
         if record.get("abortRequested"):
@@ -1793,9 +1993,8 @@ class TaskScheduler:
         while True:
             current = await self._step(
                 invocation,
-                lambda tx, current, previous=previous: self._decide(
-                    tx, current, previous, state, invocation.context
-                ),
+                lambda current, previous=previous: self._rules(current, previous),
+                lambda tx, current: self._progress(tx, current, state, invocation.context),
             )
             if current is None or self._closing:
                 return
@@ -1817,49 +2016,62 @@ class TaskScheduler:
                     if not is_failure(error):
                         raise
 
-    def _decide(
-        self,
-        tx: Transaction,
-        current: ErasedRunningTask,
-        previous: dict[str, Any] | None,
-        state: dict[str, Any],
-        context: Context | None = None,
-    ) -> Any:
+    def _rules(self, current: ErasedRunningTask, previous: dict[str, Any] | None) -> dict[str, Any]:
+        """Precedence rules for a run invocation, the decision region of its step (spec section 5.4).
+
+        Rules 1 (no longer running) and 2 (a closing Harness) are applied by :meth:`_step`; progress
+        (rule 5) is applied there too, as it takes a registry snapshot and writes a handover.
+        """
+
+        # 3. an abort mark ends it; a fresh abort invocation starts once its owned work is gone.
         if current.get("abortRequested"):
-            return False
+            return {"plan": "end"}
+        # An owner's cancellation intent ends it too, before its cascade marks it.
         if not current["background"] and self._below_cancelled(parent_of(current)):
-            self._cascade_pending = True
-            self._schedule_reconcile()
-            return False
+            return {"plan": "cascade"}
         if previous is None:
-            return True
-        if previous.get("failure") is not None:
-            return {"fault": previous["failure"]["error"]}
+            return {"plan": "continue"}
+        # 4. an uncaught error.
+        failure = previous.get("failure")
+        if failure is not None:
+            return {"plan": "fault", "error": failure["error"]}
+        # 6. no durable progress.
         if json_equal(current["state"]["checkpoint"], previous["checkpoint"]):
             message = (
                 f"Task {current['kind']} phase {previous['checkpoint']['phase']} "
                 "returned without durable progress"
             )
-            return {"fault": RuntimeError(message)}
+            return {"plan": "fault", "error": RuntimeError(message)}
+        return {"plan": "progress"}
+
+    def _progress(
+        self,
+        tx: Transaction,
+        current: ErasedRunningTask,
+        state: dict[str, Any],
+        context: Context | None = None,
+    ) -> bool:
+        """Rule 5, progress: whether the invocation continues under the phase's definition."""
+
         state["snapshot"] = self._registry.snapshot()
         following = state["snapshot"].task(current["kind"])
-        if following is not state["task"]:
-            cause = _outdated_reason(following, current)
-            if following is not None and can_reserve(following, current):
-                tx.set_task(
-                    with_state(current, {"status": "pending", "checkpoint": current["state"]["checkpoint"]})
-                )
-                return False
-            if state["reported"] is None or state["reported"]["task"] is not following:
-                state["reported"] = {"task": following}
-                self._report(
-                    _OldDefinitionError(current["id"], current["kind"], cause),
-                    {
-                        "kind": "task_outdated",
-                        **self._about_task(current),
-                        "reason": cause,
-                    },
-                )
+        if following is state["task"]:
+            return True
+        if following is not None and can_reserve(following, current):
+            tx.set_task(
+                with_state(current, {"status": "pending", "checkpoint": current["state"]["checkpoint"]})
+            )
+            return False
+        if state["reported"] is None or state["reported"]["task"] is not following:
+            state["reported"] = {"task": following}
+            self._report(
+                _OldDefinitionError(current["id"], current["kind"], _outdated_reason(following, current)),
+                {
+                    "kind": "task_outdated",
+                    **self._about_task(current),
+                    "reason": _outdated_reason(following, current),
+                },
+            )
         return True
 
     async def _run_abort(self, reservation: dict[str, Any]) -> None:
@@ -1883,30 +2095,48 @@ class TaskScheduler:
         message = f"Abort handler of task {invocation.task_id} returned without a terminal outcome"
         await self._step(
             invocation,
-            lambda _tx, _current: {"fault": failure if failure is not None else RuntimeError(message)},
+            lambda _current: {
+                "plan": "fault",
+                "error": failure if failure is not None else RuntimeError(message),
+            },
         )
 
     async def _step(
         self,
         invocation: _Invocation,
-        decide: Callable[[Transaction, ErasedRunningTask], Any],
+        rules: Callable[[ErasedRunningTask], dict[str, Any]],
+        progress: Callable[[Transaction, ErasedRunningTask], bool] | None = None,
     ) -> ErasedRunningTask | None:
+        """One decision on the Session line before a phase, in a recorded region.
+
+        The rules and the running record are read in :meth:`_region`, so a decision never stands on
+        a record an earlier admitted commit has replaced; what it decided is then applied, once.
+        """
+
         fault: dict[str, Any] = {}
 
+        def plan() -> tuple[ErasedRunningTask | None, dict[str, Any]]:
+            found = self._live_record(invocation.task_id)
+            if found is None or found["state"]["status"] != "running" or self._closing:
+                return None, {"plan": "end"}
+            current = cast(ErasedRunningTask, found)
+            return current, rules(current)
+
         async def step(tx: Transaction) -> ErasedRunningTask | None:
-            found = self._live.get(invocation.task_id)
-            current = (
-                cast(ErasedRunningTask, found)
-                if found is not None and found["state"]["status"] == "running"
-                else None
-            )
-            decision = decide(tx, current) if current is not None and not self._closing else False
-            if decision is True:
+            current, step_plan = await self._region(plan)
+            kind = step_plan["plan"]
+            if kind == "continue":
                 return current
+            if kind == "progress" and progress is not None and progress(tx, cast(ErasedRunningTask, current)):
+                return current
+            # Ending happens inside the step, before a fault's Harness cleanup.
             self._end(invocation)
-            if decision is not False:
-                fault["error"] = decision["fault"]
-                message = error_message(decision["fault"])
+            if kind == "cascade":
+                self._cascade_pending = True
+                self._schedule_reconcile()
+            if kind == "fault":
+                fault["error"] = step_plan["error"]
+                message = error_message(step_plan["error"])
                 await self._terminate(
                     tx,
                     cast(AnyTaskRecord, current),
@@ -1934,7 +2164,9 @@ class TaskScheduler:
 
     async def _terminate(self, tx: Transaction, record: AnyTaskRecord, outcome: Mapping[str, Any]) -> None:
         await self._load_scopes(False)
-        if self._has_owned_live(record["id"], _overlay_of(tx)):
+        if await self._region(
+            lambda: self._has_owned_live(record["id"], _overlay_of(tx)), self._reload_scopes
+        ):
             tx.set_task(with_state(record, {"status": "completing", "outcome": outcome}))
             return
         tx.set_task(with_state(record, {"status": "terminal", "outcome": outcome}))
@@ -1956,7 +2188,9 @@ class TaskScheduler:
             await self._load_scopes(False)
             for record in overlay["tasks"].values():
                 await self._load_chain(parent_of(record), overlay)
-            if self._has_owned_live(current["id"], overlay):
+            if await self._region(
+                lambda: self._has_owned_live(current["id"], overlay), self._reload_scopes
+            ):
                 tx.set_task(
                     with_state(progressed(current), {"status": "completing", "outcome": following["outcome"]})
                 )
@@ -2062,6 +2296,9 @@ class TaskScheduler:
 
     def _idle(self, conversation_id: ConversationId | None) -> bool:
         scope: Scope = {"roots": True} if conversation_id is None else {"conversation": conversation_id}
+        # In a decision region, global idle reads the roots it starts from.
+        if conversation_id is None:
+            self._record(ROOTS_KEY)
         for id in self._unloaded:
             record = self._live.get(id)
             if (
@@ -2460,14 +2697,21 @@ class _Runtime:
                 raise _ended_error(self._invocation)
             if self._scheduler._closing:
                 raise closed_error(self._scheduler._session)
-            found = self._scheduler._live.get(self._invocation.task_id)
-            if found is None:
-                raise ValueError(f"Task {self._invocation.task_id} is terminal")
-            if found["state"]["status"] != "running":
-                raise ValueError(f"Task {self._invocation.task_id} is {found['state']['status']}")
-            current = cast(ErasedRunningTask, found)
-            if self._invocation.mode == "run" and current.get("abortRequested"):
-                raise ValueError(f"Task {self._invocation.task_id} has a durable abort mark")
+
+            def current_record() -> ErasedRunningTask:
+                found = self._scheduler._live_record(self._invocation.task_id)
+                if found is None:
+                    raise ValueError(f"Task {self._invocation.task_id} is terminal")
+                if found["state"]["status"] != "running":
+                    raise ValueError(f"Task {self._invocation.task_id} is {found['state']['status']}")
+                if self._invocation.mode == "run" and found.get("abortRequested"):
+                    raise ValueError(f"Task {self._invocation.task_id} has a durable abort mark")
+                return cast(ErasedRunningTask, found)
+
+            current = await self._scheduler._region(current_record)
+            # The step that ends the invocation may have run while the region waited.
+            if self._invocation.ended:
+                raise _ended_error(self._invocation)
             result = change(tx, current)
             if hasattr(result, "__await__"):
                 result = await cast(Awaitable[Any], result)

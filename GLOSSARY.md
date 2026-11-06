@@ -75,8 +75,22 @@ _Avoid_: flush, drain, checkpoint
 **Run**:
 The `pi.generation` task named by `pi.live.run` that owns the placed submissions it must answer: an
 input's, a queued input's placed at its boundary, or a continue's.
-A run is present exactly while the conversation is busy.
+A run is present exactly while the conversation is busy, and it ends answered — settling its inputs —
+or unanswered, which the live document says with a [run failure](#run-failure).
 _Avoid_: turn, request, generation
+
+**Run failure**:
+The `runFailure` field of `pi.live`: the task, inputs, reason, detail, and first entry of the run that
+ended without answering. It says why the conversation is idle without a run, and a later run clears it
+— except the successor a failed run's own commit starts, which keeps it so a continue's hooks still see
+what failed. A run that answered and is left running only its run-end tasks records none, however it ends.
+_Avoid_: error, fault, breakdown
+
+**Run-end task**:
+A task an `afterRun` hook asked for at the end of a run that answered, created as a child of the run's
+task. The run keeps `pi.live.run`, stays busy, and settles its inputs `done` while they run; the final
+boundary and the next run wait for them, and however they end the run records no [run failure](#run-failure).
+_Avoid_: after hook, teardown task, background task
 
 **Compaction**:
 A `pi.compaction` task that replaces an old prefix of the model context with a summary entry.

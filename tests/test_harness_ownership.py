@@ -797,7 +797,9 @@ async def test_aborts_a_subagent_run_and_rejects_its_waiting_tool() -> None:
     assert await tool_wait.promise
     child = await harness.conversation(held["child"], context)
     await child.wait_for_idle(context)
-    assert await harness.snapshot(LiveDoc, held["child"], context) == {}
+    child_live = await harness.snapshot(LiveDoc, held["child"], context)
+    assert child_live is not None and set(child_live) == {"runFailure"}
+    assert child_live["runFailure"]["reason"] == "aborted"
     inspection = await harness.inspect(context)
     assert [
         record for record in inspection["submissions"] if record["conversationId"] == held["child"]

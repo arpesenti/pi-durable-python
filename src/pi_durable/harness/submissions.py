@@ -12,9 +12,8 @@ from typing import Any, Literal, cast
 
 from ..context import Context
 from ..errors import ConversationBusy, ConversationIdle, ReadAfterWrite
-from ..ids import ConversationId, SubmissionId
+from ..ids import ConversationId, EntryId, SubmissionId
 from ..json import JsonValue, copy_json
-from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
 from ..types import EntryDraft, Storage, SubmissionCreate, SubmissionRecord
 from .inbox import (
@@ -35,7 +34,8 @@ from .util import Waiters, closed_error, resolved
 
 AbortResult = Literal["aborted", "already_placed", "settled"]
 
-StartRun = Callable[[Transaction, ConversationId, DocumentDraft, list[SubmissionId]], Awaitable[None]]
+StartRun = Callable[..., Awaitable[None]]
+"""``start_run(tx, conversation_id, live, inputs, first)``: create the run a boundary starts."""
 
 
 def _type(draft: Mapping[str, Any]) -> Any:
@@ -73,6 +73,14 @@ def check_input_entry(entry: InputEntry) -> None:
         raise TypeError(
             f'An input entry\'s kind must be a non-empty string not starting with "pi.", got {kind!r}'
         )
+
+
+def _failure_first(failure: Mapping[str, Any] | None, first: EntryId | None) -> EntryId | None:
+    """The first entry a continue's run begins at: the failed run's, else what the boundary placed."""
+
+    if failure is not None and failure.get("first") is not None:
+        return cast(EntryId, failure["first"])
+    return first
 
 
 def _clean_entry(entry: Mapping[str, Any]) -> dict[str, JsonValue]:
@@ -294,7 +302,14 @@ async def admit_submission(
         # Items an earlier failed run left queued (`afterFailedRun: "keep"`) are placed first and join
         # the run, so the context it starts holds everything the conversation had left to say.
         placed = await apply_boundary(tx, opened, "final", now)
-        await start_run(tx, conversation_id, live, [*placed.users, id])
+        # Its history starts with the failed run's, so ``afterRun`` hooks see what that run did.
+        await start_run(
+            tx,
+            conversation_id,
+            live,
+            [*placed.users, id],
+            _failure_first(live.get("runFailure"), placed.first),
+        )
         return id
 
     boundary = None if busy else await prepare_boundary(tx, conversation_id, queue_modes)
@@ -330,7 +345,7 @@ async def admit_submission(
             return id
         placed = await apply_boundary(tx, boundary, "final", now)
         if placed.users:
-            await start_run(tx, conversation_id, live, placed.users)
+            await start_run(tx, conversation_id, live, placed.users, placed.first)
         return id
 
     entry = cast(Mapping[str, Any], entry) if entry is not None else None
@@ -371,7 +386,7 @@ async def admit_submission(
             },
         )
     )
-    await start_run(tx, conversation_id, live, [record["id"]])
+    await start_run(tx, conversation_id, live, [record["id"]], placed_entry["id"])
     return record["id"]
 
 

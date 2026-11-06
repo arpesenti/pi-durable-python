@@ -16,6 +16,7 @@ from chat_support import (
     chat_setup,
     faux_tool_call,
     live_of,
+    only_failure,
     open_chat,
     slow_message,
     text_of,
@@ -149,7 +150,8 @@ async def test_still_ends_a_run_whose_input_something_else_already_settled() -> 
     assert await harness.abort_task(task_id, context) == "marked"
     assert (await harness.wait_for_task(task_id, context))["state"]["outcome"] == {"status": "aborted"}
     assert (await submission.status(context))["reason"] == "withdrawn"
-    assert await live(harness, root) == {}
+    # A run ends without an answer even when its inputs were settled already.
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     await harness.close(context)
 
 
@@ -182,8 +184,17 @@ async def test_fails_with_no_model_when_no_model_is_configured_or_the_model_is_u
             },
         },
     }
-    assert await live(harness, root) == {}
-    assert await live(harness, plain) == {}
+    only_failure(
+        await live(harness, root),
+        tasks["items"][0]["id"],
+        [unknown["id"]],
+        "no_model",
+        "Model faux/missing is not available",
+    )
+    plain_failure = (await live(harness, plain)).get("runFailure")
+    assert isinstance(plain_failure, dict)
+    assert plain_failure["reason"] == "no_model"
+    assert plain_failure["detail"] == "No model is configured"
     await harness.close(context)
 
 
@@ -333,7 +344,7 @@ async def test_converts_the_committed_partial_when_aborted_during_streaming() ->
     partial_text = text_of(partial)
     assert converted_text is not None and partial_text is not None
     assert converted_text.startswith(partial_text)
-    assert await live(harness, root) == {}
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     assert (await harness.wait_for_task(task_id, context))["state"]["outcome"] == {"status": "aborted"}
     await harness.close(context)
 
@@ -367,7 +378,7 @@ async def test_cancels_a_deferred_response_when_aborted_during_polling() -> None
     assert (await submission.wait(context))["status"] == "unanswered"
     assert (await submission.wait(context))["reason"] == "aborted"
     assert len(setup.faux.cancelled_deferred) == 1
-    assert await live(harness, root) == {}
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     await harness.close(context)
 
 
@@ -417,7 +428,7 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
     failed = next(info for info in infos if info.get("callback") == "models")
     assert failed["kind"] == "host_error"
     assert failed["task"]["kind"] == "pi.generation"
-    assert await live(harness, root) == {}
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     await harness.close(context)
 
 
@@ -789,8 +800,14 @@ async def test_faults_a_run_task_settling_its_inputs_and_converting_the_committe
     assert entries[1]["model"][0]["role"] == "assistant"
     assert entries[1]["model"][0]["stopReason"] == "aborted"
     assert text_of(entries[1]["model"][0]) == "partial"
-    assert await live(harness, root) == {}
     tasks = await root.commit(lambda tx: tx.scan_tasks({"conversationId": root.id}, 10), context)
+    only_failure(
+        await live(harness, root),
+        tasks["items"][0]["id"],
+        [submission.id],
+        "faulted",
+        "non-JSON function",
+    )
     assert tasks["items"][0]["state"]["status"] == "terminal"
     assert tasks["items"][0]["state"]["outcome"]["status"] == "faulted"
     await harness.close(context)
@@ -845,7 +862,15 @@ async def test_orphans_a_blocked_run_task_with_full_run_cleanup() -> None:
     submission = await harness.submission(ids["submissionId"], context)
     assert (await submission.status(context))["status"] == "unanswered"
     assert (await submission.status(context))["reason"] == "task_too_old"
-    assert await live(harness, root) == {}
+    # A run started before `first` was recorded keeps no `runFailure.first`.
+    only_failure(
+        await live(harness, root),
+        ids["taskId"],
+        [ids["submissionId"]],
+        "orphaned",
+        "task_too_old",
+        with_first=False,
+    )
     await harness.close(context)
 
 

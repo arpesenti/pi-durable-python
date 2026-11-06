@@ -17,17 +17,88 @@ from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonValue
 from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
-from ..types import SubmissionSettlement, TaskRecord
+from ..types import SubmissionSettlement, TaskRecord, UnansweredSubmissionSettlement
 from .types import CompactionReason, ToolDiagnostic
 
+RunFailureReason = Literal[
+    "model_error",
+    "no_model",
+    "aborted",
+    "reset",
+    "faulted",
+    "orphaned",
+    "interrupted",
+    "restart_limit",
+    "nothing_to_answer",
+    "turn_limit",
+]
+"""Why a run ended without an answer (spec section 8.2).
 
-class RunState(TypedDict):
+``model_error``: the response failed after any retries, or the compaction a request needed failed.
+``no_model``: no model is configured, or the configured one is not available. ``aborted``: the run
+was aborted; ``detail`` says when its abort handler was cut off ``restart_limit`` times and did not
+finish. ``reset``: a queued reset started a new context at the post-tools boundary. ``faulted``: the
+run's task threw where it cannot recover, or storage rejected its commit. ``orphaned``: its task was
+aborted while no registered definition could take it. ``interrupted``: the host stopped while the
+model was answering, more often than ``retry`` retries. ``restart_limit``: the generation was cut off
+``restart_limit`` times in a row. ``nothing_to_answer``: the context did not end in a user message or
+tool results, so no request was sent. ``turn_limit``: a tool round reached the conversation's
+``max_turns``; a continue resumes on its results.
+"""
+
+
+class RunFailure(TypedDict, total=False):
+    """The newest run that ended without an answer."""
+
+    taskId: TaskId
+    """The task that ended the run: the run's task at its end."""
+    inputs: list[SubmissionId]
+    """The run's inputs, settled ``unanswered``."""
+    reason: RunFailureReason
+    detail: str
+    """``model_error``: the error text; ``no_model``: which model is missing; ``faulted``: the error
+    message; ``orphaned``: why the task could not run; ``interrupted`` and ``restart_limit``: what was
+    cut off, and how often; ``turn_limit``: the tool rounds the run took."""
+    first: EntryId
+    """The failed run's ``run.first``, so a continue's ``afterRun`` hooks see its history too."""
+
+
+class RunState(TypedDict, total=False):
     """The task that settles the run's inputs and those inputs; present exactly while busy."""
 
     taskId: TaskId
     inputs: list[SubmissionId]
     turns: int
     """Tool rounds this run has taken; the count a turn limit bounds, and that a stored run starts at 0."""
+    first: NotRequired[EntryId]
+    """The run's first entry: the first one the boundary that started it placed, a continue's the
+    failed run's it continues; otherwise its first tool-calling answer. A run started before it was
+    recorded may lack it; ``afterRun`` hooks then get the answer as the first entry."""
+    afterRun: NotRequired[dict[str, Any]]
+    """Present once the run answered and its generation waits for the tasks ``afterRun`` hooks asked
+    for, listed once created: queued items stay queued until they are terminal, and the run then ends
+    without a failure."""
+
+
+class RunEndDone(TypedDict):
+    """The run answered."""
+
+    status: Literal["done"]
+    answer: EntryId
+
+
+class RunEndUnanswered(TypedDict, total=False):
+    """The run ended without an answer, settling its inputs ``unanswered`` and recording why."""
+
+    status: Literal["unanswered"]
+    reason: RunFailureReason
+    detail: str
+    settlement: NotRequired[SubmissionSettlement]
+    """The inputs' settlement; default ``unanswered`` with ``reason`` and ``detail``."""
+
+
+RunEnd = RunEndDone | RunEndUnanswered
+"""How a run ends."""
 
 
 class SlotProgress(TypedDict, total=False):
@@ -102,6 +173,10 @@ class LiveState(TypedDict, total=False):
     nestedTools: list[NestedToolSlot]
     compactions: list[CompactionStatus]
     compactionFailure: CompactionFailure
+    runFailure: RunFailure
+    """Why the newest run ended without an answer, so a client can show it after the run ended. Set in
+    the commit that ends the run; removed when a later commit starts a run. A run started in the same
+    commit, by ``afterFailedRun: "continue"`` or after a reset, keeps it."""
 
 
 def _checkpoint_when(value: dict[str, Any], _ops: Any, _info: Any) -> bool:
@@ -175,13 +250,14 @@ async def start_generation(
     live: Any,
     inputs: list[SubmissionId],
     registry: Any,
+    first: EntryId | None = None,
 ) -> None:
     """Create the registry's generation task and give it run control of ``inputs``."""
 
     task = registry.task(GENERATION_TASK_NAME)
     if task is None:
         raise RuntimeError("Registry lacks the pi.generation task")
-    await start_run(tx, conversation_id, live, inputs, task)
+    await start_run(tx, conversation_id, live, inputs, task, first)
 
 
 async def start_run(
@@ -190,29 +266,76 @@ async def start_run(
     live: DocumentDraft,
     inputs: list[SubmissionId],
     task: Any,
+    first: EntryId | None = None,
+    *,
+    keep_failure: bool = False,
 ) -> None:
-    """Create the generation task and give it run control of ``inputs``."""
+    """Create the generation task and give it run control of ``inputs``.
+
+    ``first`` is the run's first entry, ``LiveRun.first``: the first entry the boundary that starts it
+    placed, or a continue's the failed run's. The run failure is removed unless ``keep_failure``: a run
+    started in the commit that ended the failed one -- the queue's next run under
+    ``afterFailedRun: "continue"``, or the run a reset starts -- keeps its failure, so it is shown
+    until a later run starts.
+    """
 
     task_id = await tx.create_task(
         task,
         {},
         {"ownership": {"kind": "conversation"}, "conversationId": conversation_id},
     )
-    live["run"] = {"taskId": task_id, "inputs": list(inputs), "turns": 0}
+    run: RunState = {"taskId": task_id, "inputs": list(inputs), "turns": 0}
+    if first is not None:
+        run["first"] = first
+    live["run"] = run
+    if not keep_failure and "runFailure" in live:
+        del live["runFailure"]
+
+
+def _unanswered_settlement(reason: RunFailureReason, detail: str | None) -> UnansweredSubmissionSettlement:
+    """The default settlement of a run's inputs: ``unanswered`` with the run's reason and detail."""
+
+    settlement: UnansweredSubmissionSettlement = {"status": "unanswered", "reason": reason}
+    if detail is not None:
+        settlement["detail"] = detail
+    return settlement
 
 
 def end_run(
     tx: Transaction,
     live: DocumentDraft,
     task_id: TaskId,
-    settlement: SubmissionSettlement,
+    end: RunEnd,
 ) -> None:
-    """End the run owned by ``task_id``: settle its inputs and remove run control."""
+    """End the run owned by ``task_id``: settle its inputs, remove run control, and record why.
+
+    Without an answer the run's reason stays on the live document as ``runFailure``, and the inputs
+    settle ``unanswered`` with that reason unless ``end`` carries its own ``settlement``. A run that
+    answered already, and runs only its ``afterRun`` tasks, records no failure, however it ends. Always
+    removes ``generation``, ``tools`` and ``nestedTools``, whose presentation belongs to the ending run.
+    """
 
     run = live.get("run")
     if run is not None and run["taskId"] == task_id:
-        for id in run["inputs"]:
-            tx.settle_submission(cast(SubmissionId, id), settlement)
+        inputs = list(run["inputs"])
+        first = run.get("first")
+        if end["status"] == "done":
+            for id in inputs:
+                tx.settle_submission(cast(SubmissionId, id), {"status": "done", "answer": end["answer"]})
+        elif run.get("afterRun") is None:
+            reason = end["reason"]
+            detail = end.get("detail")
+            settlement: SubmissionSettlement = end.get("settlement") or _unanswered_settlement(
+                reason, detail
+            )
+            for submitted in inputs:
+                tx.settle_submission(submitted, settlement)
+            failure: RunFailure = {"taskId": task_id, "inputs": inputs, "reason": reason}
+            if detail is not None:
+                failure["detail"] = detail
+            if first is not None:
+                failure["first"] = first
+            live["runFailure"] = failure
         del live["run"]
     for key in ("generation", "tools", "nestedTools"):
         if key in live:
@@ -379,7 +502,12 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
         tx,
         live,
         record["id"],
-        {"status": "unanswered", "reason": outcome.get("reason", "aborted")},
+        {
+            "status": "unanswered",
+            "reason": "orphaned",
+            "detail": str(outcome.get("reason", "")),
+            "settlement": {"status": "unanswered", "reason": outcome.get("reason", "aborted")},
+        },
     )
 
 
@@ -393,6 +521,11 @@ __all__ = [
     "NestedToolSlot",
     "NestedToolSummary",
     "RUN_TASK_KINDS",
+    "RunEnd",
+    "RunEndDone",
+    "RunEndUnanswered",
+    "RunFailure",
+    "RunFailureReason",
     "RunState",
     "TOOL_TASK_KIND",
     "ToolSlot",

@@ -1078,13 +1078,6 @@ async def test_never_starts_phase_one_when_the_abort_lands_while_reservation_set
     await opened["harness"].close(context)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "awaits the region-recorded `task:<id>` decision re-read (PARITY 5.4, #48): the fault's step "
-        "must gate behind the abort mark the same call admitted, which upstream's #region records"
-    ),
-    strict=False,
-)
 async def test_abort_mark_wins_over_a_racing_fault() -> None:
     storage = ControlledStorage()
     state: dict[str, Any] = {}

@@ -310,6 +310,8 @@ class AgentState(TypedDict, total=False):
     modelTools: list[str] | dict[str, list[str]]
     instructions: str
     cwd: str
+    maxTurns: int
+    """Tool rounds one run takes at most (``pi.live.run.turns``); unset, no limit."""
 
 
 class AgentChange(TypedDict, total=False):
@@ -322,6 +324,8 @@ class AgentChange(TypedDict, total=False):
     modelTools: Any
     instructions: str | None
     cwd: str | None
+    maxTurns: int | None
+    """``configure()`` raises unless it is an integer ``1`` or more (or ``None``)."""
 
 
 @dataclass(slots=True)
@@ -337,6 +341,9 @@ class Agent:
     sections: Sequence[PromptSection] = ()
     instructions: str | None = None
     cwd: str | None = None
+    max_turns: int | None = None
+    """Tool rounds one run takes at most: the round that reaches it runs its tools, then the run ends
+    ``unanswered`` with ``turn_limit``. Task-owned children and forks inherit it."""
 
 
 @dataclass(frozen=True, slots=True)

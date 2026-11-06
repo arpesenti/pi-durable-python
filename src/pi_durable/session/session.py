@@ -757,13 +757,21 @@ class SessionImpl:
             tx.discard()
             self._sweep_documents()
             raise ReadOnlySession("a commit with writes")
+        membership = self.membership_keys(tx)
+        if not isinstance(membership, list):
+            try:
+                membership = await cast(Awaitable[Sequence[str]], membership)
+            except BaseException:
+                tx.discard()
+                self._sweep_documents()
+                raise
         # Logical admission: the writer stores it, off the line, and the line goes on. Its keys join
         # the unpublished write set here, so a later job that touches one waits for its publication.
         part = self._writer.admit(
             PartSpec(
                 index=job.index,
                 writes=writes,
-                keys=tx.write_keys(),
+                keys=[*tx.write_keys(), *membership],
                 context=context,
                 publish=partial(self._adopt, tx, writes, context),
                 discard=tx.discard,
@@ -771,6 +779,14 @@ class SessionImpl:
         )
         self._sweep_documents()
         return _Ran(result, part.outcome)
+
+    def membership_keys(self, tx: Transaction) -> Sequence[str] | Awaitable[Sequence[str]]:
+        """Keys a commit writes besides its records' (:meth:`Transaction.write_keys`), at its admission,
+        on the line: a Harness adds the ownership memberships its task changes write. A plain Session
+        adds none.
+        """
+
+        return []
 
     def _adopt(
         self,

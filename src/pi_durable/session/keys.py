@@ -3,9 +3,10 @@
 A job reads through :class:`GatedStorage`, which waits at the first read of a key an admitted,
 unpublished commit wrote; the keys a commit writes come from its own settles
 (:func:`table_keys` for the tables, :meth:`~pi_durable.session.transaction.Transaction.write_keys`
-for documents). The scheduler's ownership keys -- the live work below an ownership node, the
-ownerless roots, and the cancellation intent set (group-commit document §4.2) -- are not here:
-the scheduler decides in recorded regions only once it does (#48), so nothing records them yet.
+for documents) and the scheduler's ownership keys (group-commit document §4.2): the live work
+below an ownership node (:func:`owned_key`), the ownerless conversations global idle walks from
+(:data:`ROOTS_KEY`), and the cancellation intent set (:data:`INTENT_KEY`). A scheduler decision
+region records the keys it reads and waits at the ones an admitted commit has not published yet.
 """
 
 from __future__ import annotations
@@ -84,6 +85,24 @@ def incarnation_key(id: DocumentId) -> str:  # noqa: A002 - the record's own ide
     """A document incarnation, for reads by its ID."""
 
     return f"docid:{id}"
+
+
+def owned_key(node: Any) -> str:
+    """A node of the scheduler's ownership tree (a task ID, or ``c<conversation ID>``).
+
+    Written by task creation and by a task becoming terminal, for every node from the task's parent
+    up to and including the nearest live task or the root conversation; read by every walk that
+    expands the node.
+    """
+
+    return f"owned:{node}"
+
+
+#: The ownerless conversations with live work below them, which global idle walks from.
+ROOTS_KEY = "roots"
+
+#: The live tasks with cancellation intent: abort marks, and held outcomes other than ``completed``.
+INTENT_KEY = "intent"
 
 
 def scope_key(scope: DocumentScope) -> str:
@@ -284,7 +303,10 @@ class GatedStorage:
 __all__ = [
     "ALL_KEYS",
     "GatedStorage",
+    "INTENT_KEY",
+    "ROOTS_KEY",
     "append_key",
+    "owned_key",
     "conversation_key",
     "document_key",
     "entry_key",

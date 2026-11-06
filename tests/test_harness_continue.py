@@ -1,22 +1,16 @@
 """Translated upstream ``harness-continue`` cases: a run with no new user message.
 
-Upstream ``test/harness-continue.test.ts`` holds 13 cases: 7 are translated here, 1 is excluded, and
-5 are deferred whole, with one case deferred in part.
+Upstream ``test/harness-continue.test.ts`` holds 13 cases: 12 are translated here and 1 is excluded.
 
 Excluded, telemetry-only (ADR 0002 keeps telemetry out of the port):
 "starts a root trace linked to its caller, as an input does".
 
-Deferred to #48, which owns ``RunFailure``, the ``nothing_to_answer`` run-end decision, and
-``afterRun`` run-end tasks; each needs a run that ends without a request:
-"ends without a request when there is nothing to answer",
-"does not continue a text answer cut off at its output limit",
-"answers a run interrupted by a host that died while the model answered",
-"places a reset a failed run kept, and finds nothing to answer in the context it starts",
-"starts the inputs queued behind a continue with nothing to answer under afterFailedRun continue",
-and, inside "answers a run that failed, without a new user message", the two assertions on
-``pi.live.runFailure``. The ticket's rule that a wait on a submission resolves at the answer while
-run-end tasks are still running waits on those tasks too: a port with no ``afterRun`` tasks has no
-run that is still ending after its answer, so #48 asserts it.
+One translation is narrower than upstream by the port's own gap: "answers a run interrupted by a host
+that died while the model answered" leaves the cut-off attempt on the record with ``restarts`` set,
+because this port's Session layer does not yet charge a re-adopted attempt the way upstream does when
+its host dies. The rule under test - the generation's own, that an in-flight attempt the host stopped
+is a failed attempt under ``settings.retry`` and ends the run ``interrupted`` - is asserted as upstream
+asserts it.
 """
 
 from __future__ import annotations
@@ -27,19 +21,24 @@ import pytest
 from chat_support import (
     all_entries,
     assistant_message,
+    captured_partial,
     chat_setup,
+    failing_once,
     faux_text,
     faux_tool_call,
+    hang_after_partial,
     open_chat,
     text_of,
     unanswered,
+    usage,
 )
-from session_support import context
+from session_support import ControlledStorage, context
 from task_support import aborted, deferred, eventually
 from tool_support import add_tool, tool
 
-from pi_durable import ConversationBusy, LiveDoc, MemoryStorage, UserEntry, configure
+from pi_durable import ConversationBusy, InboxDoc, LiveDoc, MemoryStorage, UserEntry, configure
 from pi_durable.harness.types import SettledSubmissionRecord
+from pi_durable.testing import commit_writes
 
 failure = assistant_message([], stop_reason="error", error_message="Invalid request")
 
@@ -88,7 +87,136 @@ async def test_answers_a_run_that_failed_without_a_new_user_message() -> None:
     # The failed input stays unanswered; no user entry was added.
     assert (await first.status(context))["status"] == "unanswered"
     assert await user_entry_count(root) == 1
-    # The `pi.live.runFailure` assertions come with #48.
+    # The failed run's reason was on the live document until this run answered.
+    state = await harness.snapshot(LiveDoc, root.id, context)
+    assert (state or {}).get("runFailure") is None
+    await harness.close(context)
+
+
+async def test_ends_without_a_request_when_there_is_nothing_to_answer() -> None:
+    setup = chat_setup()
+    setup.faux.set_responses([assistant_message("answered")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    empty = await (await root.submit({"type": "continue"}, context)).wait(context)
+    assert empty["status"] == "unanswered" and empty["reason"] == "nothing_to_answer"
+    await (await root.submit({"type": "input", "content": "hi"}, context)).wait(context)
+    calls = setup.faux.call_count
+    # A context ending in an answer has nothing to continue.
+    after = await (await root.submit({"type": "continue"}, context)).wait(context)
+    assert after["status"] == "unanswered" and after["reason"] == "nothing_to_answer"
+    assert setup.faux.call_count == calls
+    state = await harness.snapshot(LiveDoc, root.id, context)
+    assert (state or {})["runFailure"]["reason"] == "nothing_to_answer"
+    await harness.close(context)
+
+
+async def test_does_not_continue_a_text_answer_cut_off_at_its_output_limit() -> None:
+    setup = chat_setup()
+    setup.faux.set_responses([assistant_message([faux_text("cut")], stop_reason="length")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "write a lot"}, context)).wait(context)
+    settled = await (await root.submit({"type": "continue"}, context)).wait(context)
+    assert settled["status"] == "unanswered" and settled["reason"] == "nothing_to_answer"
+    assert setup.faux.call_count == 1
+    await harness.close(context)
+
+
+async def test_places_a_reset_a_failed_run_kept_and_finds_nothing_to_answer() -> None:
+    """Upstream ``harness-continue.test.ts``: places a reset a failed run kept, and finds nothing to
+    answer in the context it starts."""
+
+    setup = chat_setup()
+    failing = failing_once()
+    setup.faux.set_responses([failing["step"]])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    first = await root.submit({"type": "input", "content": "first"}, context)
+    await failing["reached"].promise
+    await root.reset(None, context)
+    failing["gate"].resolve()
+    settled = await first.wait(context)
+    assert settled["status"] == "unanswered" and settled["reason"] == "model_error"
+    inbox = await harness.snapshot(InboxDoc, root.id, context)
+    assert len((inbox or {})["items"]) == 1
+
+    resumed = await (await root.submit({"type": "continue"}, context)).wait(context)
+    assert resumed["status"] == "unanswered" and resumed["reason"] == "nothing_to_answer"
+    inbox = await harness.snapshot(InboxDoc, root.id, context)
+    assert (inbox or {}).get("items", []) == []
+    messages = [m for m in (await root.context(context))["messages"] if m["role"] != "system"]
+    assert messages == []
+    assert setup.faux.call_count == 1
+    await harness.close(context)
+
+
+async def test_starts_inputs_queued_behind_a_continue_with_nothing_to_answer() -> None:
+    """Upstream ``harness-continue.test.ts``: starts the inputs queued behind a continue with nothing
+    to answer under ``afterFailedRun: "continue"``."""
+
+    setup = chat_setup()
+    setup.settings["after_failed_run"] = "continue"
+    setup.faux.set_responses([assistant_message("answered"), assistant_message("second answered")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "one"}, context)).wait(context)
+    resumed = await root.submit({"type": "continue"}, context)
+    queued = await root.submit({"type": "input", "content": "two", "whenBusy": "followUp"}, context)
+    assert (await queued.status(context))["status"] == "queued"
+    record = await resumed.wait(context)
+    assert record["status"] == "unanswered" and record["reason"] == "nothing_to_answer"
+    settled = await queued.wait(context)
+    assert await answer_text(root, settled) == "second answered"
+    await harness.close(context)
+
+
+async def generation_id(harness: Any, conversation_id: Any) -> Any:
+    """The id of the generation task the conversation is running."""
+
+    page = await harness.commit(
+        lambda tx: tx.scan_tasks({"kind": "pi.generation"}, 100),
+        context,
+    )
+    owned = [record for record in page["items"] if record["conversationId"] == conversation_id]
+    assert len(owned) == 1, f"expected one generation task, got {owned}"
+    return owned[0]["id"]
+
+
+async def test_answers_a_run_interrupted_by_a_host_that_died_while_the_model_answered() -> None:
+    # The port's Session layer does not yet charge a re-adopted attempt, so the record is left as a
+    # dead host left it with ``restarts`` set, the way the recovery suite leaves what an earlier version
+    # stored; the rule under test is the generation's own.
+    storage = ControlledStorage()
+    setup = chat_setup()
+    setup.settings["progress"] = {"partial_interval_ms": 0}
+    setup.faux.set_responses([hang_after_partial("z" * 400, usage(input=3))])
+    opened = await open_chat(storage, setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    submission = await root.submit({"type": "input", "content": "hi"}, context)
+    await captured_partial(harness, root.id)
+    task_id = await generation_id(harness, root.id)
+    # The host dies with the request in flight, leaving its committed partial.
+    await harness.close(context)
+
+    left = dict(cast(Any, await storage.reopen().task(task_id, context)))
+    left["restarts"] = 1
+    await commit_writes(storage.reopen(), [{"type": "task", "value": cast(Any, left)}], context)
+
+    second = chat_setup()
+    second.settings["retry"] = {"enabled": False}
+    seen: list[list[str]] = []
+    second.faux.set_responses([answering("after the crash", seen)])
+    opened = await open_chat(storage.reopen(), second)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    interrupted = await cast(Any, await harness.submission(submission.id, context)).wait(context)
+    assert interrupted["status"] == "unanswered" and interrupted["reason"] == "interrupted"
+    settled = await (await root.submit({"type": "continue"}, context)).wait(context)
+    assert await answer_text(root, settled) == "after the crash"
+    # The aborted partial is not model context: the request ends in the user message.
+    assert seen[-1][-1] == "user"
     await harness.close(context)
 
 

@@ -422,7 +422,9 @@ async def test_a_display_only_write_queued_behind_a_reset_runs_no_boundary() -> 
         context,
     )
     assert (await note.status(context))["status"] == "queued"
-    assert await live(harness, root) == {}
+    # A display-only write starts no run: idleness is the run member alone. (The failed run's
+    # ``runFailure`` stays, as spec section 8.2 requires.)
+    assert "run" not in await live(harness, root)
     assert len(await all_entries(root)) == before
     items = await inbox(harness, root)
     assert [item["mode"] for item in items] == ["followUp", "write", "write"]
@@ -486,7 +488,9 @@ async def test_a_display_only_write_after_a_failed_run_neither_restarts_work_nor
         context,
     )
     assert (await note.status(context))["status"] == "done"
-    assert await live(harness, root) == {}
+    # It neither restarts the failed work nor places the inbox: no run was started. The failed run's
+    # ``runFailure`` stays, as spec section 8.2 requires.
+    assert "run" not in await live(harness, root)
     assert [(item["id"], item["mode"]) for item in await inbox(harness, root)] == [
         (follow_up.id, "followUp")
     ]

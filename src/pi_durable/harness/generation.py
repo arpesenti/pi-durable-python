@@ -31,7 +31,7 @@ from ..types import EntryDraft, MessageRecord, TaskRecord
 from .agent import add_tools, section_extension
 from .compaction import compaction_policy, create_compaction, estimate_context, select_cut
 from .inbox import Boundary, QueueModes, apply_boundary, prepare_boundary, withdraw_queued_inputs
-from .live import LiveDoc, end_run, start_run
+from .live import LiveDoc, RunEndUnanswered, end_run, start_run
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
@@ -139,6 +139,13 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
             await fail_model_error(runtime, compaction_failure(outcome), context)
             return
     view = await runtime.context(conversation_id, context)
+    # The model owes an answer only to a context ending in a user message or tool results; system
+    # messages say nothing it answers. Otherwise, as for a continue after an answer or in an empty
+    # conversation, the run ends before any request.
+    last = next((message for message in reversed(view["messages"]) if message["role"] != "system"), None)
+    if last is None or last["role"] not in ("user", "toolResult"):
+        await fail_nothing_to_answer(runtime, context)
+        return
     shown = replay_sections(view["messages"])
     env: Any = None
     try:
@@ -226,6 +233,11 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
 async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     checkpoint = task_checkpoint(task)
+    # The host stopped while this request was in flight: a failed attempt under the retry policy, not
+    # a resend (spec section 8.3).
+    if task.get("restarts") is not None:
+        await interrupted(runtime, checkpoint, context)
+        return
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     ref = cast(ModelRef, checkpoint["model"])
@@ -301,6 +313,12 @@ async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     """After the sleep until ``pollAt``; a run before it sleeps again (spec section 8.3)."""
 
     checkpoint = task_checkpoint(task)
+    # The host stopped while the poll's fetch was in flight: a failed attempt, as for a request. Checked
+    # before the time, which may have moved backwards on a replacement host; a sleeping poll is not cut
+    # off.
+    if task.get("restarts") is not None:
+        await interrupted(runtime, checkpoint, context)
+        return
     poll_at = int(checkpoint["pollAt"])
     if poll_at > runtime.now():
         await runtime.sleep_until(poll_at, checkpoint, context)
@@ -740,7 +758,7 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             {"status": "done", "answer": entry["id"]},
         )
         if placed.users:
-            await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
+            await start_run(tx, conversation_id, live, placed.users, task_for(runtime), placed.first)
         return result
 
     await runtime.commit(finish, context)
@@ -852,6 +870,9 @@ async def start_tool_round(
         if run is not None and run["taskId"] == runtime.task_id:
             # A tool round is one turn of the run.
             run["turns"] += 1
+            # A run its boundary started without placing anything, as a continue after an answer, begins here.
+            if run.get("first") is None:
+                run["first"] = entry["id"]
         checkpoint_value: dict[str, Any] = {
             "phase": "tools",
             "assistant": entry["id"],
@@ -910,6 +931,9 @@ async def finish_tool_round(
     for control in controls.values():
         if control is not None and control.get("handoff") is not None:
             handoff = str(control["handoff"])
+    # Read from the phase's agent, as every agent field; a ``configure()`` during the round
+    # applies at its end.
+    max_turns = (await runtime.agent(context)).max_turns
 
     async def finish(tx: Transaction) -> dict[str, Any]:
         boundary = await prepare_boundary(
@@ -921,38 +945,74 @@ async def finish_tool_round(
             await add_tools(tx, conversation_id, added)
         live = await tx.doc(LiveDoc, conversation_id)
         now = runtime.now()
-        if terminate or handoff is not None:
-            if handoff is not None:
-                message = {"role": "user", "content": handoff, "timestamp": now}
-                entry = await tx.append_entry(
-                    ResetEntry,
-                    conversation_id,
-                    cast(EntryDraft, {"head": "self", "model": [message]}),
-                )
-                boundary.head = entry["id"]
+        if handoff is not None:
+            message = {"role": "user", "content": handoff, "timestamp": now}
+            entry = await tx.append_entry(
+                ResetEntry,
+                conversation_id,
+                cast(EntryDraft, {"head": "self", "model": [message]}),
+            )
+            boundary.head = entry["id"]
+        if terminate:
             placed = await apply_boundary(tx, boundary, "final", now)
             end_run(tx, live, runtime.task_id, {"status": "done", "answer": assistant})
             if placed.users:
-                await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
-        else:
-            placed = await apply_boundary(tx, boundary, "postTools", now)
-            if placed.reset:
-                # The queued reset cut the run's context before an answer.
-                end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "reset"})
-                if placed.users:
-                    await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
-            else:
-                for key in ("tools", "nestedTools"):
-                    if key in live:
-                        del live[key]
-                run = live.get("run")
-                if run is not None and run["taskId"] == runtime.task_id:
-                    run["inputs"].extend(placed.users)
-                hand_over(
+                await start_run(tx, conversation_id, live, placed.users, task_for(runtime), placed.first)
+            return {
+                "status": "terminal",
+                "outcome": {"status": "completed", "result": {"entryId": assistant}},
+            }
+        run = live.get("run")
+        turns = run["turns"] if run is not None and run["taskId"] == runtime.task_id else 0
+        if max_turns is not None and turns >= max_turns:
+            # The turn limit ends the run like a failure: ``after_failed_run`` decides the queued
+            # items, and a continue resumes it on the round's results. The table was read for the
+            # boundary already, before any write.
+            policy = cast(AfterFailedRun, runtime.settings.after_failed_run)
+            failure: _Failure = {"policy": policy}
+            if policy == "continue":
+                failure["boundary"] = boundary
+            await _end_failed_run(
+                tx,
+                runtime,
+                live,
+                failure,
+                {
+                    "status": "unanswered",
+                    "reason": "turn_limit",
+                    "detail": "1 turn" if turns == 1 else f"{turns} turns",
+                },
+            )
+            return {
+                "status": "terminal",
+                "outcome": {"status": "completed", "result": {"entryId": assistant}},
+            }
+        placed = await apply_boundary(tx, boundary, "postTools", now)
+        if placed.reset:
+            # The queued reset cut the run's context before an answer.
+            end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "reset"})
+            if placed.users:
+                await start_run(
+                    tx,
+                    conversation_id,
                     live,
-                    runtime.task_id,
-                    await create_generation(tx, conversation_id, task_for(runtime)),
+                    placed.users,
+                    task_for(runtime),
+                    placed.first,
+                    keep_failure=True,
                 )
+        else:
+            for key in ("tools", "nestedTools"):
+                if key in live:
+                    del live[key]
+            following = live.get("run")
+            if following is not None and following["taskId"] == runtime.task_id:
+                following["inputs"].extend(placed.users)
+            hand_over(
+                live,
+                runtime.task_id,
+                await create_generation(tx, conversation_id, task_for(runtime)),
+            )
         return {
             "status": "terminal",
             "outcome": {"status": "completed", "result": {"entryId": assistant}},
@@ -977,6 +1037,100 @@ class _Failure(TypedDict):
     boundary: NotRequired[Boundary]
 
 
+async def fail_nothing_to_answer(runtime: Any, context: Context) -> None:
+    """End the run without a request: its context has nothing the model would answer."""
+
+    message = "The conversation has nothing to answer"
+    conversation_id = runtime.conversation_id
+
+    async def fail(tx: Transaction) -> dict[str, Any]:
+        failure = await _prepare_failure(tx, runtime)
+        live = await tx.doc(LiveDoc, conversation_id)
+        await _end_failed_run(
+            tx, runtime, live, failure, {"status": "unanswered", "reason": "nothing_to_answer"}
+        )
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": message, "detail": {"reason": "nothing_to_answer"}},
+            },
+        }
+
+    await runtime.commit(fail, context)
+
+
+async def interrupted(
+    runtime: Any, checkpoint: Mapping[str, Any], context: Context
+) -> None:
+    """End the in-flight attempt the host stopped as a failed one under ``settings.retry`` (spec §8.3).
+
+    The committed partial becomes an aborted entry; the next attempt follows the backoff, a poll's by
+    polling its deferred response again, and with no retry left the run ends ``interrupted``.
+    """
+
+    attempt = int(checkpoint["attempt"])
+    compacted = checkpoint.get("compacted")
+    policy = runtime.settings.retry
+    retry = bool(policy.get("enabled", True)) and attempt <= int(policy.get("max_retries", 3))
+    until = runtime.now() + retry_delay_ms(policy, attempt) if retry else 0
+    polled = checkpoint if checkpoint["phase"] == "poll" else None
+    if polled is None:
+        text = f"The host stopped while the model was answering, on attempt {attempt}"
+    else:
+        text = f"The host stopped while the deferred answer was fetched, on attempt {attempt}"
+    # A run that ends does not leave the provider's job running.
+    if not retry and polled is not None:
+        ref = cast(ModelRef, polled["model"])
+        model = runtime.models.get_model(ref["provider"], ref["modelId"])
+        if model is not None:
+            try:
+                await runtime.models.cancel_deferred(
+                    model, cast(JsonObject, polled["handle"]), {"signal": runtime.signal}
+                )
+            except BaseException as error:
+                runtime.report(error, {"kind": "host", "callback": "models"})
+    conversation_id = runtime.conversation_id
+
+    async def apply(tx: Transaction) -> dict[str, Any]:
+        # Read before the first table write; only a failure uses it.
+        failure = None if retry else await _prepare_failure(tx, runtime)
+        live = await tx.doc(LiveDoc, conversation_id)
+        await convert_partial(tx, live, conversation_id)
+        if failure is None:
+            live["generation"] = {"attempt": attempt, "retry": {"at": until, "error": text}}
+            following: dict[str, Any] = {
+                "phase": "retry",
+                "attempt": attempt,
+                **_compact_fields(compacted),
+                "until": until,
+            }
+            if polled is not None:
+                following["poll"] = {
+                    "model": polled["model"],
+                    **({"thinkingLevel": polled["thinkingLevel"]} if "thinkingLevel" in polled else {}),
+                    "cutoff": polled["cutoff"],
+                    "handle": polled["handle"],
+                }
+            return {"status": "sleeping", "checkpoint": following, "until": until}
+        await _end_failed_run(
+            tx,
+            runtime,
+            live,
+            failure,
+            {"status": "unanswered", "reason": "interrupted", "detail": text},
+        )
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": text, "detail": {"reason": "interrupted"}},
+            },
+        }
+
+    await runtime.commit(apply, context)
+
+
 async def _prepare_failure(tx: Transaction, runtime: Any) -> _Failure:
     settings = runtime.settings
     policy = cast(AfterFailedRun, settings.after_failed_run)
@@ -998,16 +1152,17 @@ async def _end_failed_run(
     runtime: Any,
     live: Any,
     failure: _Failure,
-    settlement: Any,
+    end: RunEndUnanswered,
 ) -> None:
     """End a failed run and do with the inputs queued behind it what ``after_failed_run`` says.
 
     ``keep`` leaves them queued, ``continue`` starts the next run with them, and ``withdraw`` settles
-    them ``unanswered`` with reason ``run_failed`` while queued writes stay (spec section 6).
+    them ``unanswered`` with reason ``run_failed`` while queued writes stay (spec section 6). The run a
+    ``continue`` starts keeps the failure: it was started in the commit that ended the failed one.
     """
 
     conversation_id = runtime.conversation_id
-    end_run(tx, live, runtime.task_id, settlement)
+    end_run(tx, live, runtime.task_id, end)
     if failure["policy"] == "withdraw":
         await withdraw_queued_inputs(tx, conversation_id, "run_failed")
     boundary = failure.get("boundary")
@@ -1015,7 +1170,9 @@ async def _end_failed_run(
         return
     placed = await apply_boundary(tx, boundary, "final", runtime.now())
     if placed.users:
-        await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
+        await start_run(
+            tx, conversation_id, live, placed.users, task_for(runtime), placed.first, keep_failure=True
+        )
 
 
 async def fail_model_error(runtime: Any, text: str, context: Context) -> None:
@@ -1054,7 +1211,16 @@ async def fail_no_model(runtime: Any, ref: ModelRef | None, context: Context) ->
         failure = await _prepare_failure(tx, runtime)
         live = await tx.doc(LiveDoc, conversation_id)
         await _end_failed_run(
-            tx, runtime, live, failure, {"status": "unanswered", "reason": "no_model"}
+            tx,
+            runtime,
+            live,
+            failure,
+            {
+                "status": "unanswered",
+                "reason": "no_model",
+                "detail": message,
+                "settlement": {"status": "unanswered", "reason": "no_model"},
+            },
         )
         return {
             "status": "terminal",

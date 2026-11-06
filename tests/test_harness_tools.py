@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 from session_support import context
+from submission_support import transcript
 from task_support import aborted
 from tool_support import (
     DONE,
@@ -1075,7 +1076,10 @@ async def test_records_a_results_usage_under_its_tool_and_on_the_message() -> No
     await result["harness"].close(context)
 
 
-async def test_a_round_handoff_appends_a_reset_entry_and_ends_the_run() -> None:
+async def test_continues_the_run_in_a_new_context_when_a_tool_requests_a_handoff() -> None:
+    # Upstream harness-inbox.test.ts:352. The reset precedes every queued item and the next
+    # generation answers in its context; the run's inputs settle with that answer, not with the
+    # tool-calling one (spec §7.3, "A round that also terminates ... ends the run as terminate").
     setup = chat_setup()
     add_tool(
         setup.registry,
@@ -1087,19 +1091,52 @@ async def test_a_round_handoff_appends_a_reset_entry_and_ends_the_run() -> None:
             },
         ),
     )
+    result = await run(setup, [calls(["handoff", {}, "c1"]), DONE])
+    assert result["status"] == "done"
+    entries = result["entries"]
+    assert transcript(entries) == [
+        "pi.user:go",
+        "pi.assistant",
+        "pi.tool-result",
+        "pi.reset:take over",
+        "pi.assistant:done",
+    ]
+    reset = next(entry for entry in entries if entry["kind"] == "pi.reset")
+    assert reset["head"] == reset["id"]
+    assert reset["model"][0]["content"] == "take over"
+    # The handoff continues the run: the next generation asks the model in the new context, whose
+    # model-visible history starts at the handoff text.
+    assert setup.faux.call_count == 2
+    asked = [f"{m['role']}:{m['content']}" for m in setup.faux.requests[1][0]["messages"]]
+    assert asked == ["system:", "user:take over"]
+    assert await result["harness"].snapshot(LiveDoc, result["root"].id, context) == {}
+    await result["harness"].close(context)
+
+
+async def test_ends_the_run_after_the_handoff_when_the_round_also_terminates() -> None:
+    # Upstream harness-inbox.test.ts:502: the reset is written, then the round ends as terminate
+    # does, settling the inputs with the tool-calling answer.
+    setup = chat_setup()
+    add_tool(
+        setup.registry,
+        tool(
+            "handoff",
+            lambda *_args: {
+                "output": [{"type": "text", "text": "bye"}],
+                "control": {"handoff": "take over", "terminate": True},
+            },
+        ),
+    )
     result = await run(setup, [calls(["handoff", {}, "c1"])])
     assert result["status"] == "done"
     entries = result["entries"]
-    assert [entry["kind"] for entry in entries] == [
-        "pi.user",
-        "pi.system",
+    assert transcript(entries) == [
+        "pi.user:go",
         "pi.assistant",
         "pi.tool-result",
-        "pi.reset",
+        "pi.reset:take over",
     ]
-    reset = entries[-1]
-    assert reset["head"] == reset["id"]
-    assert reset["model"][0]["content"] == "take over"
-    # The handoff ends the run: no successor generation asks the model again.
+    assert result["entries"][2]["id"]  # the tool-calling answer settles the input
     assert setup.faux.call_count == 1
+    assert await result["harness"].snapshot(LiveDoc, result["root"].id, context) == {}
     await result["harness"].close(context)

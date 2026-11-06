@@ -13,9 +13,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from session_support import context
+from session_support import Deferred, context
+from task_support import eventually
 
-from pi_durable import Harness, MemoryStorage
+from pi_durable import Harness, LiveDoc, MemoryStorage
 from pi_durable.context import AbortError
 from pi_durable.harness.registry import create_registry
 from pi_durable.harness.types import Registry
@@ -215,6 +216,91 @@ def unanswered() -> Step:
         return AssistantStream(events(), _never())
 
     return Step(build)
+
+
+def failing_once() -> dict[str, Any]:
+    """A response that fails for good once ``gate`` opens; ``reached`` settles when it was requested."""
+
+    gate: Deferred = Deferred()
+    reached: Deferred = Deferred()
+
+    async def step(_request: Any, _options: Any) -> dict[str, Any]:
+        reached.resolve()
+        await gate.promise
+        return assistant_message([], stop_reason="error", error_message="Invalid request")
+
+    return {"step": step, "gate": gate, "reached": reached}
+
+
+def hang_after_partial(text: str, spend: dict[str, Any] | None = None) -> Step:
+    """A response that commits one partial, then blocks until its attempt is interrupted.
+
+    The port's host-died idiom: a harness closed over this request leaves the attempt in flight, and
+    the reopened harness finds the attempt cut off with its committed partial.
+    """
+
+    def build(_request: dict[str, Any], options: dict[str, Any]) -> AssistantStream:
+        async def events() -> Any:
+            partial = assistant_message([faux_text(text)], usage=spend)
+            partial["stopReason"] = "pending"
+            yield {"type": "start", "partial": partial}
+            yield {"type": "text_delta", "partial": partial}
+            signal = options.get("signal")
+            if signal is not None:
+                await signal.wait()
+            raise AbortError(None)
+
+        never: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        return AssistantStream(events(), never)
+
+    return Step(build)
+
+
+async def live_state(harness: Any, conversation_id: Any) -> dict[str, Any]:
+    """``pi.live`` as a plain dict, empty when the conversation is idle."""
+
+    value = await harness.snapshot(LiveDoc, conversation_id, context)
+    return {} if value is None else dict(value)
+
+
+async def captured_partial(harness: Any, conversation_id: Any) -> dict[str, Any]:
+    """Wait until the in-flight attempt has committed a partial, and return ``pi.live`` then."""
+
+    seen: dict[str, Any] = {}
+
+    async def check() -> bool:
+        state = await live_state(harness, conversation_id)
+        if "message" not in (state.get("generation") or {}):
+            return False
+        seen["live"] = state
+        return True
+
+    await eventually(check)
+    return seen["live"]
+
+
+def unanswered_reached() -> dict[str, Any]:
+    """Upstream's ``chat-support.ts`` ``unanswered()``: the step, and ``reached`` once it was requested.
+
+    The port's ``unanswered()`` gives the step alone; cases that wait for the request to have been
+    made — upstream's ``await busy.reached`` — need the signal too.
+    """
+
+    reached: Deferred = Deferred()
+
+    def build(_request: dict[str, Any], options: dict[str, Any]) -> AssistantStream:
+        reached.resolve()
+
+        async def events() -> AsyncIterator[dict[str, Any]]:
+            signal = options.get("signal")
+            if signal is not None:
+                await signal.wait()
+            raise AbortError(getattr(signal, "reason", None))
+            yield  # pragma: no cover
+
+        return AssistantStream(events(), _never())
+
+    return {"step": Step(build), "reached": reached}
 
 
 class FauxModels:
@@ -464,10 +550,44 @@ def live_of(value: Mapping[str, Any] | None) -> dict[str, Any]:
     return dict(value or {})
 
 
+def only_failure(
+    value: Mapping[str, Any] | None,
+    task_id: Any,
+    inputs: list[Any],
+    reason: str,
+    detail: str | None = None,
+    with_first: bool = True,
+) -> None:
+    """Assert ``pi.live`` holds nothing but ``runFailure``, with the fields upstream asserts.
+
+    Every upstream case that ends a run without an answer asserts the whole live document with
+    ``toEqual({runFailure: ...})``, so the run's own presentation is gone and only the reason stays.
+    ``first`` is ``expect.any(Number)`` upstream; ``detail`` upstream matches with
+    ``stringContaining`` in some cases and exactly in others, so it matches as a fragment.
+    """
+
+    state = dict(value or {})
+    assert set(state) == {"runFailure"}, f"expected only runFailure, got {sorted(state)}"
+    record = dict(state["runFailure"])
+    expected: dict[str, Any] = {"taskId": task_id, "inputs": inputs, "reason": reason}
+    if with_first:
+        assert isinstance(record.pop("first", None), int), "runFailure.first is missing"
+    if detail is not None:
+        assert detail in str(record.pop("detail", "")), f"no detail matching {detail!r}"
+    assert record == expected, f"{record} != {expected}"
+
+
 __all__ = [
     "AssistantStream",
     "ChatSetup",
     "EntryRecord",
+    "live_of",
+    "live_state",
+    "captured_partial",
+    "failing_once",
+    "hang_after_partial",
+    "only_failure",
+    "unanswered_reached",
     "FauxModels",
     "MemoryStorage",
     "Step",

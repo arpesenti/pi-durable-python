@@ -392,7 +392,13 @@ async def _abort_requested(harness: Any, id: Any) -> bool:
     return record is not None and record.get("abortRequested") is True
 
 
-async def test_keeps_a_scope_busy_while_the_chain_of_new_work_below_a_forgotten_conversation_loads() -> None:
+async def test_loads_the_chain_of_new_work_below_a_forgotten_conversation_before_admitting_it() -> None:
+    """Upstream ``harness-scheduler-retention.test.ts`` :292.
+
+    The creating commit's own admission loads the chain, for the memberships it writes, so the commit
+    waits for that read; the scope stays busy afterwards, until the load of the new work ends.
+    """
+
     storage = ControlledStorage()
     opened = await open_retention(storage)
     harness, root = opened["harness"], opened["root"]
@@ -406,31 +412,34 @@ async def test_keeps_a_scope_busy_while_the_chain_of_new_work_below_a_forgotten_
     gate("b").resolve()
     await harness.wait_for_task(tree["b"], context)
 
-    # Hold the chain load's read of C: the second read once holding, after the creating commit's own.
-    read = storage.conversation
+    # Hold the read of B: the admission's membership walk of D reaches B through the forgotten C.
+    read = storage.task
     held = deferred()
     reached = deferred()
-    state = {"holding": False, "reads": 0}
+    state = {"holding": False}
 
-    async def held_conversation(id: Any, read_context: Any) -> Any:
-        if state["holding"] and id == tree["c"]:
-            state["reads"] += 1
-            if state["reads"] == 2:
-                reached.resolve()
-                await held.promise
+    async def held_task(id: Any, read_context: Any) -> Any:
+        if state["holding"] and id == tree["b"]:
+            reached.resolve()
+            await held.promise
         return await read(id, read_context)
 
-    storage.conversation = held_conversation  # type: ignore[method-assign, assignment]
+    storage.task = held_task  # type: ignore[method-assign, assignment]
     c = await harness.conversation(tree["c"], context)
     assert c is not None
     state["holding"] = True
-    await c.commit(
-        lambda tx: tx.create_task(Hold, {"name": "d"}, {"ownership": {"kind": "conversation"}}),
-        context,
+    committing = asyncio.ensure_future(
+        c.commit(
+            lambda tx: tx.create_task(Hold, {"name": "d"}, {"ownership": {"kind": "conversation"}}),
+            context,
+        )
     )
     await reached.promise
-    assert await settled(harness.wait_for_idle(context)) is False
+    # Its admission loads the chain, for the memberships it writes: the commit waits for the read.
+    assert await settled(committing) is False
     held.resolve()
+    await committing
+    assert await settled(harness.wait_for_idle(context)) is False
     gate("d").resolve()
     await harness.wait_for_idle(context)
     await harness.close(context)

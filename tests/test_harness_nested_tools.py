@@ -399,7 +399,9 @@ async def test_aborts_nested_calls_with_their_caller() -> None:
     assert child["state"]["outcome"] == {"status": "aborted", "result": {"kind": "nested"}}
     assert parent["state"]["outcome"]["status"] == "aborted"
     assert parent["state"]["outcome"]["result"]["kind"] == "model"
-    assert await harness.snapshot(LiveDoc, root.id, context) == {}
+    failed = await harness.snapshot(LiveDoc, root.id, context)
+    assert failed is not None and set(failed) == {"runFailure"}
+    assert failed["runFailure"]["reason"] == "aborted"
     await harness.close(context)
 
 

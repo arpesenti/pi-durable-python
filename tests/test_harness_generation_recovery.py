@@ -6,13 +6,13 @@ import asyncio
 from typing import Any, cast
 
 from chat_support import (
-    AssistantStream,
     ChatSetup,
-    Step,
     all_entries,
     assistant_message,
+    captured_partial,
     chat_setup,
-    faux_text,
+    hang_after_partial,
+    live_state,
     open_chat,
     text_of,
     usage,
@@ -22,38 +22,12 @@ from session_support import ControlledStorage, context, flush
 from task_support import aborted, eventually
 from tool_support import DONE, add_tool, calls, result_text, results, tool
 
-from pi_durable import GenerationTask, LiveDoc, UsageDoc
-from pi_durable.context import AbortError
+from pi_durable import GenerationTask, UsageDoc
 from pi_durable.testing import commit_writes
-
-
-def hang_after_partial(text: str, spend: dict[str, Any] | None = None) -> Step:
-    """A response that commits one partial, then blocks until its attempt is interrupted."""
-
-    def build(_request: dict[str, Any], options: dict[str, Any]) -> AssistantStream:
-        async def events() -> Any:
-            partial = assistant_message([faux_text(text)], usage=spend)
-            partial["stopReason"] = "pending"
-            yield {"type": "start", "partial": partial}
-            yield {"type": "text_delta", "partial": partial}
-            signal = options.get("signal")
-            if signal is not None:
-                await signal.wait()
-            raise AbortError(None)
-
-        never: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        return AssistantStream(events(), never)
-
-    return Step(build)
 
 
 async def open_again(storage: ControlledStorage, setup: ChatSetup) -> dict[str, Any]:
     return await open_chat(storage.reopen(), setup)
-
-
-async def live_state(harness: Any, conversation_id: int) -> dict[str, Any]:
-    value = await harness.snapshot(LiveDoc, conversation_id, context)
-    return {} if value is None else dict(value)
 
 
 async def generation_record(harness: Any, conversation_id: int) -> dict[str, Any] | None:
@@ -69,21 +43,6 @@ async def generation_record(harness: Any, conversation_id: int) -> dict[str, Any
     if not owned:
         return None
     return sorted(owned, key=lambda record: record["id"])[-1]
-
-
-async def capture_partial(harness: Any, conversation_id: int) -> dict[str, Any]:
-    seen: dict[str, Any] = {}
-
-    async def check() -> bool:
-        live = await live_state(harness, conversation_id)
-        generation = live.get("generation") or {}
-        if "message" not in generation:
-            return False
-        seen["live"] = live
-        return True
-
-    await eventually(check)
-    return seen["live"]
 
 
 async def usage_input(harness: Any, conversation_id: int) -> int:
@@ -102,7 +61,7 @@ async def test_resumes_an_interrupted_request_from_its_committed_partial() -> No
     harness, root = opened["harness"], opened["root"]
     harness.resume()
     submission = await root.submit({"type": "input", "content": "hi"}, context)
-    live = await capture_partial(harness, root.id)
+    live = await captured_partial(harness, root.id)
     assert [entry["kind"] for entry in await all_entries(root)] == ["pi.user", "pi.system"]
     assert live["run"]["inputs"] == [submission.id]
     await harness.close(context)
