@@ -18,6 +18,15 @@ Upstream's helpers arrive under the names this tree already uses for them: its `
 ``unanswered()`` does not, and its ``stored()`` -- a bare 50 ms wait for a deferred progress commit to
 reach Storage -- is replaced by waiting for that commit to be there, which is what the timer only
 hoped for.
+
+Still not run from upstream's file, named so the gap cannot be lost: "cancels the deferred response
+when a crash during its poll ends the run" and "charges an interrupted poll even when the clock moved
+backwards". Both need only this file's :func:`deferred_setup` and :func:`crash_while_polling` plus
+what is named after each: the first, ``retry`` switched off, so the run ends ``interrupted`` and
+``models.cancelDeferred()`` is called once; the second, a host clock the test moves backwards between
+the two hosts, so a poll that looks not due yet is still charged because its fetch was cut off. They
+belonged to #49, which landed this file and named neither; this file's poll charge now covers the
+``interrupted()`` branch they both lean on.
 """
 
 from __future__ import annotations
@@ -25,13 +34,14 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from chat_support import (
     ChatSetup,
+    FauxModels,
     all_entries,
     assistant_message,
     chat_setup,
@@ -44,7 +54,7 @@ from chat_support import (
     unanswered_reached,
 )
 from harness_support import add_section
-from session_support import context, eventually
+from session_support import context, document_changes, eventually, observe_commits
 from task_support import aborted, deferred
 from tool_support import add_tool, calls, tool
 
@@ -110,6 +120,125 @@ async def settled(harness: Any, id: SubmissionId) -> dict[str, Any]:
 
     submission = await harness.submission(id, context)
     return cast(dict[str, Any], await submission.wait(context))
+
+
+class _FirstFetchInFlight(FauxModels):
+    """The faux models with the first deferred fetch held in flight until its signal ends.
+
+    Upstream wraps the faux models in a Proxy for the one method; a subclass that keeps the setup's
+    own scripted state is this port's shape of the same thing, so ``call_count`` and
+    ``cancelled_deferred`` still read what the Harness actually did.
+    """
+
+    fetching: Any
+    fetches: int
+
+    def adopt(self, inner: FauxModels, fetching: Any) -> None:
+        """Take ``inner``'s scripted state, so the setup keeps one model of the same kind."""
+
+        self.__dict__.update(inner.__dict__)
+        self.fetching = fetching
+        self.fetches = 0
+
+    async def fetch_deferred(
+        self, model: Any, handle: Any, options: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        self.fetches += 1
+        if self.fetches > 1:
+            return await super().fetch_deferred(model, handle, options)
+        self.fetching.resolve()
+        await aborted(cast(Mapping[str, Any], options)["signal"])
+        raise AssertionError("the first fetch ends only when the host stops")
+
+
+def deferred_setup(poll_after_ms: int = 10) -> tuple[ChatSetup, Any, Callable[[], int]]:
+    """A setup whose model answers deferred and whose first fetch of each deferred response is in
+    flight until the Harness stops; later fetches answer.
+
+    Upstream's ``deferredSetup``: ``fetching`` settles when the first fetch began, ``fetches()``
+    counts them, and the in-flight fetch ends only through the invocation's signal -- the same
+    ``Promise.race`` the port's ``task_support.aborted`` is.
+    """
+
+    base = chat_setup({"deferred": {"pollAfterMs": poll_after_ms}})
+    base.settings["stream"] = {"deferred": True}
+    base.faux.set_responses([assistant_message("deferred answer")])
+    fetching = deferred()
+    models = _FirstFetchInFlight()
+    models.adopt(base.models, fetching)
+    base.models = models
+    return base, fetching, lambda: models.fetches
+
+
+async def crash_while_polling(
+    path: Path, setup: ChatSetup, fetching: Any
+) -> tuple[SubmissionId, Any]:
+    """Submit to a fresh chat at ``path``, let its deferred response be fetched, crash during that fetch."""
+
+    opened = await open(path, setup)
+    opened["harness"].resume()
+    submission = await opened["root"].submit({"type": "input", "content": "hi"}, context)
+    id = submission.id
+    await fetching
+    task_id = (await live(opened["harness"]))["run"]["taskId"]
+    record = await opened["harness"].get_task(task_id, context)
+    assert record["state"]["status"] == "running"
+    assert record["state"]["checkpoint"]["phase"] == "poll"
+    opened["kill"]()
+    return id, task_id
+
+
+def live_values(harness: Any) -> list[dict[str, Any]]:
+    """Every ``pi.live`` the Harness publishes, oldest first -- upstream's ``liveValues``."""
+
+    values: list[dict[str, Any]] = []
+
+    def observe(publication: Any, _context: Any) -> None:
+        for change in document_changes(publication):
+            if change["record"]["kind"] == "pi.live" and change["value"] is not None:
+                values.append(change["value"])
+
+    observe_commits(harness, observe)
+    return values
+
+
+async def test_charges_a_crash_during_a_polls_fetch_and_polls_the_same_deferred_response_again() -> None:
+    """Upstream "charges a crash during a poll's fetch, then polls the same deferred response again".
+
+    The poll's fetch was in flight when the host died, so the attempt is charged (``interrupted``
+    reads the ``poll`` checkpoint, not the ``prepare`` one) and the next attempt polls the same
+    handle: one request, polled twice, with the provider's job neither dropped nor resubmitted.
+    """
+
+    path = sqlite_path()
+    setup, fetching, fetches = deferred_setup()
+    setup.settings["retry"] = {"enabled": True, "maxRetries": 2, "baseDelayMs": 1}
+    id, task_id = await crash_while_polling(path, setup, fetching.promise)
+
+    opened = await open(path, setup)
+    values = live_values(opened["harness"])
+    assert (await opened["harness"].get_task(task_id, context))["restarts"] == 1
+    opened["harness"].resume()
+    answer = await settled(opened["harness"], id)
+    assert answer["status"] == "done"
+    retried = [value["generation"] for value in values if value.get("generation", {}).get("retry")]
+    assert len(retried) == 1
+    assert retried[0]["attempt"] == 1
+    assert retried[0]["retry"]["error"] == (
+        "The host stopped while the deferred answer was fetched, on attempt 1"
+    )
+    assert isinstance(retried[0]["retry"]["at"], int)
+    assert any(
+        value.get("generation", {}).get("attempt") == 2 and "deferred" in value["generation"]
+        for value in values
+    )
+    # One request, polled twice: the provider's job is neither dropped nor submitted again.
+    assert setup.faux.call_count == 1
+    assert fetches() == 2
+    assert setup.faux.cancelled_deferred == []
+    entries = await all_entries(opened["root"])
+    assert text_of(entries[-1]["model"][0]) == "deferred answer"
+    await opened["harness"].close(context)
 
 
 async def test_fails_a_compaction_into_compaction_failure() -> None:
