@@ -709,6 +709,16 @@ class TaskRuntime(Protocol):
 
     async def entry(self, *args: Any) -> EntryRecord | None: ...
 
+    async def entries(
+        self,
+        query: EntryQuery,
+        limit: int,
+        cursor: Cursor | None,
+        context: Context,
+    ) -> Page[EntryRecord, Cursor]:
+        """The task's conversation's committed raw history, as :meth:`Conversation.entries` pages it."""
+        ...
+
     async def context(self, conversation_id: ConversationId, context: Context, *args: Any) -> ContextView: ...
 
     def now(self) -> int: ...

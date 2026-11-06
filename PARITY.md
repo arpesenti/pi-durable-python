@@ -374,7 +374,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
-| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes — still owed, and #43 no longer owes it: that ticket shipped the `WatchCall` half of the retag and merged without this one, and nothing in `src/` or `tests/` carries the name. The port has no Chord host to hand one (ADR 0003), so #52 names its owner) |
+| `NativeWatchCall` | type | — | — | excluded (1.5.0: Chord's tagged call a native watch listener takes. Upstream holds it only as a Chord re-export — `src/index.ts:1` — and names it nowhere else in its `src/` or `test/`; a native watch is one a Chord host opens on its own store, and this port has no Chord host, because Chord is an internal implementation detail here (ADR 0001, and the `Chord` row of the deviations). Its only watch seam is `Conversation.watch()`, whose listener takes `WatchCall` two rows below, `tested` with #43, and no port type plays the native role. Excluded by name under ADR 0003 rather than carried `planned` into a release for a host this port never had; `test_types.py` pins the exclusion beside the three watch re-exports the port does carry) |
 | `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Observation` | type | `Observation` | test_session_observers.py, test_harness_observers.py | tested (an attached `Observer` — the value at attachment, the idempotent `detach()`, and no pin left behind; #44) |
 | `Observer` | type | `Observer` | test_session_observers.py, test_harness_observers.py | tested (the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph: attached atomically on the line, every change unfolded in line order, `ended` by the owner it observes and `failed` by the close; #44) |
@@ -411,7 +411,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
 | `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py, test_testing_conformance.py, test_sqlite_migrations.py | tested (scans `sleeping` tasks) |
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
-| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py | tested |
+| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_hook_reads.py | tested |
 | `TaskState` | type | `TaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
@@ -647,7 +647,8 @@ SQLite backend and migrations.
 | 4 Transactions and storage ownership | planned (group commit: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound, and outcomes in line order — see the vendored group-commit document; #42) |
 | 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
 | 5 Tasks | tested |
-| 5.1 Definition | planned (the `kind`-tagged `ReportFrom` landed with #33. What 1.5.0 still owes here is the `options` a commit takes — `TaskRuntime.commit` takes none, and that window is #47's — and `TaskRuntime.entries()`, which #50's continue work landed without and no open ticket holds) |
+| 5.1 Definition | tested (the `kind`-tagged `ReportFrom` landed with #33, and `TaskRuntime.entries()` with #56: the committed raw history of the task's own conversation, fork-aware, as `Conversation.entries()` pages it (`src/types.ts:327-337`). Upstream builds both reads' query with one helper, `conversationEntries` (`src/harness/util.ts:69-79`), and takes both on the line (`src/harness/scheduler.ts:2828-2834`); the port shares its `harness/util.py` `conversation_entries` the same way, so the two reads cannot drift. Translated case for case from `test/harness-hook-reads.test.ts:50-93` in test_harness_hook_reads.py, which also proves the read queues on the line an in-flight commit holds and so settles on committed state only) |
+| 5.1 Definition | planned (What 1.5.0 still owes here is the `options` a commit takes — `TaskRuntime.commit` takes none, and that window is #47's) |
 | 5.2 Effect sandwich | tested |
 | 5.3 Terminal tasks | tested |
 | 5.4 Scheduler, abort, and ownership | planned (a task cut off `restart_limit` times in a row ends instead of parking, with the per-task-kind outcome and `task_interrupted`, and the scheduler decides in recorded regions; #48, #49) |

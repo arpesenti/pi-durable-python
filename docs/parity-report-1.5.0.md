@@ -71,6 +71,7 @@ baseline left alone. These are the rows this baseline adds or moves.
 | Upstream suite | Python translation |
 | --- | --- |
 | `harness-observers` | `test_harness_observers.py` |
+| `harness-hook-reads` | `test_harness_hook_reads.py` (the hook half of the upstream file is deferred; see **Cases completed under this baseline**) |
 | `harness-view-run` | `test_harness_view_run.py`, `test_harness_nested_tools.py`, `test_harness_compaction.py`, `test_session_document_retention.py` |
 | `harness-nested-tools` | `test_harness_nested_tools.py` (the agent-event half went with `test_harness_events.py`, deleted by #46) |
 | `session-observers` | `test_session_observers.py` |
@@ -100,6 +101,19 @@ baseline left alone. These are the rows this baseline adds or moves.
   case for the flat active-range mount, which #45's window superseded: it now proves on the observer
   seam that a mount dropped with its last consumer is rebuilt from Storage, head marker and all.
 
+- **`harness-hook-reads` and the task runtime's raw-history read.** #56 translates "pages a task's
+  conversation history by entry ID range" (`test/harness-hook-reads.test.ts:50-93`) case for case into
+  `test_harness_hook_reads.py`, the suite `PARITY.md`'s 5.1 row now sends a reader checking
+  `TaskRuntime.entries()` to. One case there has no upstream counterpart and is named for what it
+  proves: `test_a_task_entries_read_waits_for_the_commit_holding_the_line` shows the read is taken on
+  the Session line, where upstream leaves it to `readOnLine` in its own implementation
+  (`src/harness/scheduler.ts:2828-2834`) and to `TaskRuntime.commit`'s docstring — a commit whose
+  storage call is held has admitted its entry and stored nothing of it, the read is still pending
+  behind that commit, and it settles afterwards with that entry in the history it returns. The file's
+  other upstream case, "reads raw history and single entries from a hook" (`:17-48`), is deferred to
+  #36 and #48, which own `HookApi.entry()`/`entries()`: every assertion of it runs through a hook
+  `api` the port does not carry, and the module docstring names it.
+
 ## Exclusions this baseline takes
 
 The 1.4.0 exclusions ([ADR 0002](./adr/0002-upstream-1-4-0-scope.md)) stay in force and stay listed in
@@ -113,6 +127,16 @@ the 1.4.0 record. On top of them:
 - **The attached-host storage subpath, pi-schema, and the telemetry host-callback member.** Excluded
   by [ADR 0003](./adr/0003-upstream-1-5-0-scope.md), each with its reason on the matching `excluded`
   row of `PARITY.md`'s **Excluded subpaths** table.
+- **`NativeWatchCall`.** #56 excludes it by name. Upstream v1.5.0 holds it only as a Chord re-export
+  (`src/index.ts:1`) and names it nowhere else in its `src/` or `test/`; a native watch is one a Chord
+  host opens on its own store, and this port has no Chord host to open one — Chord is an internal
+  implementation detail ([ADR 0001](./adr/0001-parity-baseline-and-boundary.md), and the `Chord` row
+  of `PARITY.md`'s deviations) — while its only way to open a watch is `Conversation.watch()`, whose
+  listener takes `WatchCall`. No port type plays the role, so the name goes under ADR 0003's lockstep
+  rule rather than riding into a release as a `planned` row for a host this port never had. The reason
+  a reader of the matrix needs is on `PARITY.md`'s `excluded` row, and
+  `test_types.py::test_the_public_types_exclude_the_native_watch_call_by_name` pins it beside the
+  three watch re-exports of that same upstream line the port does carry.
 
 ## Remaining deviations under this baseline
 

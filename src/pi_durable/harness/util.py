@@ -9,8 +9,9 @@ from typing import Any, Generic, TypeVar, cast
 
 from ..context import AbortError, AbortSignal, Context
 from ..errors import SessionFailed
+from ..ids import ConversationId
 from ..json import JsonObject
-from ..types import Cursor, Page, TaskRecord
+from ..types import Cursor, EntryQuery, Page, TaskRecord
 
 T = TypeVar("T")
 K = TypeVar("K", bound=Hashable)
@@ -96,6 +97,24 @@ async def scan_all(scan: Callable[[Cursor | None], Awaitable[Page[Any, Cursor]]]
         cursor = page.get("next")
         if cursor is None:
             return items
+
+
+def conversation_entries(conversation_id: ConversationId, query: Mapping[str, Any]) -> EntryQuery:
+    """The entry scan one conversation's raw history pages through.
+
+    Upstream's ``conversationEntries`` (``harness/util.ts:69-79``). ``Conversation.entries()`` and
+    ``TaskRuntime.entries()`` page the same fork-aware committed history — upstream's own doc says the
+    runtime's read is "as ``Conversation.entries()``" (``src/types.ts:328-330``) — so both build the
+    query here rather than derive it twice. The conversation ID is the reader's own, never the
+    caller's to set, and only the range members a caller may pass reach the scan.
+    """
+
+    scan: dict[str, Any] = {"conversationId": conversation_id}
+    for name in ("minEntryId", "maxEntryId", "order"):
+        value = query.get(name)
+        if value is not None:
+            scan[name] = value
+    return cast(EntryQuery, scan)
 
 
 def closed_error(session: Any) -> BaseException:
