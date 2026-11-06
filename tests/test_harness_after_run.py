@@ -1,7 +1,9 @@
 """Translated upstream ``harness-after-run`` cases: a run that answered waits for its run-end tasks.
 
-Upstream ``test/harness-after-run.test.ts`` holds 29 cases: 18 of them are translated here, as 19 tests
-(one upstream case is translated as two). What still does not run is named below, with what it needs.
+Upstream ``test/harness-after-run.test.ts`` holds 29 cases -- 27 under ``describe("afterRun")`` and two
+unit cases under ``describe("endRun")`` -- and all 29 are translated here, as 30 tests: upstream's
+"asks once a run really ends: not while onYield continues it, and when a queued steer drops the
+continuation" is one case carrying two runs, so it is two tests.
 
 A run whose answer's ``afterRun`` hooks ask for tasks keeps ``pi.live.run``, stays busy, and has already
 settled its inputs ``done`` with the answer while they run (spec section 8.3): commit A is ``hold_run``,
@@ -9,26 +11,11 @@ the hooks are asked in ``finish``, the tasks are created as the generation's chi
 moves to ``drain``, and commit B -- ``end_answered_run`` -- places the final boundary and ends the run
 without a failure however those tasks ended.
 
-Still not run, named so the gap cannot be lost. Each needs only the mechanism above plus what is named
-after it: a hook reading the run's history, and that history after a compaction summarized its start; a
-task that cannot run until Stop orphans it; a follow-up a task admits; a fork run idle on its after-run
-tasks; a run whose ``first`` was never recorded; a continue's history taken from a failed run or from
-its first tool round; a summary queued behind a terminate round's handoff; the held progress stored with
-commit A and asked again after an orderly close; and a failed run's first entry carried into
-``runFailure`` alongside the run it failed on.
-
-The upstream cases still not run, in upstream order:
-    "lets a hook read the run's history, tool results included",
-    "lets a hook read the run's history after a compaction summarized the start of the run",
-    "keeps the run busy while an after-run task cannot run, until Stop orphans it",
-    "starts a fix run with a follow-up a task admits, after the tasks",
-    "gives a continue after a failed run the failed run's history",
-    "ends the run without asking when the hooks are deselected before finish runs",
-    "starts a fork of a conversation running its after-run tasks idle",
-    "gives a run without a recorded first entry its answer as first",
-    "starts a continue's history at its first tool round when nothing failed and nothing was placed",
-    "leaves a summary queued during the tasks stale behind a terminate round's handoff",
-    "stores the answer's held progress with commit A, and asks again after an orderly close in finish",
+Two readings of upstream that this file settles, because they are easy to get wrong from the outside:
+a hook's own assertion is not evidence, since ``hooks.each`` reports a hook that throws and lets the run
+continue -- what a hook read is therefore collected and asserted by the test (:656 upstream asserts
+inside the hook); and the turn limit an ``afterRun`` case leans on is the agent's ``maxTurns``, set with
+``configure()``, never a host setting (:1045, :858).
 """
 
 from __future__ import annotations
@@ -48,13 +35,15 @@ from chat_support import (
     faux_tool_call,
     open_chat,
     open_killable,
+    slow_message,
     text_of,
 )
 from session_support import context
 from task_support import aborted, completed, deferred, eventually, settled
-from tool_support import add_tool, tool
+from tool_support import add_hooks, add_tool, tool
 
 from pi_durable import (
+    CompactionTask,
     ConversationBusy,
     GenerationTask,
     InboxDoc,
@@ -785,6 +774,116 @@ def task_checkpoint_value(task: Any) -> dict[str, Any]:
     return cast(dict[str, Any], task["state"]["checkpoint"])
 
 
+async def test_lets_a_hook_read_the_runs_history_tool_results_included() -> None:
+    """Upstream ``harness-after-run.test.ts``:656: the hook reads the run's own history off the runtime.
+
+    The page is the ``[run.first, run.last]`` range the summary names, tool results included, and
+    ``entry()`` finds the answer by its own id -- so the summary's bounds are the run's real entries,
+    not a window that stopped short of the round that ended it.
+    """
+
+    setup = chat_setup()
+    seen: list[str] = []
+    fetched: list[Any] = []
+
+    async def read_history(run: Any, runtime: Any, ctx: Any) -> None:
+        page = await runtime.entries(
+            {"minEntryId": run["first"], "maxEntryId": run["last"], "order": "ascending"},
+            100,
+            None,
+            ctx,
+        )
+        seen.extend(entry["kind"] for entry in page["items"])
+        # What the hook read, asserted by the test rather than in the hook: a hook that throws is
+        # reported and the run goes on, so an assertion raised there would prove nothing.
+        fetched.append(await runtime.entry(run["answer"], ctx))
+        return None
+
+    for registration in editing_tools():
+        add_tool(setup.registry, registration)
+    setup.registry.install(
+        define_extension({"name": "reader", "hooks": [hook(GenerationTask, {"afterRun": read_history})]})
+    )
+    setup.faux.set_responses([calling("edit", "a"), assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await root.wait_for_idle(context)
+    assert [kind for kind in seen if kind != "pi.system"] == [
+        "pi.user",
+        "pi.assistant",
+        "pi.tool-result",
+        "pi.assistant",
+    ]
+    assert len(fetched) == 1
+    assert fetched[0] is not None and fetched[0]["kind"] == "pi.assistant"
+    await harness.close(context)
+
+
+async def test_lets_a_hook_read_the_runs_history_after_a_compaction_summarized_the_start() -> None:
+    """Upstream ``harness-after-run.test.ts``:694: the run's history is its own, not the active context's.
+
+    A compaction asked for mid-round places its summary inside the run, so the active context has lost
+    the run's input to it -- while ``[run.first, run.last]`` still pages the input, the round, the
+    summary and the answer.
+    """
+
+    setup = chat_setup()
+    setup.settings["compaction"] = {
+        "enabled": False,
+        "reserve_tokens": 1000,
+        "keep_recent_tokens": 1,
+        "background_tokens": 0,
+    }
+    gate = deferred()
+    started = deferred()
+    runs: list[list[str]] = []
+
+    async def edit_slowly(*_args: Any) -> dict[str, Any]:
+        started.resolve()
+        await gate.promise
+        return {"output": [{"type": "text", "text": "edited"}]}
+
+    async def read_history(run: Any, runtime: Any, ctx: Any) -> None:
+        page = await runtime.entries(
+            {"minEntryId": run["first"], "maxEntryId": run["last"], "order": "ascending"},
+            100,
+            None,
+            ctx,
+        )
+        runs.append([entry["kind"] for entry in page["items"]])
+        return None
+
+    add_tool(setup.registry, tool("edit", edit_slowly))
+    add_hooks(setup.registry, CompactionTask, {"beforeCompact": lambda *_args: {"summary": "earlier work"}})
+    setup.registry.install(
+        define_extension({"name": "reader", "hooks": [hook(GenerationTask, {"afterRun": read_history})]})
+    )
+    setup.faux.set_responses([calling("edit", "a"), assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    submission = await root.submit({"type": "input", "content": "go"}, context)
+    await started.promise
+    # Its summary is placed at the round's post-tools boundary, in the middle of the run.
+    compaction = await root.compact(None, context)
+    await harness.wait_for_task(compaction, context)
+    gate.resolve()
+    await submission.wait(context)
+    await root.wait_for_idle(context)
+    active = [entry["kind"] for entry in (await root.context(context))["entries"]]
+    # The active context lost the run's input to the summary; the run's history did not.
+    assert "pi.user" not in active
+    assert len(runs) == 1
+    assert [kind for kind in runs[0] if kind != "pi.system"] == [
+        "pi.user",
+        "pi.assistant",
+        "pi.tool-result",
+        "pi.compaction",
+        "pi.assistant",
+    ]
+    await harness.close(context)
+
+
 async def test_asks_after_a_terminate_round_with_its_last_entry() -> None:
     """Upstream ``harness-after-run.test.ts``:221: terminate asks too, its last entry the newest result."""
 
@@ -814,10 +913,13 @@ async def test_asks_after_a_terminate_round_with_its_last_entry() -> None:
 
 
 async def test_asks_after_a_terminate_round_at_the_turn_limit_terminate_wins() -> None:
-    """Upstream ``harness-after-run.test.ts``:1045."""
+    """Upstream ``harness-after-run.test.ts``:1045.
+
+    The bound is the agent's ``maxTurns``, set with ``configure`` as upstream sets it -- it is not a
+    host setting, and a run that never reaches the limit would ask the hooks for any reason.
+    """
 
     setup = chat_setup()
-    setup.settings["maxTurns"] = 1
     state = probe()
     install(setup, state)
     for registration in editing_tools():
@@ -825,6 +927,7 @@ async def test_asks_after_a_terminate_round_at_the_turn_limit_terminate_wins() -
     setup.faux.set_responses([calling("finish", "a")])
     opened = await open_chat(MemoryStorage(), setup)
     harness, root = opened["harness"], opened["root"]
+    await root.configure({"max_turns": 1}, context)
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
     await root.wait_for_idle(context)
     # The round asked to terminate: the run ends answered with its after-run task, not ``turn_limit``.
@@ -939,6 +1042,48 @@ async def test_ends_an_answered_run_completed_without_a_failure_once_finish_is_c
         info.get("kind") == "task_interrupted" and info.get("reason") == "restart_limit"
         for info in setup.infos
     )
+    await opened["harness"].close(context)
+
+
+async def test_keeps_the_run_busy_while_its_after_run_task_cannot_run_until_stop_orphans_it() -> None:
+    """Upstream ``harness-after-run.test.ts``:785: a run-end task that cannot run keeps the run busy.
+
+    The host dies while the task runs and reopens without the extension that defines it, so the task
+    is blocked: ``run.afterRun`` still names it, idle does not settle, and Stop ends the run cleanly and
+    orphans the task it could not run.
+    """
+
+    path = _sqlite_path()
+    setup = chat_setup()
+    state = probe()
+    state["gate"] = deferred()
+    install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await (await opened["root"].submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["runs"]) == 1)
+    opened["kill"]()
+
+    # Reopened without the extension: its task is blocked.
+    opened = await open_killable(open_posix_sqlite_storage, path, chat_setup())
+    opened["harness"].resume()
+    held = await live(opened["harness"], opened["root"].id)
+    assert len(held["run"]["afterRun"]["tasks"]) == 1
+    child = held["run"]["afterRun"]["tasks"][0]
+    async def blocked() -> bool:
+        inspection = await opened["harness"].inspect(context)
+        return any(task["state"]["kind"] == "blocked" for task in inspection["tasks"])
+
+    await eventually(blocked)
+    assert await settled(opened["root"].wait_for_idle(context)) is False
+    await opened["root"].abort(context)
+    after = await live(opened["harness"], opened["root"].id)
+    assert "run" not in after
+    assert "runFailure" not in after
+    record = await opened["harness"].get_task(child, context)
+    assert record is not None
+    assert record["state"]["status"] == "terminal"
+    assert record["state"]["outcome"]["status"] == "orphaned"
     await opened["harness"].close(context)
 
 
@@ -1058,4 +1203,340 @@ async def test_reports_no_task_interrupted_for_a_generation_ended_normally_after
     await opened["root"].wait_for_idle(context)
     assert state["runs"] == ["run 2"]
     assert [info for info in setup.infos if info.get("kind") == "task_interrupted"] == []
+    await opened["harness"].close(context)
+
+
+async def test_starts_a_fix_run_with_a_follow_up_a_task_admits_after_the_tasks() -> None:
+    """Upstream ``harness-after-run.test.ts``:818: a task admits a follow-up that starts its own run.
+
+    The follow-up is submitted from inside the task's own commit, so it queues behind the answer it is
+    a follow-up to; the boundary places it only when the run ends, and the run it starts takes its own
+    input as ``first`` -- not the run that asked for the fix.
+    """
+
+    setup = chat_setup()
+    state = probe()
+    Tests = after_run_task(state)
+
+    async def after_run(run: Any, _runtime: Any, _context: Any) -> dict[str, Any] | None:
+        state["asked"].append(dict(run))
+        return None if len(state["asked"]) != 1 else {"tasks": [run_end_task(Tests, {"label": "run 1"})]}
+
+    setup.registry.install(
+        define_extension(
+            {
+                "name": "after-run",
+                "tasks": [Tests],
+                "hooks": [hook(GenerationTask, {"afterRun": after_run})],
+            }
+        )
+    )
+
+    async def admit(handle: Any, tx: Any) -> None:
+        await handle.submit(
+            tx,
+            {
+                "type": "input",
+                "content": "fix the tests",
+                "requestId": "fix-1",
+                "whenBusy": "followUp",
+            },
+        )
+
+    state["admit"] = admit
+    setup.faux.set_responses([assistant_message("done"), assistant_message("fixed")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await root.wait_for_idle(context)
+    entries = await all_entries(root)
+    assert [entry["kind"] for entry in entries if entry["kind"] != "pi.system"] == [
+        "pi.user",
+        "pi.assistant",
+        "test.tests",
+        "pi.user",
+        "pi.assistant",
+    ]
+    assert user_texts(entries) == ["go", "fix the tests"]
+    assert len(state["asked"]) == 2
+    # The fix run's history starts with its own input.
+    assert state["asked"][1]["first"] == kinds(entries, "pi.user")[1]["id"]
+    await harness.close(context)
+
+
+async def test_gives_a_continue_after_a_failed_run_the_failed_runs_history() -> None:
+    """Upstream ``harness-after-run.test.ts``:858: a continue after a failed run carries that run's history.
+
+    The turn limit ends the first run with ``turn_limit`` and its ``first``; no hook is asked, because
+    the run never answered. The continue then answers and its summary still starts at the failed run's
+    input, so a hook reads what that run did.
+    """
+
+    setup = chat_setup()
+    state = probe()
+    install(setup, state)
+    for registration in editing_tools():
+        add_tool(setup.registry, registration)
+    setup.faux.set_responses([calling("edit", "a"), assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await root.configure({"max_turns": 1}, context)
+    failed = await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    assert failed["status"] == "unanswered"
+    user = kinds(await all_entries(root), "pi.user")[0]
+    failure = (await live(harness, root.id)).get("runFailure")
+    assert failure is not None
+    assert failure["reason"] == "turn_limit" and failure["first"] == user["id"]
+    assert state["asked"] == []
+    await harness.commit(lambda tx: root.submit(tx, {"type": "continue"}), context)
+    await root.wait_for_idle(context)
+    answer = kinds(await all_entries(root), "pi.assistant")[-1]
+    assert state["asked"] == [
+        {"reason": "answer", "first": user["id"], "answer": answer["id"], "last": answer["id"]}
+    ]
+    await harness.close(context)
+
+
+async def test_ends_the_run_without_asking_when_the_hooks_are_deselected_before_finish() -> None:
+    """Upstream ``harness-after-run.test.ts``:882: the hooks are asked by the agent that selects them.
+
+    The first host reaches ``finish`` and dies with the hook in hand. The hooks are then uninstalled,
+    so the reopened host -- whose agent no longer selects an ``afterRun`` hook -- ends the answered run
+    as it would for a run that never had one: the hook is not asked again, no task runs, and the live
+    document is empty.
+    """
+
+    path = _sqlite_path()
+    setup = chat_setup()
+    state = probe()
+    state["hook_gate"] = deferred()
+    install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await (await opened["root"].submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["asked"]) == 1)
+    opened["kill"]()
+    setup.registry.uninstall(define_extension({"name": "after-run"}))
+
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await opened["root"].wait_for_idle(context)
+    assert len(state["asked"]) == 1
+    assert state["runs"] == []
+    assert await live(opened["harness"], opened["root"].id) == {}
+    await opened["harness"].close(context)
+
+
+async def test_starts_a_fork_of_a_conversation_running_its_after_run_tasks_idle() -> None:
+    """Upstream ``harness-after-run.test.ts``:903: a fork of a busy conversation starts without its run.
+
+    The source is running its run-end tasks and holds a queued input. Its fork, taken at the answer and
+    left ownerless, has no run of its own and nothing queued: the run and its inbox belong to the
+    conversation that started them.
+    """
+
+    setup = chat_setup()
+    state = probe()
+    state["gate"] = deferred()
+    install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["runs"]) == 1)
+    await root.submit({"type": "input", "content": "later"}, context)
+    answer = kinds(await all_entries(root), "pi.assistant")[-1]
+    fork = await root.fork(answer["id"], {"ownership": {"kind": "ownerless"}}, context)
+    assert "run" not in await live(harness, fork.id)
+    inbox = await harness.snapshot(InboxDoc, fork.id, context)
+    assert (inbox or {}).get("items", []) == []
+    state["gate"].resolve()
+    await root.wait_for_idle(context)
+    await harness.close(context)
+
+
+async def test_gives_a_run_without_a_recorded_first_entry_its_answer_as_first() -> None:
+    """Upstream ``harness-after-run.test.ts``:923: a run started before ``first`` existed still has a history.
+
+    A host that recorded no ``run.first`` -- one from before the field existed -- gets the answer as the
+    first entry of its summary, so the hooks are handed a range they can page rather than a hole.
+    """
+
+    setup = chat_setup()
+    state = probe()
+    install(setup, state)
+    root_box: dict[str, Any] = {}
+
+    async def forget_first(*_args: Any) -> None:
+        # As a run started before ``first`` existed.
+        async def forget(tx: Any) -> None:
+            del (await tx.doc(LiveDoc, root_box["root"].id))["run"]["first"]
+
+        await root_box["root"].commit(forget, context)
+        return None
+
+    setup.registry.install(
+        define_extension({"name": "legacy", "hooks": [hook(GenerationTask, {"onYield": forget_first})]})
+    )
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    root = opened["root"]
+    root_box["root"] = root
+    harness = opened["harness"]
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await root.wait_for_idle(context)
+    answer = kinds(await all_entries(root), "pi.assistant")[-1]
+    assert state["asked"] == [
+        {"reason": "answer", "first": answer["id"], "answer": answer["id"], "last": answer["id"]}
+    ]
+    await harness.close(context)
+
+
+async def test_starts_a_continue_s_history_at_its_first_tool_round() -> None:
+    """Upstream ``harness-after-run.test.ts``:1062: a continue with no failure starts at its own first round.
+
+    The host wrote the user message itself and continues, so the run places no input of its own and
+    nothing failed: its history begins where the run itself begins, at the assistant of its first tool
+    round, and the page runs through the round's result to the answer.
+    """
+
+    setup = chat_setup()
+    seen: list[list[str]] = []
+
+    async def read_history(run: Any, runtime: Any, ctx: Any) -> None:
+        page = await runtime.entries(
+            {"minEntryId": run["first"], "maxEntryId": run["last"], "order": "ascending"},
+            100,
+            None,
+            ctx,
+        )
+        seen.append([entry["kind"] for entry in page["items"]])
+        return None
+
+    for registration in editing_tools():
+        add_tool(setup.registry, registration)
+    setup.registry.install(
+        define_extension({"name": "reader", "hooks": [hook(GenerationTask, {"afterRun": read_history})]})
+    )
+    setup.faux.set_responses([calling("edit", "a"), assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    # A host writes the user message itself, then continues.
+    await root.submit(
+        {
+            "type": "write",
+            "entry": {"kind": "app.prompt", "model": [{"role": "user", "content": "go", "timestamp": 1}]},
+        },
+        context,
+    )
+    await (await root.submit({"type": "continue"}, context)).wait(context)
+    await root.wait_for_idle(context)
+    assert seen == [["pi.assistant", "pi.tool-result", "pi.assistant"]]
+    await harness.close(context)
+
+
+async def test_leaves_a_summary_queued_during_the_tasks_stale_behind_a_handoff() -> None:
+    """Upstream ``harness-after-run.test.ts``:1094: a summary that cuts behind a handoff settles stale.
+
+    The handoff's reset lands with the answer, and the compaction asked for while the round waited
+    cuts before it: the run's end settles the summary stale rather than placing it after the reset, so
+    the conversation ends on the reset and the task's own entry, and the hook is asked with the reset
+    as the run's last entry.
+    """
+
+    setup = chat_setup()
+    setup.settings["compaction"] = {
+        "enabled": False,
+        "reserve_tokens": 1000,
+        "keep_recent_tokens": 1,
+        "background_tokens": 0,
+    }
+    state = probe()
+    install(setup, state)
+    gate = deferred()
+    started = deferred()
+
+    async def hand_off_slowly(*_args: Any) -> dict[str, Any]:
+        started.resolve()
+        await gate.promise
+        return {
+            "output": [{"type": "text", "text": "handed off"}],
+            "control": {"terminate": True, "handoff": "fresh start"},
+        }
+
+    add_tool(setup.registry, tool("handoff", hand_off_slowly))
+    add_hooks(setup.registry, CompactionTask, {"beforeCompact": lambda *_args: {"summary": "earlier work"}})
+    setup.faux.set_responses([calling("handoff", "a")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    submission = await root.submit({"type": "input", "content": "go"}, context)
+    await started.promise
+    compaction = await root.compact(None, context)
+    await harness.wait_for_task(compaction, context)
+    gate.resolve()
+    await submission.wait(context)
+    await root.wait_for_idle(context)
+    entries = await all_entries(root)
+    # The handoff's reset landed with the answer; the summary, cutting before it, settled stale at the
+    # run's end.
+    assert kinds(entries, "pi.compaction") == []
+    assert [entry["kind"] for entry in entries][-2:] == ["pi.reset", "test.tests"]
+    reset = kinds(entries, "pi.reset")[0]
+    assert state["asked"][0]["reason"] == "terminate"
+    assert state["asked"][0]["last"] == reset["id"]
+    await harness.close(context)
+
+
+async def test_stores_the_answers_held_progress_with_commit_a_and_asks_again_after_a_close() -> None:
+    """Upstream ``harness-after-run.test.ts``:1140: commit A stores the answer; finish asks again.
+
+    Nothing was stored while the answer streamed -- ``persist_within_ms`` is infinite -- so the answer's
+    entry reaches Storage only because commit A, which holds the run, is an ordinary commit. The host
+    dies with the hook in hand, and both a reopened host and one that follows an orderly close in
+    ``finish`` ask the hooks again; the task is created once.
+    """
+
+    path = _sqlite_path()
+    setup = chat_setup()
+    setup.settings["progress"] = {"persist_within_ms": float("inf")}
+    state = probe()
+    state["hook_gate"] = deferred()
+    Tests = after_run_task(state)
+
+    async def after_run(run: Any, _runtime: Any, ctx: Any) -> dict[str, Any]:
+        state["asked"].append(dict(run))
+        if state["hook_gate"] is not None:
+            await _race(state["hook_gate"], ctx.abort_signal)
+        return {"tasks": [run_end_task(Tests, {"label": "run"})]}
+
+    setup.registry.install(
+        define_extension(
+            {
+                "name": "after-run",
+                "tasks": [Tests],
+                "hooks": [hook(GenerationTask, {"afterRun": after_run})],
+            }
+        )
+    )
+    setup.faux.set_responses([slow_message(assistant_message("x" * 40), chunks=8, interval=0.02)])
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await (await opened["root"].submit({"type": "input", "content": "go"}, context)).wait(context)
+    await eventually(lambda: len(state["asked"]) == 1)
+    opened["kill"]()
+
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    stored = await live(opened["harness"], opened["root"].id)
+    assert "generation" not in stored
+    assert stored["run"]["afterRun"] == {}
+    answer = kinds(await all_entries(opened["root"]), "pi.assistant")[0]
+    assert text_of(answer["model"][0]) == "x" * 40
+    opened["harness"].resume()
+    await eventually(lambda: len(state["asked"]) == 2)
+    # An orderly close while the hook runs: what ``finish`` owed is owed again.
+    await opened["harness"].close(context)
+    state["hook_gate"] = None
+
+    opened = await open_killable(open_posix_sqlite_storage, path, setup)
+    await opened["root"].wait_for_idle(context)
+    assert len(state["asked"]) == 3
+    assert state["runs"] == ["run"]
     await opened["harness"].close(context)

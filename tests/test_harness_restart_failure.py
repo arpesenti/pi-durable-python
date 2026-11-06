@@ -19,14 +19,32 @@ Upstream's helpers arrive under the names this tree already uses for them: its `
 reach Storage -- is replaced by waiting for that commit to be there, which is what the timer only
 hoped for.
 
-Still not run from upstream's file, named so the gap cannot be lost: "cancels the deferred response
-when a crash during its poll ends the run" and "charges an interrupted poll even when the clock moved
-backwards". Both need only this file's :func:`deferred_setup` and :func:`crash_while_polling` plus
-what is named after each: the first, ``retry`` switched off, so the run ends ``interrupted`` and
-``models.cancelDeferred()`` is called once; the second, a host clock the test moves backwards between
-the two hosts, so a poll that looks not due yet is still charged because its fetch was cut off. They
-belonged to #49, which landed this file and named neither; this file's poll charge now covers the
-``interrupted()`` branch they both lean on.
+The ledger against upstream's file, so the count is checkable: it holds 18 cases and this file runs 6
+of them -- :330, :367, :438, :523, :554 and :574. The twelve it does not run are named below; where a
+counterpart exists elsewhere in this tree it is named after the case, and the rest belong to #49, which
+landed this file.
+
+    "charges the attempt: keeps the partial, waits for the retry backoff, and answers on the next
+    attempt" (:141), "sleeps the backoff of ``settings.retry`` before the next attempt" (:180), "ends
+    the run interrupted once no retry is left, keeping every partial" (:204), "ends the run at once when
+    retries are disabled" (:242; the request variant of it is asserted by
+    ``test_harness_continue.py::test_answers_a_run_interrupted_by_a_host_that_died_while_the_model_answered``),
+    "resends after a clean close: a close is not a crash" (:254), "does not charge a generation that
+    sleeps in a retry or waits for its tools" (:275), "charges a request once when a crash is followed by
+    a clean close before the charge" (:596), "ends a run restart_limit when charging the interrupted
+    request keeps being cut off" (:621), "drops the partial past the limit, where converting it may be
+    what keeps failing" (:648), "ends a run someone aborted as aborted when its abort handler is cut off
+    restartLimit times" (:671; the task half of it is
+    ``test_harness_blocked.py::test_faults_a_task_whose_abort_handler_is_cut_off_restart_limit_times``),
+    "reports task_interrupted for a run that ends interrupted and for a task that ends at the limit"
+    (:712; this file asserts the report for the tasks it cuts off, and
+    ``test_harness_after_run.py`` for a generation whose ``finish`` was cut off), and "resolves the
+    settings no more often than before: only a task that was cut off reads the limit" (:737).
+
+:554 and :574 were named in this docstring as not run until #48 landed them: the first with ``retry``
+switched off, so the run ends ``interrupted`` and ``models.cancelDeferred()`` is called once; the second
+with a host clock the test moves backwards between the two hosts, so a poll that looks not due yet is
+still charged because its fetch was cut off.
 """
 
 from __future__ import annotations
@@ -238,6 +256,66 @@ async def test_charges_a_crash_during_a_polls_fetch_and_polls_the_same_deferred_
     assert setup.faux.cancelled_deferred == []
     entries = await all_entries(opened["root"])
     assert text_of(entries[-1]["model"][0]) == "deferred answer"
+    await opened["harness"].close(context)
+
+
+async def test_cancels_the_deferred_response_when_a_crash_during_its_poll_ends_the_run() -> None:
+    """Upstream "cancels the deferred response when a crash during its poll ends the run".
+
+    With no retry left the run ends ``interrupted`` on the charged attempt, and the provider's job for
+    the answer that was being polled is cancelled -- once, and only because the poll was cut off.
+    """
+
+    path = sqlite_path()
+    setup, fetching, _ = deferred_setup()
+    setup.settings["retry"] = {"enabled": False}
+    id, task_id = await crash_while_polling(path, setup, fetching.promise)
+
+    opened = await open(path, setup)
+    opened["harness"].resume()
+    text = "The host stopped while the deferred answer was fetched, on attempt 1"
+    settlement = await settled(opened["harness"], id)
+    assert settlement["status"] == "unanswered"
+    assert settlement["reason"] == "interrupted"
+    assert settlement["detail"] == text
+    only_failure(await live(opened["harness"]), task_id, [id], "interrupted", text)
+    assert len(setup.faux.cancelled_deferred) == 1
+    await opened["harness"].close(context)
+
+
+async def test_charges_an_interrupted_poll_even_when_the_clock_moved_backwards() -> None:
+    """Upstream "charges an interrupted poll even when the clock moved backwards".
+
+    The replacement host's clock is behind the one that died, so the poll is not due yet by its own
+    ``until``: the charge does not come from the clock reading the record, it comes from the fetch that
+    was cut off, so the run still ends ``interrupted`` rather than sleeping on a poll no one will make.
+    """
+
+    path = sqlite_path()
+    setup, fetching, _ = deferred_setup(10)
+    clock = {"now": 1000}
+    setup.now = lambda: clock["now"]
+    setup.settings["retry"] = {"enabled": False}
+    first = await open(path, setup)
+    first["harness"].resume()
+    id = (await first["root"].submit({"type": "input", "content": "hi"}, context)).id
+
+    async def polling() -> bool:
+        return (await live(first["harness"])).get("generation", {}).get("deferred") is not None
+
+    await eventually(polling)
+    clock["now"] = 1010
+    first["harness"].resume()
+    await fetching.promise
+    first["kill"]()
+
+    # A replacement host whose clock is behind: the poll looks not due yet, but its fetch was cut off.
+    clock["now"] = 1000
+    opened = await open(path, setup)
+    opened["harness"].resume()
+    settlement = await settled(opened["harness"], id)
+    assert settlement["status"] == "unanswered"
+    assert settlement["reason"] == "interrupted"
     await opened["harness"].close(context)
 
 
