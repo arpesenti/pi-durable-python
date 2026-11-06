@@ -2,9 +2,15 @@
 
 The six deferred-loading cases are a direct translation of ``test/tool-search.test.ts``: the offered
 and deferred sets, load order, ``modelTools`` edits by name, extension reload, forks and reset
-baselines, and an unrelated query. The tokenizer and ranker have their own unit cases because the
-upstream suite reaches them only through the tool: camel-case boundaries, stop words, naive plural
-stems, BM25 length normalization, ties in document order, and the limit.
+baselines, and an unrelated query. The tokenizer cases pin what the upstream suite reaches only
+through the tool: camel-case boundaries, stop words, naive plural stems. The ranker cases translate
+``test/search.test.ts``'s ``rankDocuments`` cases one for one — every non-Unicode assertion of them
+— over the same fixtures and the same expected orders: term relevance and the limit, the namespace
+field, a name match above mentions in descriptions, the whole-local-name bonus, exact-name-first,
+and coverage above score. The eight Unicode cases wait on the word segmenter the port does not have,
+and the two port cases besides the translated ones pin what no upstream case isolates: length
+normalization with ties in document order, and exact-name-first against a competitor that outscores
+the named tool.
 """
 
 from __future__ import annotations
@@ -51,6 +57,15 @@ def make_tool(name: str, description: str, **extra: Any) -> ToolRegistration:
             **extra,
         }
     )
+
+
+def search_document(name: str, text: str, namespace_text: str | None = None) -> SearchDocument:
+    """Upstream ``test/search.test.ts``'s ``doc()``: the namespace text only when the case has one."""
+
+    document: SearchDocument = {"name": name, "text": text}
+    if namespace_text is not None:
+        document["namespaceText"] = namespace_text
+    return document
 
 
 def setup() -> Any:
@@ -158,6 +173,190 @@ def test_ranks_by_bm25_keeps_ties_in_document_order_and_honors_the_limit() -> No
     assert rank_documents("weather forecast", documents, 8) == []
     assert rank_documents("", documents, 8) == []
     assert rank_documents("alpha", documents, 0) == []
+
+
+def test_searches_the_namespace_text() -> None:
+    """Upstream ``test/search.test.ts:83``: a term of the namespace text alone still matches."""
+
+    namespaced = [search_document("mcp__x__run", "Run it.", "mcp__x Kubernetes cluster tools")]
+    assert rank_documents("kubernetes", namespaced, 8) == ["mcp__x__run"]
+
+
+#: Upstream ``test/search.test.ts:105``: the two CI tools of the name-match case.
+CI_DOCUMENTS = [
+    search_document("mcp__ci__status", "Deploy status: last deploy, deploy log, deploy errors."),
+    search_document(
+        "mcp__ci__deploy_release",
+        "Start a release of the current branch to an environment, run the migrations, switch traffic"
+        " over, and wait until the new version is live and healthy.",
+    ),
+]
+
+
+def test_ranks_a_name_match_above_mentions_in_descriptions() -> None:
+    """Upstream ``test/search.test.ts:105``: one mention in the name beats three in the text."""
+
+    assert rank_documents("deploy", CI_DOCUMENTS, 1) == ["mcp__ci__deploy_release"]
+
+
+#: Upstream ``test/search.test.ts:117``: the namespace text every ``mcp__peekaboo__`` tool shares.
+PEEKABOO_NAMESPACE = "mcp__peekaboo Peekaboo controls macOS apps by app name."
+
+#: Upstream ``test/search.test.ts:117``: the three ``mcp__peekaboo__`` tools share that namespace
+#: text, and two unrelated tools compete with them.
+PEEKABOO_DOCUMENTS = [
+    search_document(
+        "mcp__peekaboo__see",
+        "Capture the app window of the peekaboo app and describe the app.",
+        PEEKABOO_NAMESPACE,
+    ),
+    search_document("mcp__peekaboo__menu", "Click a menu item of an app.", PEEKABOO_NAMESPACE),
+    search_document(
+        "mcp__peekaboo__app",
+        "Launch, quit, relaunch, focus, hide, or switch applications. Targets an application by"
+        " name, bundle identifier, or process ID, and can wait until it is ready.",
+        PEEKABOO_NAMESPACE,
+    ),
+    search_document("mcp__app__queue_read", "Read a queued message of this thread."),
+    search_document(
+        "mcp__dev-app__thread_read",
+        "Read durable state and a paginated timeline from any thread. The default view returns user"
+        " messages, assistant messages and plans.",
+    ),
+]
+
+
+def test_ranks_a_tool_first_when_the_query_contains_its_whole_name() -> None:
+    """Upstream ``test/search.test.ts:117``: the whole local name in the query is a bonus.
+
+    The first two queries are the ``__``-suffix bonus at work: dropping upstream's
+    ``score += fullNameBonus`` line from its own ``src/search.ts`` answers
+    ``mcp__peekaboo__see`` for both, because the shared namespace text and the mentions in the
+    descriptions decide without it.
+    """
+
+    assert rank_documents("peekaboo app", PEEKABOO_DOCUMENTS, 1) == ["mcp__peekaboo__app"]
+    assert rank_documents("open the peekaboo app tool", PEEKABOO_DOCUMENTS, 1) == ["mcp__peekaboo__app"]
+    assert rank_documents("read thread_read state", PEEKABOO_DOCUMENTS, 1) == ["mcp__dev-app__thread_read"]
+    # Without the whole name, mentions in descriptions decide.
+    assert rank_documents("describe window", PEEKABOO_DOCUMENTS, 1) == ["mcp__peekaboo__see"]
+
+
+#: Upstream ``test/search.test.ts:89``: the two competing tools of the exact-name case.
+NAMED_DOCUMENTS = [
+    search_document("mcp__app__queue_read", "Read a queued message of this thread."),
+    search_document(
+        "mcp__dev-app__thread_read",
+        "Read durable state and a paginated timeline from any thread. The default view returns user"
+        " messages, assistant messages and plans. Continue with afterPosition until hasMore is false.",
+    ),
+]
+
+
+def test_ranks_a_tool_first_when_the_query_is_its_name() -> None:
+    """Upstream ``test/search.test.ts:89``: a query that names a tool reaches it first."""
+
+    for query in ["thread_read", "dev_app__thread_read", "mcp__dev-app__thread_read", "Thread_Read"]:
+        assert rank_documents(query, NAMED_DOCUMENTS, 1) == ["mcp__dev-app__thread_read"]
+    # Partial names still rank by BM25.
+    assert rank_documents("read", NAMED_DOCUMENTS, 1) == ["mcp__app__queue_read"]
+
+
+#: Two tools whose names both carry ``thread`` and ``read``, written for #57: the competing one
+#: outscores the named one, so only exact-name-first orders them the way upstream does.
+EXACT_NAME_DOCUMENTS = [
+    search_document("mcp__app__thread_read", "Fetch one item from the queue."),
+    search_document(
+        "mcp__thread__read_log",
+        "Read a thread. Read the thread again and again.",
+        "Thread and read tools",
+    ),
+]
+
+
+def test_ranks_an_exact_name_query_ahead_of_the_document_that_outscores_it() -> None:
+    """A query that is exactly a tool's name ranks it first, before coverage and score (#57).
+
+    Upstream ``test/search.test.ts:89`` cannot see this rule: its two documents already land in the
+    right order on the name weight and the whole-name bonus alone. Here ``mcp__thread__read_log``
+    outscores the named tool, as the ``read`` query shows on its own, so the order below comes from
+    exact-name-first and from nothing else. Dropping upstream's ``Number(right.exact) -
+    Number(left.exact)`` key from the sort of its own ``src/search.ts`` answers the ``thread_read``
+    query with ``mcp__thread__read_log`` first, while dropping its whole-name bonus leaves the
+    answer unchanged.
+    """
+
+    assert rank_documents("thread_read", EXACT_NAME_DOCUMENTS, 2) == [
+        "mcp__app__thread_read",
+        "mcp__thread__read_log",
+    ]
+    assert rank_documents("mcp__app__thread_read", EXACT_NAME_DOCUMENTS, 2) == [
+        "mcp__app__thread_read",
+        "mcp__thread__read_log",
+    ]
+    # Not an exact name: the document that outscores it on mentions and namespace wins instead.
+    assert rank_documents("read", EXACT_NAME_DOCUMENTS, 2) == [
+        "mcp__thread__read_log",
+        "mcp__app__thread_read",
+    ]
+
+
+#: Upstream ``test/search.test.ts:50``: the four tools the term-relevance and empty-query cases
+#: share.
+RANKING_DOCUMENTS = [
+    search_document("mcp__github__list_issues", "List issues in a repository. state open or closed"),
+    search_document("mcp__github__create_pull_request", "Open a pull request."),
+    search_document("mcp__linear__search_issues", "Search Linear issues by text."),
+    search_document("mcp__docs__search", "Search the documentation."),
+]
+
+
+def test_ranks_by_term_relevance_and_respects_the_limit() -> None:
+    """Upstream ``test/search.test.ts:57``: BM25 relevance, then the limit."""
+
+    assert rank_documents("issue", RANKING_DOCUMENTS, 8) == [
+        "mcp__linear__search_issues",
+        "mcp__github__list_issues",
+    ]
+    assert rank_documents("pull requests", RANKING_DOCUMENTS, 8)[0] == "mcp__github__create_pull_request"
+    assert len(rank_documents("search", RANKING_DOCUMENTS, 1)) == 1
+    assert rank_documents("closed", RANKING_DOCUMENTS, 8) == ["mcp__github__list_issues"]
+
+
+def test_returns_nothing_for_unknown_or_empty_queries() -> None:
+    """Upstream ``test/search.test.ts:77``: no term matches, or the query has no terms at all.
+
+    The third query is the one upstream's Unicode segmenter answers with no terms; here the port's
+    ASCII tokenizer does, so it pins the empty-query guard and nothing more.
+    """
+
+    assert rank_documents("kubernetes", RANKING_DOCUMENTS, 8) == []
+    assert rank_documents("the", RANKING_DOCUMENTS, 8) == []
+    assert rank_documents("\u672a\u77e5", RANKING_DOCUMENTS, 8) == []
+
+
+#: Upstream ``test/search.test.ts:141``: the four ``mcp__peekaboo__`` tools of the coverage case.
+PEEKABOO_BY_NAME_DOCUMENTS = [
+    search_document(
+        "mcp__peekaboo__app", "Launch, quit, focus, or switch applications by name or bundle identifier."
+    ),
+    search_document("mcp__peekaboo__see", "Capture the app window and describe the UI elements of the app."),
+    search_document("mcp__peekaboo__window", "Move, resize, or close a window of an app."),
+    search_document("mcp__peekaboo__image", "Take a screenshot of the screen, an app, or a window."),
+]
+
+
+def test_ranks_a_tool_matching_more_query_terms_first_whatever_the_scores() -> None:
+    """Upstream ``test/search.test.ts:141``: coverage of the query's terms outranks any score.
+
+    ``window`` and ``app`` are whole local names and take the bonus, yet each covers one of the two
+    terms of the first two queries, so the tool covering both is the answer. An exact name still
+    ranks first.
+    """
+
+    assert rank_documents("screenshot window", PEEKABOO_BY_NAME_DOCUMENTS, 1) == ["mcp__peekaboo__image"]
+    assert rank_documents("describe app", PEEKABOO_BY_NAME_DOCUMENTS, 1) == ["mcp__peekaboo__see"]
+    assert rank_documents("window", PEEKABOO_BY_NAME_DOCUMENTS, 1) == ["mcp__peekaboo__window"]
 
 
 async def test_offers_a_deferred_tool_only_once_tool_search_loads_it() -> None:

@@ -374,7 +374,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `JoinPolicy` | type | `JoinPolicy` | test_types.py | tested |
 | `JsonObject` | type | `JsonObject` | test_types.py | tested |
 | `LatestConversationSemantics` | type | `LatestConversationSemantics` | test_types.py | tested |
-| `NativeWatchCall` | type | `NativeWatchCall` | — | planned (1.5.0: Chord's tagged call a native watch listener takes — still owed, and #43 no longer owes it: that ticket shipped the `WatchCall` half of the retag and merged without this one, and nothing in `src/` or `tests/` carries the name. The port has no Chord host to hand one (ADR 0003), so #52 names its owner) |
+| `NativeWatchCall` | type | — | — | excluded (1.5.0: one of the four Chord watch types upstream re-exports without ever using — `src/index.ts:1` names it and nothing else in upstream's `src/` or `test/` does. What durable hands a listener is `WatchCall`, and an observer's `advance`/`end` take `WatchCall`/`WatchEnd` (`src/types.ts:1112-1115`); the `WatchCall` row below is `tested` (#43) and `Conversation.watch()` stays the only way to open one. Chord is an internal implementation detail here (ADR 0001, and the `Chord` row of the deviations): the port has no Chord host that could hand a listener Chord's own native call, and no port type plays the role. Excluded by name under ADR 0003 rather than carried `planned` into a release for a host this port never had; `test_types.py` pins the exclusion beside the three watch re-exports of that same upstream line the port does carry) |
 | `NextTaskState` | type | `NextTaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Observation` | type | `Observation` | test_session_observers.py, test_harness_observers.py | tested (an attached `Observer` — the value at attachment, the idempotent `detach()`, and no pin left behind; #44) |
 | `Observer` | type | `Observer` | test_session_observers.py, test_harness_observers.py | tested (the synchronous `advance(call, context)` / `end(end)` mirror of a watch, for documents, the conversation view, and the task graph: attached atomically on the line, every change unfolded in line order, `ended` by the owner it observes and `failed` by the close; #44) |
@@ -411,7 +411,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
 | `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py, test_testing_conformance.py, test_sqlite_migrations.py | tested (scans `sleeping` tasks) |
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
-| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py | tested |
+| `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py, test_harness_hook_reads.py | tested |
 | `TaskState` | type | `TaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
@@ -535,10 +535,28 @@ and remaining callable by other tools; the exact result text and `modelTools` `{
 order rather than registry order; names recorded without the registry, including unknown and
 non-deferred ones, with `remove` winning until a load lifts it; an extension disappearing and
 coming back; per-branch loads and the post-reset baseline; and an unrelated query loading nothing.
-The unit cases pin tokenization (camel-case and acronym boundaries, stop words, naive plural stems),
-BM25 length normalization, ties in document order, the limit, and the empty-query and positive-
-integer-limit diagnostics. `pi_durable.search` is the internal port of `src/search.ts`; it is not
-a public subpath export.
+The unit cases pin tokenization (camel-case and acronym boundaries, stop words, naive plural stems)
+and translate the `rankDocuments` cases of upstream `test/search.test.ts` one for one — every
+non-Unicode assertion of them, over the same fixtures and the same expected orders. The three v1.5.0
+ranking rules each have the case that proves it (#57): the name scored as a field of its own, where
+one mention in it beats three in a description, by
+`test_ranks_a_name_match_above_mentions_in_descriptions` (`test/search.test.ts:105`); the bonus for a
+query carrying a tool's whole local name after the last `__`, by
+`test_ranks_a_tool_first_when_the_query_contains_its_whole_name` (`test/search.test.ts:117`), whose
+`peekaboo app` query answers `mcp__peekaboo__see` once upstream's own `score += fullNameBonus` line is
+deleted from its `src/search.ts`; and exact-name-first, by
+`test_ranks_a_tool_first_when_the_query_is_its_name` (`test/search.test.ts:89`) together with
+`test_ranks_an_exact_name_query_ahead_of_the_document_that_outscores_it` — the upstream case alone
+does not see the rule, because its two documents already land in that order on the name weight and
+the bonus, while the second case's competitor outscores the named tool and wins only when the query
+is not its exact name. Term relevance and the limit, the namespace field, and coverage above score
+follow in `test_ranks_by_term_relevance_and_respects_the_limit`, `test_searches_the_namespace_text`
+and `test_ranks_a_tool_matching_more_query_terms_first_whatever_the_scores`; what the ranker already
+had stays pinned by `test_ranks_by_bm25_keeps_ties_in_document_order_and_honors_the_limit` (length
+normalization, ties in document order, the limit), and the empty-query and positive-integer-limit
+diagnostics by the tool cases. The eight Unicode `rankDocuments` cases are not translated: they reach
+terms through the word segmenter the port does not have. `pi_durable.search` is the internal port of
+`src/search.ts`; it is not a public subpath export.
 
 ### `src/testing/index.ts` → `pi_durable.testing`
 
@@ -634,8 +652,8 @@ SQLite backend and migrations.
 | --- | --- |
 | 1 Terms and invariants | planned (1.5.0: a stored commit publishes once Storage made it durable, in line order, even when the call later rejects; the line runs one commit callback at a time while their storage overlaps; a deferred commit reaches watches before Storage; #42, #47) |
 | 2 Core records | planned (1.5.0 retags the unions this section carries and adds the `continue` submission record, `RunFailure`, and `RunSummary`; #33, #48, #50) |
-| 2.1 Entries and context | tested (1.5.0: the conversation view carries one consumer's entry window over the visible entries with head markers in place, and `Conversation.context()` derives the model transcript from the whole visible transcript — test_harness_view.py, test_harness_conversations.py, test_harness_compaction.py) |
-| 2.2 Public Harness surface | planned (one `Report` on `on_report`, the `observe_*` seams replacing the state getters and the commit subscription, `ConversationTranscript`, `read_only`, `max_turns`, `when_idle`, and `submit(tx, draft)`; #34, #44, #45, #46, #50) |
+| 2.1 Entries and context | tested (1.5.0: the conversation view carries one consumer's entry window over the visible entries with head markers in place, and `Conversation.context()` derives the model transcript from the whole visible transcript — test_harness_view.py, test_harness_conversations.py, test_harness_compaction.py; #45) |
+| 2.2 Public Harness surface | planned (one `Report` on `on_report` landed with #34, the `observe_*` seams that replaced the state getters and the commit subscription with #44 and #46, `ConversationTranscript` with #45, and `read_only`, `when_idle`, and `submit(tx, draft)` with #50: test_harness_reports.py, test_harness_observers.py, test_conversation_transcript.py, test_harness_read_only.py, test_harness_submit_in_commit.py. What this section still owes is `max_turns` and the `turn_limit` end it drives, which #48 owns) |
 | 3 Documents | tested (definitions, records, access, ownership, bases, versions, and forks across test_session_*; the audit report lists the section-to-suite mapping) |
 | 3.1 Definitions | tested (`checkpoint_when` is required on every definition; test_session_definitions.py) |
 | 3.2 Records and lifetimes | tested |
@@ -647,22 +665,24 @@ SQLite backend and migrations.
 | 4 Transactions and storage ownership | tested (group commit on the mutation line: one callback at a time with overlapping storage, the unpublished-key gate, the 256-job bound enforced and observable, outcomes delivered in line order, and durable-before-published — `tests/test_session_group_commit.py`, `tests/test_harness_group_commit.py`. The deferred half of 3.4 Mutation ownership is #47's and stays planned) |
 | 4.1 Deferred commits | planned (`CommitPersistence`, what may be held, the store on the next read of the document, the `persist_within_ms` deadline, and the store at close; #47) |
 | 5 Tasks | tested |
-| 5.1 Definition | planned (the `kind`-tagged `ReportFrom` landed with #33. What 1.5.0 still owes here is the `options` a commit takes — `TaskRuntime.commit` takes none, and that window is #47's — and `TaskRuntime.entries()`, which #50's continue work landed without and no open ticket holds) |
+| 5.1 Definition | tested (the `kind`-tagged `ReportFrom` landed with #33, and `TaskRuntime.entries()` with #56: the committed raw history of the task's own conversation, fork-aware, as `Conversation.entries()` pages it (`src/types.ts:327-337`). Upstream builds both reads' query with one helper, `conversationEntries` (`src/harness/util.ts:69-79`), and takes both on the line (`src/harness/scheduler.ts:2828-2834`); the port shares its `harness/util.py` `conversation_entries` the same way, so the two reads cannot drift. Translated case for case from `test/harness-hook-reads.test.ts:50-93` in test_harness_hook_reads.py, which also proves the read queues on the line an in-flight commit holds and so settles on committed state only) |
+| 5.1 Definition | planned (What 1.5.0 still owes here is the `options` a commit takes — `TaskRuntime.commit` takes none, and that window is #47's) |
 | 5.2 Effect sandwich | tested |
 | 5.3 Terminal tasks | tested |
 | 5.4 Scheduler, abort, and ownership | planned (a task cut off `restart_limit` times in a row ends instead of parking, with the per-task-kind outcome and `task_interrupted`, and the scheduler decides in recorded regions; #48, #49) |
 | 5.5 Structured concurrency | planned (the tasks an `afterRun` hook asks for are generation children, so Stop and idle waits include them; #48) |
 | 5.6 Sleeping, timers, and wakeups | planned (`on_wake` runs in a microtask the line never waits for, and the foreground timer now also arms a deferred commit's deadline; #47) |
-| 6 Submissions and inbox | planned (continue submissions, `when_idle="reject"` with `ConversationIdle`, `submit(tx, draft)` inside a commit, and the answer-resolves-while-busy rule; #48, #50) |
-| 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
-| 7.1 Extensions, registry, and agent resolution | tested (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup, and the registry is never touched for it; test_harness_tools.py, test_harness_tools_recovery.py) |
+| 6 Submissions and inbox | planned (continue submissions, `when_idle="reject"` with `ConversationIdle`, and `submit(tx, draft)` inside a commit landed with #50: test_harness_continue.py, test_harness_submit_in_commit.py. What this section still owes is the answer-resolves-while-busy rule — a run that answered keeping `run`, with an empty ID list and `run.afterRun` set, until the tasks its `afterRun` hooks asked for are terminal, so a queued input waits behind an answer already settled — which #48 owns) |
+| 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py, whose ranker cases translate upstream test/search.test.ts and hold the v1.5.0 ranking: the name as a field of its own, the whole-local-name `__` bonus, and exact-name-first, each by the case that proves it (#57); code mode excluded) |
+| 7.1 Extensions, registry, and agent resolution | tested (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup; test_harness_tools.py, test_harness_tools_recovery.py. That the registry is never touched for it is proven behaviourally only — the cases show a deferred tool the agent has but never offered simply never runs — so that clause still owes a registry lookup spy to be observed rather than inferred, and is claimed no further than that; #36) |
 | 7.2 Hooks | planned (`afterTool` on every result the tool task writes, `beforeProviderRequest`, `afterRun` with `RunSummary` and `RunEndTask`, and `HookApi.entry()`/`entries()`; #36, #48) |
 | 7.3 Tools | planned (deferred tool progress is #47: `ToolApi.commit` takes no `options`, and a tool's `details()` partial is not yet stored on section 4.1's deferred window. Parameters as plain JSON Schema closed by default with pi-schema's validator wording landed with #51, and `ConversationHandle.submit(tx, ...)` with #50: test_harness_submit_in_commit.py, over the rule in `harness/submissions.py`. `unoffered` slots and the hidden call's own task are tested in test_harness_tools.py and test_harness_live_migrations.py; #36) |
 | 7.4 System prompt and dynamic tools | tested (request integration with #14) |
 | 7.5 Extension reload | tested |
 | 7.6 Code mode | excluded |
 | 8 Built-in tasks | planned (generation and tool progress commit deferred, so a crash loses the throttle window plus what was not stored yet; #47) |
-| 8.1 Built-in entries | tested (the `pi.tool-result` producer list is the tasks: an aborted round writes its own results, and an unoffered call's `tool_unavailable` result comes from its tool task; test_harness_tools.py, test_harness_tools_recovery.py) |
+| 8.1 Built-in entries | planned (the `pi.tool-result` producer list's task half holds and is proven: an aborted round writes its own results, and an unoffered call's `tool_unavailable` result comes from its tool task — test_harness_tools.py:1029, test_harness_tools_recovery.py:279. 1.5.0 left that half alone; the row beside it carries the half it rewrote, so the section stays `planned` until #48 speaks this baseline's text) |
+| 8.1 Built-in entries | planned (the clause 1.5.0 rewrote in that producer list — generation for calls an aborted round never started — is never executed: `src/pi_durable/harness/generation.py:383-414` reads the round's unstarted calls and `for call in unstarted:` (`:394`) runs 19 times across the suite while its body (`:404`, `:405`, `:407`, `:408`) is never reached, so `unstarted` is empty in every run and no case asserts a result for a call an aborted round never started; #48) |
 | 8.2 Live document | planned (`run.first`, `run.afterRun`, and `runFailure` are #48. Version 3 carries `run.turns`, `trigger` on compaction status, and `unoffered` slots, and a stored version 1 or 2 document migrates in place: test_harness_live_migrations.py, test_harness_compaction.py, test_harness_tools.py; #36) |
 | 8.3 Generation | planned (the `finish` and `drain` phases, the interrupted-attempt charge under the retry policy, `nothing_to_answer`, and deferred partials are #47 and #48. `unoffered` calls get their own tool task and count the turn they cost the run: test_harness_tools.py, test_harness_generation.py; #36) |
 | 8.4 Tool | planned (the `afterTool` chain over every result the task writes, with its bounds, is #49. `pi.tool` is version 3 and an `unoffered` call resolves `tool_unavailable`: test_harness_tools.py, test_harness_tools_recovery.py; #36) |
@@ -909,7 +929,7 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | Bounded output windows and adaptive progress commits | `pi_durable.harness.output` | tested (`test_harness_output.py`, `test_harness_tools.py`, `test_harness_live_deltas.py`) |
 | Tool argument repair, coercion, and validation; object schemas closed by default; the structured-output validator and upstream's wording | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`, `test_harness_structured_output.py`, `test_harness_structured_output_wording.py`, `test_harness_tool_schemas.py`) |
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
-| BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`) |
+| BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`, which translates upstream `test/search.test.ts`'s `rankDocuments` cases one for one and proves the three v1.5.0 ranking rules each by its own case: `test_ranks_a_name_match_above_mentions_in_descriptions` for the name as a field of its own, `test_ranks_a_tool_first_when_the_query_contains_its_whole_name` for the whole-local-name `__` bonus, `test_ranks_an_exact_name_query_ahead_of_the_document_that_outscores_it` for exact-name-first over two documents; #57) |
 | Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |
 | Pre-upgrade stored databases, written by this port's `v1.4.0` tag and opened by this release | `tests/fixtures/pre-1.5.0` (see its README) | tested (`test_harness_live_migrations.py`) |
 | Shared provider plumbing: catalog lookup, request options, transcript replay, cross-model message adaptation, argument parsing, request-attempt retries, usage pricing, and the stream/abort wrapper | `pi_durable.providers.base`, `.request`, `.transcript`, `.json_parse`, `.retry`, `.usage`, `.stream` | tested through the adapter suites (`test_providers_openai.py`, `test_providers_anthropic.py`) |

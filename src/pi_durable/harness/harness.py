@@ -53,7 +53,7 @@ from .types import (
     host_error,
 )
 from .usage import UsageDoc, UsageState, add_usage_state
-from .util import closed_error, scan_all
+from .util import closed_error, conversation_entries, scan_all
 from .view import ConversationViews, ConversationWindow
 
 _SCAN_PAGE_SIZE = 256
@@ -239,9 +239,9 @@ class ConversationHandleImpl:
         cursor: Any,
         context: Context,
     ) -> Page[EntryRecord, Any]:
-        bounded = {"conversationId": self.id, **dict(query)}
+        scan = conversation_entries(self.id, query)
         return await self._harness.read_on_line(
-            lambda line: line.scan_entries(cast(Any, bounded), limit, cursor, context)
+            lambda line: line.scan_entries(scan, limit, cursor, context)
         )
 
     async def fork(self, at: EntryId, options: Mapping[str, Any], context: Context) -> ConversationHandleImpl:

@@ -53,7 +53,15 @@ from .types import (
     Wake,
     host_error,
 )
-from .util import Waiters, closed_error, optional_extension, rejected, resolved, scan_all
+from .util import (
+    Waiters,
+    closed_error,
+    conversation_entries,
+    optional_extension,
+    rejected,
+    resolved,
+    scan_all,
+)
 
 _SCAN_PAGE_SIZE = 256
 LIVE_STATUSES = ("pending", "running", "waiting", "sleeping", "completing")
@@ -2350,6 +2358,21 @@ class _Runtime:
             if token is None or entry is None or entry.get("kind") == token.kind:
                 return entry
             return None
+
+        return await self._read(read, context)
+
+    async def entries(
+        self, query: Mapping[str, Any], limit: int, cursor: Any, context: Context
+    ) -> Any:
+        # The task's conversation's committed raw history, fork-aware. The scan is the one
+        # ``Conversation.entries()`` builds, and the read takes the Session line like every other
+        # runtime read, so it settles on committed state only (upstream ``scheduler.ts:2828-2834``).
+        scan = conversation_entries(self._invocation.conversation_id, query)
+
+        async def read() -> Any:
+            return await self._scheduler._session.read_on_line(
+                lambda line: line.scan_entries(scan, limit, cursor, context)
+            )
 
         return await self._read(read, context)
 
