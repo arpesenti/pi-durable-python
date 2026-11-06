@@ -342,9 +342,12 @@ class FauxModels:
                 steps.append(static(dict(response)))
             else:
                 raise TypeError(f"Unsupported faux response {response!r}")
-        pending = int(self.deferred.get("pendingFetches", 0))
-        if pending > 0 and steps:
-            steps[0].deferred_remaining = pending
+        # Configuring `deferred` is what makes the first response deferred; `pendingFetches` counts
+        # the later fetches that still report the response pending. The two are separate knobs
+        # upstream's faux keeps separate too: a case that wants one poll and an immediate answer
+        # configures `deferred` alone, and `deferredFetchCount` is then 1.
+        if self.deferred and steps:
+            steps[0].deferred_remaining = 1
         self.responses = steps
         self.requests = []
         self.models_used = []

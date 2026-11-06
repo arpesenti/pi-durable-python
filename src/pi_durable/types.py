@@ -52,7 +52,9 @@ __all__ = [
     "CommitChange",
     "CommitObservation",
     "CommitObserver",
+    "CommitOptions",
     "CommitPublication",
+    "CommitPersistence",
     "ContextEdit",
     "ConversationId",
     "ConversationOwnership",
@@ -968,6 +970,63 @@ CommitChange: TypeAlias = TableCommitChange | DocumentCommitChange
 class CommitPublication(TypedDict):
     seq: Seq
     changes: list[CommitChange]
+
+
+class ObservedStoredCommit(TypedDict):
+    """A stored commit as the Session's own followers see it: a :data:`CommitPublication` and its kind."""
+
+    kind: Literal["stored"]
+    seq: Seq
+    changes: list[CommitChange]
+
+
+class ObservedMemoryCommit(TypedDict):
+    """A deferred commit's document changes as memory adopted them and Storage never saw.
+
+    The Session's own followers receive it in place of a stored publication; it carries no sequence
+    number because the commit has none yet (spec §4.1).
+    """
+
+    kind: Literal["memory"]
+    changes: list[DocumentCommitChange]
+
+
+#: What the Session's own followers -- its watches, its document observers, and the internal commit
+#: listener -- are handed per commit: the durable publication once the commit is stored, the
+#: memory-only one while a deferred commit's changes are still held (spec §4.1).
+ObservedCommit: TypeAlias = ObservedStoredCommit | ObservedMemoryCommit
+
+
+class ImmediatePersistence(TypedDict):
+    """Store the commit before it resolves: what every commit does until it asks otherwise."""
+
+    kind: Literal["immediate"]
+
+
+class DeferredPersistence(TypedDict):
+    """Store the commit later than it is shown, at the latest about ``within_ms`` after it.
+
+    Held only when every write of the commit changes an existing conversation document with
+    ``history: "latest"`` and ``fork: "initial"``; anything else makes the commit immediate. The
+    Session adopts it and shows it to watches and views at once, and Storage gets it with the next
+    commit that reads or writes the document, when the document leaves memory or retires, at
+    ``close()``, or when the deadline comes (spec §4.1).
+    """
+
+    kind: Literal["deferred"]
+    #: How long the commit may wait to be stored, at the latest; the Session's default when absent,
+    #: and ``inf`` waits for another trigger. Refused when it is not a number of milliseconds, 0 or
+    #: more.
+    within_ms: NotRequired[int | float]
+
+
+CommitPersistence: TypeAlias = ImmediatePersistence | DeferredPersistence
+
+
+class CommitOptions(TypedDict):
+    """Options of one Session commit."""
+
+    persistence: NotRequired[CommitPersistence]
 
 
 class WatchValueCall(TypedDict, Generic[JsonValueT_co]):

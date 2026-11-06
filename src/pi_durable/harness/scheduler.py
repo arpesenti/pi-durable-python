@@ -27,8 +27,9 @@ from ..session.session import SessionImpl
 from ..session.transaction import Transaction
 from ..timers import Timers
 from ..types import (
-    CommitPublication,
+    CommitOptions,
     NextTaskState,
+    ObservedCommit,
     RunningTask,
     Storage,
     StorageWrite,
@@ -808,7 +809,7 @@ class TaskScheduler:
 
     # ── Scheduling ─────────────────────────────────────────────────────────
 
-    def _observe(self, publication: CommitPublication, context: Context) -> None:
+    def _observe(self, publication: ObservedCommit, context: Context) -> None:
         updated: list[AnyTaskRecord] = []
         failed: list[TaskId] = []
         changed = False
@@ -2396,7 +2397,12 @@ class _Runtime:
     def hooks(self) -> _HookRunner:
         return _HookRunner(self._scheduler, self._invocation, self._phase)
 
-    def commit(self, change: Callable[..., Any], context: Context) -> asyncio.Future[None]:
+    def commit(
+        self,
+        change: Callable[..., Any],
+        context: Context,
+        options: CommitOptions | None = None,
+    ) -> asyncio.Future[None]:
         async def run() -> None:
             async def apply(tx: Transaction, current: ErasedRunningTask) -> None:
                 result = _invoke_change(change, tx, current)
@@ -2407,7 +2413,7 @@ class _Runtime:
                 if following is not None:
                     await self._scheduler._commit_state(tx, self._invocation, current, following)
 
-            await self._gated(apply, context)
+            await self._gated(apply, context, options)
 
         commit = asyncio.ensure_future(run())
         self._invocation.commits.add(commit)
@@ -2688,6 +2694,7 @@ class _Runtime:
         self,
         change: Callable[[Transaction, ErasedRunningTask], Awaitable[Any] | Any],
         context: Context,
+        options: CommitOptions | None = None,
     ) -> Any:
         if self._invocation.ended:
             raise _ended_error(self._invocation)
@@ -2723,7 +2730,8 @@ class _Runtime:
             return await self._scheduler._session.commit_with(
                 apply,
                 context,
-                TransactionScope(
+                options=options,
+                scope=TransactionScope(
                     conversation_id=self._invocation.conversation_id,
                     task_id=self._invocation.task_id,
                 ),

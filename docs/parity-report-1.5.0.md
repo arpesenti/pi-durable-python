@@ -114,6 +114,34 @@ baseline left alone. These are the rows this baseline adds or moves.
   #36 and #48, which own `HookApi.entry()`/`entries()`: every assertion of it runs through a hook
   `api` the port does not carry, and the module docstring names it.
 
+- **#47, the deferred-commit mechanism and `session-deferred-commits`.** The Session now holds a
+  deferred commit's changes in memory and stores them at the next trigger: a commit that reads or
+  writes that document, a drop of its tracker, a version reload, close, or one foreground timer held
+  for the earliest `within_ms`. `tests/test_session_deferred_commits.py` translates
+  `test/session-deferred-commits.test.ts` case for case, 25 of them, with the upstream title in each
+  docstring. The two-audience split it proves is the mechanism's point: `AdoptedDocuments` separates
+  what the Session's own followers were shown (`observed`) from what Storage made durable (`stored`),
+  so a held store is published to the host's `observe_commits()` observer alone, never again to the
+  watches and views that saw the partial when it was adopted.
+  `tests/test_harness_live_deltas.py` follows upstream here, not its own earlier translation: the
+  streamed-partial case follows memory through the internal seam (`followCommits`,
+  `session-support.ts:250-256`) and slices the stream positionally, while the three cases that assert
+  what Storage received attach a host `CommitObserver` (`harness-live-deltas.test.ts:118,342,385,428`),
+  and the tools case sets `progress.persist_within_ms` as upstream's does (`:339`).
+  What the same behaviour costs above the Session, translated case for case: `tests/test_harness_deferred_progress.py`
+  runs all 11 cases of `test/harness-deferred-progress.test.ts`, plus one port-side case that pins the
+  negative the mechanism rests on: the partial answer and the streaming
+  tool output visible to watches while Storage is held, converted to durable by a crash, by a clean
+  close, or by their deadline, with the progress commits of a cut-off task never counted as progress
+  (`#11139`) and a third party reading the held answer inside its own commit. The host's
+  `CommitObserver` is asserted there to receive nothing at all for a partial only memory adopted --
+  the assertion reads the published values, not the operation paths, because a held revision can reach
+  Storage folded into another commit's base write.
+  In `tests/test_session_group_commit.py`, the eleven cases that had waited on this mechanism (`:325`,
+  `:360`, `:390`, `:596`, `:615`, `:662`, `:680`, `:839`, `:857`, `:885`, `:902`) are translated into
+  its table, and an entry that named no upstream case at all is gone from that module's deferral block;
+  the record-cache case (`:635`) stays the one exclusion it records there.
+
 ## Exclusions this baseline takes
 
 The 1.4.0 exclusions ([ADR 0002](./adr/0002-upstream-1-4-0-scope.md)) stay in force and stay listed in

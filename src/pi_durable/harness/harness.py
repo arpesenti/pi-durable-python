@@ -14,6 +14,7 @@ from ..session.transaction import Transaction, TransactionScope
 from ..timers import host_timers
 from ..types import (
     ROOT_CONVERSATION_ID,
+    CommitOptions,
     ConversationOwnership,
     ConversationRecord,
     EntryDraft,
@@ -226,8 +227,12 @@ class ConversationHandleImpl:
             return await self._harness.submit(self.id, first, second)
         return await self._harness.admit(first, self.id, second)
 
-    async def commit(self, change: Callable[[Transaction], Any], context: Context) -> Any:
-        return await self._harness.commit_with(change, context, TransactionScope(conversation_id=self.id))
+    async def commit(
+        self, change: Callable[[Transaction], Any], context: Context, options: CommitOptions | None = None
+    ) -> Any:
+        return await self._harness.commit_with(
+            change, context, TransactionScope(conversation_id=self.id), options
+        )
 
     async def context(self, context: Context, options: Mapping[str, Any] | None = None) -> ContextView:
         return await self._harness.context(self.id, context, (options or {}).get("at"))
@@ -300,6 +305,11 @@ class Harness(SessionImpl):
             lambda: _settings_value(host_settings(), "document_retention_ms"),
             options.get("set_timer", options.get("setTimer")),
             read_only,
+            # Read at each use, as all settings are, but only this field: it is read on every commit
+            # (`harness.ts:222-230`).
+            lambda: _settings_value(
+                _settings_value(host_settings(), "progress"), "persist_within_ms"
+            ),
         )
         self._options = dict(options)
         self._report_sink = report

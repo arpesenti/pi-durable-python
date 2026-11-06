@@ -29,6 +29,7 @@ from ..types import (
     CommitChange,
     CommitObservation,
     CommitObserver,
+    CommitOptions,
     CommitPublication,
     CommitPublicationScope,
     CommitReceipt,
@@ -39,6 +40,7 @@ from ..types import (
     DocumentAddress,
     DocumentCommitChange,
     DocumentCommittedChange,
+    DocumentContent,
     DocumentPoint,
     DocumentQuery,
     DocumentRecord,
@@ -47,6 +49,7 @@ from ..types import (
     EntryQuery,
     EntryRecord,
     EntryWithHead,
+    ObservedCommit,
     Observer,
     Page,
     PublishingStorage,
@@ -59,7 +62,7 @@ from ..types import (
     TaskQuery,
     TaskRecord,
 )
-from .keys import ALL_KEYS, GatedStorage, document_key
+from .keys import ALL_KEYS, GatedStorage, document_key, incarnation_key
 from .observation import (
     ENDED,
     AttachedObservation,
@@ -69,7 +72,16 @@ from .observation import (
     contained,
     session_closed_error,
 )
-from .transaction import LoadedDocument, Transaction, TransactionScope
+from .transaction import (
+    AdoptedDocuments,
+    HeldChanges,
+    HeldDocument,
+    LoadedDocument,
+    PendingOps,
+    Transaction,
+    TransactionScope,
+    store_held,
+)
 from .writer import PartSpec, PublishFailure, Writer
 
 #: Default document retention: ten minutes, as for kept contexts.
@@ -81,6 +93,9 @@ _DEFAULT_DOCUMENT_RETENTION_MS = 600_000
 MAX_OUTSTANDING = 256
 
 _default_document_retention: int | float = _DEFAULT_DOCUMENT_RETENTION_MS
+
+#: Default ``within_ms`` of a deferred commit: ``settings.progress.persist_within_ms``.
+_DEFAULT_PERSIST_WITHIN_MS = 1_000
 
 
 def set_default_document_retention(ms: int | float) -> None:
@@ -100,6 +115,20 @@ def document_retention(ms: int | float | None) -> int | float:
     if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0:
         return ms
     return _default_document_retention
+
+
+def persist_within(ms: int | float | None) -> int | float:
+    """Return a deferred commit's default window as given when it is a number of milliseconds,
+    ``0`` or more.
+
+    ``Infinity`` waits for another trigger -- a commit that reads or writes the document, a drop of
+    its tracker, or close. A value that is not a number of milliseconds means the default; unlike a
+    commit's own :meth:`SessionImpl._deferral`, a setting never throws.
+    """
+
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0:
+        return ms
+    return _DEFAULT_PERSIST_WITHIN_MS
 
 
 def create_session(storage: Storage, options: dict[str, Any] | None = None, **kwargs: Any) -> SessionImpl:
@@ -192,6 +221,29 @@ class _WatchAttachment:
 
 
 @dataclass(slots=True)
+class _Hold(HeldDocument):
+    """A held document as the Session keeps it: its queue, its earliest deadline, and its pin.
+
+    The pin is what keeps the held changes alive past the moment their address has no reader left;
+    it is released with the hold, never by a sweep (spec §4.1).
+    """
+
+    #: When the earliest of its held commits must be stored, on the Session clock.
+    deadline: int | float = 0
+    unpin: Callable[[], None] = lambda: None
+
+
+@dataclass(slots=True)
+class _HoldTimer:
+    """The armed store of held documents: one foreground timer for the earliest deadline."""
+
+    at: int | float
+    disarm: Callable[[], None]
+    #: Set when it fired and cleared once its job ran: a fired timer stays, so nothing re-arms behind it.
+    fired: bool = False
+
+
+@dataclass(slots=True)
 class _DocumentSweep:
     """The pending eviction: a background timer for the oldest idle document, or a line job."""
 
@@ -206,6 +258,7 @@ class DocumentCacheSizes(TypedDict):
     idle: int
     attached: int
     sweeps: int
+    held: int
 
 
 @dataclass(slots=True)
@@ -312,6 +365,7 @@ class SessionImpl:
         document_retention_ms: int | float | Callable[[], int | float | None] | None = None,
         set_timer: SetTimer | None = None,
         read_only: bool = False,
+        persist_within_ms: int | float | Callable[[], int | float | None] | None = None,
     ) -> None:
         self._read_only = read_only
         self._documents: dict[str, LoadedDocument] = {}
@@ -319,6 +373,9 @@ class SessionImpl:
         self._idle_documents: dict[str, int | float] = {}
         # Observers attached per incarnation (record ID); a cached incarnation with any stays.
         self._attached_documents: dict[DocumentId, int] = {}
+        # Documents with held changes, by incarnation; each is pinned in the cache until stored.
+        self._holds: dict[DocumentId, _Hold] = {}
+        self._hold_timer: _HoldTimer | None = None
         self._document_sweep: _DocumentSweep | None = None
         self._sweep_jobs = 0
         self._document_timers_unavailable = False
@@ -328,7 +385,7 @@ class SessionImpl:
         # Host observers of every stored commit (`observe_commits`), ended at the close's last publication.
         self._commit_observers: list[GuardedObserver] = []
         # The Session's own components follow every commit; a throw leaves their state behind storage.
-        self._internal_listeners: list[Callable[[CommitPublication, Context], Any]] = []
+        self._internal_listeners: list[Callable[[ObservedCommit, Context], Any]] = []
         self._close_listeners: list[Callable[[], Any]] = []
         # The end of the last line job: the line runs one job at a time. Never raises.
         self._tail: asyncio.Future[None] = _settled_future(_current_loop())
@@ -369,8 +426,16 @@ class SessionImpl:
             except Exception:
                 return document_retention(None)
 
+        def within() -> int | float:
+            try:
+                value = persist_within_ms() if callable(persist_within_ms) else persist_within_ms
+                return persist_within(value)
+            except Exception:
+                return persist_within(None)
+
         self._clock = clock
         self._document_retention_ms = retention
+        self._persist_within_ms = within
         self._storage = GuardedStorage(storage, self)
         self._gated = GatedStorage(cast(Storage, self._storage), self.touch)
         self._writer = Writer(_WriterHost(self))
@@ -693,17 +758,45 @@ class SessionImpl:
         self,
         change: Callable[[Transaction], Any],
         context: Context,
+        options: CommitOptions | None = None,
     ) -> Any:
-        return await self.commit_with(change, context)
+        return await self.commit_with(change, context, None, options)
 
     async def commit_with(
         self,
         change: Callable[[Transaction], Any],
         context: Context,
         scope: TransactionScope | None = None,
+        options: CommitOptions | None = None,
     ) -> Any:
         self.assert_usable()
-        return await self._enqueue(partial(self._run_commit, change, context, scope))
+        return await self._enqueue(
+            partial(self._run_commit, change, context, scope, self._deferral(options))
+        )
+
+    def _deferral(self, options: CommitOptions | None) -> int | float | None:
+        """How long this commit may wait to be stored, or ``None`` to store it before it resolves.
+
+        One mark covers both kinds: whether Storage gets the commit is not something the callback can
+        steer, so an ordinary :meth:`Session.commit` can be deferred too. Only the shape of
+        ``persistence`` is trusted, and a request with no ``within_ms`` gets the Session's default. A
+        ``within_ms`` that is not a number of milliseconds, ``0`` or more, is refused here rather than
+        at the timer: the types cannot check a caller's number (``session.ts:515-524``).
+        """
+
+        persistence = options.get("persistence") if options is not None else None
+        if persistence is None:
+            return None
+        if persistence["kind"] != "deferred":
+            return None
+        within = persistence.get("within_ms")
+        if within is None:
+            return self._persist_within_ms()
+        if isinstance(within, bool) or not isinstance(within, (int, float)) or not within >= 0:
+            raise TypeError(
+                "CommitPersistence.within_ms must be a number of milliseconds, 0 or more"
+            )
+        return within
 
     async def commit_internal(
         self,
@@ -720,13 +813,18 @@ class SessionImpl:
         """
 
         self.assert_usable()
-        return await self._enqueue(partial(self._run_commit, change, context, None), exempt=True)
+        # No scope and no deferral: upstream passes `undefined` for both, so a commit of the
+        # scheduler's own is never held (`session.ts:486-493`).
+        return await self._enqueue(
+            partial(self._run_commit, change, context, None, None), exempt=True
+        )
 
     async def _run_commit(
         self,
         change: Callable[[Transaction], Any],
         context: Context,
         scope: TransactionScope | None,
+        within_ms: int | float | None,
         job: _LineJob,
     ) -> _Ran:
         """One commit's line part: its callback, its settlement, and its logical admission."""
@@ -757,23 +855,49 @@ class SessionImpl:
             tx.discard()
             self._sweep_documents()
             raise ReadOnlySession("a commit with writes")
-        membership = self.membership_keys(tx)
-        if not isinstance(membership, list):
-            try:
-                membership = await cast(Awaitable[Sequence[str]], membership)
-            except BaseException:
-                tx.discard()
-                self._sweep_documents()
-                raise
+        # Nothing fallible is left, so the hold is allowed to move memory ahead of Storage. A
+        # deferred commit whose every write may wait is held in memory instead; anything else, and any
+        # commit not asked to wait, is stored.
+        held: list[HeldChanges] | None = tx.holdable() if within_ms is not None else None
+        taken: list[_Hold] = []
+        # Only a commit that is stored declares the extra keys it writes: a held commit writes nothing
+        # yet, so it declares the documents it holds and nothing else (`session.ts:1118-1152`).
+        membership: Sequence[str] = ()
+        if held is None:
+            # Logical admission asks for the keys a commit writes besides its records' -- a Harness
+            # adds the ownership memberships its task changes write -- before the commit is admitted,
+            # on the line, so a later job that reads one of them waits for it.
+            declared = self.membership_keys(tx)
+            if not isinstance(declared, list):
+                try:
+                    declared = await cast(Awaitable[Sequence[str]], declared)
+                except BaseException:
+                    tx.discard()
+                    self._sweep_documents()
+                    raise
+            membership = declared
+            # An immediate commit stores what earlier deferred commits adopted in memory before its
+            # own changes, so Storage stays complete below it. Taken before the keys, so the documents
+            # it stores held changes of are its writes too: a later job that reads one waits for it
+            # instead of storing them again.
+            taken = tx.take_held(self._hold_of)
+        assert held is None or within_ms is not None
+        publish: Callable[[Seq | None], PublishFailure | None] = (
+            partial(self._hold, tx, held, within_ms, context)
+            if held is not None and within_ms is not None
+            else partial(self._adopt, tx, writes, taken, context)
+        )
         # Logical admission: the writer stores it, off the line, and the line goes on. Its keys join
         # the unpublished write set here, so a later job that touches one waits for its publication.
         part = self._writer.admit(
             PartSpec(
                 index=job.index,
-                writes=writes,
+                # A deferred commit that holds its changes gives the writer nothing at all, and its
+                # publication adopts it in memory and queues the store instead of publishing a commit.
+                writes=None if held is not None else writes,
                 keys=[*tx.write_keys(), *membership],
                 context=context,
-                publish=partial(self._adopt, tx, writes, context),
+                publish=publish,
                 discard=tx.discard,
             )
         )
@@ -788,10 +912,204 @@ class SessionImpl:
 
         return []
 
+    def _hold(
+        self,
+        tx: Transaction,
+        held: list[HeldChanges],
+        within_ms: int | float,
+        context: Context,
+        _seq: Seq | None,
+    ) -> PublishFailure | None:
+        """Adopt one commit's changes in memory only, queue their store, and show them now.
+
+        Its callers are already released; the writer publishes it with no sequence number and no commit
+        observer, because it is not a durable commit yet. Watches, document observers, and the internal
+        commit listener still see it, because they follow committed state as memory holds it, not as
+        Storage holds it (spec §4.1).
+        """
+
+        try:
+            documents = tx.adopt_held()
+        except Exception as error:
+            return PublishFailure("adoption", error)
+        deadline = self._clock() + within_ms
+        for changes in held:
+            loaded = changes.loaded
+            id = loaded.record["id"]
+            entry = self._holds.get(id)
+            if entry is None:
+                # Pin the document, so the held changes survive the moment their address has no
+                # reader left; the unpin belongs to this hold, not to the count.
+                entry = _Hold(
+                    loaded=loaded,
+                    pending=PendingOps(),
+                    base=False,
+                    deadline=deadline,
+                    unpin=self._pin_document(loaded.address_id, id),
+                )
+                self._holds[id] = entry
+            else:
+                entry.deadline = min(entry.deadline, deadline)
+            entry.pending.push(changes.ops)
+            if changes.base:
+                entry.base = True
+        self._arm_hold_timer()
+        failure = self._advance_followers(documents, (), {"kind": "memory", "changes": documents}, context)
+        return None if failure is None else PublishFailure("listener", failure)
+
+    def _hold_of(self, id: DocumentId) -> _Hold | None:
+        """The queued changes of a cached incarnation, for one commit to store before its own."""
+
+        return self._holds.get(id)
+
+    def _hold_of_id(self, id: DocumentId) -> list[_Hold]:
+        """One incarnation's hold as a ``select`` argument, or none when it has nothing held."""
+
+        entry = self._holds.get(id)
+        return [] if entry is None else [entry]
+
+    async def _store_holds(
+        self,
+        select: Callable[[], Sequence[_Hold]],
+        context: Context,
+    ) -> None:
+        """Store the held changes ``select`` returns, in one storage transaction, from a job on the line.
+
+        A barrier: they are selected once every commit admitted before is published. Memory already has
+        them, so the Session's own followers were shown each one when it was adopted and see nothing
+        here; only the host's commit observers do, published as the writer publishes it. A failure fails
+        the Session, as every Storage failure does (``session.ts:1249-1281``).
+        """
+
+        await self._drained()
+        holds = list(select())
+        if not holds:
+            return
+        writes: list[StorageWrite] = []
+        contents: list[DocumentContent] = []
+        changes: list[CommitChange] = []
+        keys: list[str] = []
+        for entry in holds:
+            loaded = entry.loaded
+            content, ops = store_held(entry, [], loaded.value, loaded.value_version)
+            contents.append(content)
+            writes.append(
+                cast(
+                    StorageWrite,
+                    {"type": "document.change", "id": loaded.record["id"], "content": content},
+                )
+            )
+            keys.append(document_key(loaded.address_id))
+            keys.append(incarnation_key(loaded.record["id"]))
+            scope = loaded.record["scope"]
+            changes.append(
+                {
+                    "type": "document",
+                    "kind": "change",
+                    "record": loaded.record,
+                    # Held documents are conversation documents.
+                    "conversationId": (
+                        scope["conversationId"] if scope["kind"] == "conversation" else None
+                    ),
+                    "version": loaded.value_version,
+                    "value": loaded.value,
+                    "ops": ops,
+                }
+            )
+
+        def publish(seq: Seq | None) -> PublishFailure | None:
+            for index, entry in enumerate(holds):
+                if contents[index]["kind"] == "base":
+                    entry.loaded.deltas_since_base = 0
+                else:
+                    entry.loaded.deltas_since_base += 1
+            if seq is not None and self._commit_observers:
+                self._advance_commit_observers({"seq": seq, "changes": changes}, context)
+            self._release(holds)
+            return None
+
+        assert self._current is not None
+        part = self._writer.admit(
+            PartSpec(
+                index=self._current.index,
+                writes=writes,
+                keys=keys,
+                context=context,
+                publish=publish,
+                discard=lambda: None,
+            )
+        )
+        await part.outcome
+
+    def _release(self, holds: Sequence[_Hold]) -> None:
+        """After their store: forget ``holds``, unpin their documents, and move the timer on."""
+
+        for entry in holds:
+            id = entry.loaded.record["id"]
+            if self._holds.get(id) is entry:
+                del self._holds[id]
+                entry.unpin()
+        self._arm_hold_timer()
+
+    def _arm_hold_timer(self) -> None:
+        """Keep one foreground timer for the earliest deadline among the held documents.
+
+        When it fires, every held document is stored, in one storage transaction: a deadline is the
+        latest time any one of them may wait, and the others cost little more in the same transaction.
+        Once a timer has fired it stays until its job ran, so nothing re-arms behind it. Workers refuse
+        a background timer, and this store is the commit's own durability rather than upkeep the host
+        may skip, so it is armed foreground (``session.ts:1295-1322``). Nothing polls or counts turns:
+        the host's timer is the only thing that decides when, and each store re-arms it for what is
+        still held.
+        """
+
+        if self._closing is not None:
+            return
+        deadline: int | float = float("inf")
+        for entry in self._holds.values():
+            if entry.deadline < deadline:
+                deadline = entry.deadline
+        armed = self._hold_timer
+        if armed is not None and (armed.fired or armed.at == deadline):
+            return
+        self._disarm_hold_timer()
+        # A document held behind `within_ms: Infinity` waits for another trigger; there is nothing to
+        # arm, and nothing to keep armed from a previous document (`session.ts:1305-1311`).
+        if deadline == float("inf"):
+            return
+        timer = _HoldTimer(at=deadline, disarm=lambda: None)
+
+        def run() -> None:
+            timer.fired = True
+
+            async def store(_job: _LineJob) -> None:
+                if self._hold_timer is timer:
+                    self._hold_timer = None
+                # Close stores what is held itself.
+                if self._closing is not None or self._failure is not None:
+                    return
+                await self._store_holds(lambda: list(self._holds.values()), BACKGROUND_CONTEXT)
+
+            # Upstream's timer calls `#maintain`, which attaches the job to the tail the moment it is
+            # called (`session.ts:1310-1318`); queueing a task would insert a turn upstream does not
+            # have, and that turn decides where the store lands on the line. Nothing awaits it, so its
+            # failure is retrieved, not carried -- as for the document sweep's job.
+            self._queue_line(store, bounded=False)
+
+        self._hold_timer = timer
+        timer.disarm = self._timers.foreground(run, max(0.0, deadline - self._clock()))
+
+    def _disarm_hold_timer(self) -> None:
+        timer = self._hold_timer
+        if timer is not None:
+            timer.disarm()
+            self._hold_timer = None
+
     def _adopt(
         self,
         tx: Transaction,
         writes: Sequence[StorageWrite],
+        taken: Sequence[_Hold],
         context: Context,
         seq: Seq | None,
     ) -> PublishFailure | None:
@@ -807,7 +1125,8 @@ class SessionImpl:
         except Exception as error:
             return PublishFailure("adoption", error)
         failure = self._publish(seq, writes, documents, context)
-        for document in documents:
+        self._release(taken)
+        for document in documents.stored:
             self._touch_document(_record_address_id(document["record"]))
         return None if failure is None else PublishFailure("listener", failure)
 
@@ -960,6 +1279,17 @@ class SessionImpl:
         """
 
         await self._drained()
+        # Last, after the writes at close and while the trackers are still here. A failed Session
+        # writes nothing; a failing store fails it, and the backend still closes -- so the store's
+        # error is kept and thrown only after the close ran (`session.ts:788-818`).
+        unstored: BaseException | None = None
+        if self._failure is None and self._holds:
+            try:
+                await self._store_holds(
+                    lambda: list(self._holds.values()), without_abort_signal(BACKGROUND_CONTEXT)
+                )
+            except BaseException as store_error:
+                unstored = store_error
         # After the last publication: every commit admitted before the seal has settled, so a commit
         # observer's end follows the last publication it was handed.
         commit_observers, self._commit_observers = self._commit_observers, []
@@ -970,6 +1300,7 @@ class SessionImpl:
         self._documents.clear()
         self._idle_documents.clear()
         self._attached_documents.clear()
+        self._holds.clear()
         self._observers.clear()
         try:
             await self._storage.close(without_abort_signal(BACKGROUND_CONTEXT))
@@ -978,6 +1309,8 @@ class SessionImpl:
                 self._failure = close_error
                 self.report(close_error, {"kind": "storage_failed"})
             raise
+        if unstored is not None:
+            raise unstored
 
     def _settle_closed(self, end: SessionEnd) -> None:
         """Settle ``closed``, once, with the end the Session ended by."""
@@ -987,6 +1320,7 @@ class SessionImpl:
 
     def _notify_close(self) -> None:
         self._cancel_document_sweep()
+        self._disarm_hold_timer()
         listeners = self._close_listeners
         self._close_listeners = []
         for listener in listeners:
@@ -1026,7 +1360,7 @@ class SessionImpl:
 
     def observe_stored_commits(
         self,
-        listener: Callable[[CommitPublication, Context], Any],
+        listener: Callable[[ObservedCommit, Context], Any],
     ) -> Callable[[], None]:
         """Internal: a commit listener whose state follows storage; a throw fails the Session."""
 
@@ -1045,7 +1379,7 @@ class SessionImpl:
         self,
         seq: Seq,
         writes: Sequence[StorageWrite],
-        documents: list[DocumentCommitChange],
+        documents: AdoptedDocuments,
         context: Context,
     ) -> BaseException | None:
         """Publish one stored commit to memory and to the Session's observers.
@@ -1053,6 +1387,11 @@ class SessionImpl:
         Returns the error the first of the Session's own observers threw, or ``None``: the commit is
         durable, so a failing observer neither fails the commit nor skips the others, and the writer
         fails the Session with it once the host listeners had the commit.
+
+        The two audiences differ. The Session's own followers -- its watches, its observers, and the
+        internal commit listener -- see what memory adopted, which is what a held commit already
+        showed them; the host's ``observe_commits()`` observer sees what Storage made durable, held
+        changes a later commit stored included (spec §4.1).
         """
 
         if (
@@ -1062,13 +1401,43 @@ class SessionImpl:
             and not self._observers
         ):
             return None
-        changes: list[CommitChange] = [
+        tables: list[CommitChange] = [
             cast(CommitChange, write)
             for write in writes
             if write["type"] in ("conversation", "entry", "task", "submission")
         ]
-        changes.extend(documents)
-        publication: CommitPublication = {"seq": seq, "changes": changes}
+        changes: list[CommitChange] = [*tables, *documents.observed]
+        observed: ObservedCommit = {"kind": "stored", "seq": seq, "changes": changes}
+        failure = self._advance_followers(documents.observed, writes, observed, context)
+        if self._commit_observers:
+            # One publication for both audiences, unless the commit also stored held changes: those
+            # belong to the host's observer alone, because memory was shown them when each deferred
+            # commit was adopted.
+            stored: CommitPublication = (
+                {"seq": seq, "changes": changes}
+                if documents.stored is documents.observed
+                else {"seq": seq, "changes": [*tables, *documents.stored]}
+            )
+            self._advance_commit_observers(stored, context)
+        return failure
+
+    def _advance_followers(
+        self,
+        documents: Sequence[DocumentCommitChange],
+        writes: Sequence[StorageWrite],
+        publication: ObservedCommit,
+        context: Context,
+    ) -> BaseException | None:
+        """Show one commit's adopted documents to the Session's own followers.
+
+        Watches, document observers, and the internal commit listener all follow committed state as
+        memory holds it, so a deferred commit -- adopted, never stored -- reaches them through here
+        too, with nothing but its own document changes (``writes`` empty). Returns the first error an
+        own follower threw.
+        """
+
+        if not self._internal_listeners and not self._watches and not self._observers:
+            return None
         for entry in list(self._observers):
             self._advance_observer(entry, documents, writes, context)
         for entry in list(self._watches):
@@ -1100,16 +1469,21 @@ class SessionImpl:
             if not failures:
                 failures.append(error)
 
-        for listener in list(self._internal_listeners):
-            contained(partial(listener, publication, context), keep)
+        if self._internal_listeners:
+            for listener in list(self._internal_listeners):
+                contained(partial(listener, publication, context), keep)
+        return failures[0] if failures else None
+
+    def _advance_commit_observers(self, publication: CommitPublication, context: Context) -> None:
+        """Hand the host's commit observers what Storage made durable, in line order.
+
+        It is read at delivery: an observer that an earlier advance detached — its own or another
+        observer's — takes nothing of the commit it was attached for (§9.1).
+        """
+
         for observer in list(self._commit_observers):
-            # A commit observer mirrors what Storage made durable, in line order, and in no
-            # particular order with the watch listeners. It is read at delivery: an observer that an
-            # earlier advance detached — its own or another observer's — takes nothing of the commit
-            # it was attached for (§9.1).
             if observer.attached:
                 observer.advance(publication, context)
-        return failures[0] if failures else None
 
     def _follow_address(
         self,
@@ -1140,7 +1514,7 @@ class SessionImpl:
     def _advance_observer(
         self,
         entry: _WatchAttachment,
-        documents: list[DocumentCommitChange],
+        documents: Sequence[DocumentCommitChange],
         writes: Sequence[StorageWrite],
         context: Context,
     ) -> None:
@@ -1213,6 +1587,9 @@ class SessionImpl:
             self._touch_document(address_id)
             return cached
         if cached is not None:
+            # The reload must find what memory holds: held changes are stored before their tracker goes,
+            # after a barrier.
+            await self._store_holds(partial(self._hold_of_id, cached.record["id"]), context)
             self._drop_document(address_id)
         record = await self._storage.find_document(address, "current", context)
         if record is None:
@@ -1233,9 +1610,14 @@ class SessionImpl:
         return loaded
 
     async def unload_documents(self) -> None:
-        """Drop every loaded document value; later access cold-loads from Storage."""
+        """Drop every loaded document value on the mutation line, held changes stored first.
+
+        Later access cold-loads from Storage, so the store is a barrier before the trackers go.
+        """
 
         async def drop(_job: _LineJob) -> None:
+            if self._failure is None:
+                await self._store_holds(lambda: list(self._holds.values()), BACKGROUND_CONTEXT)
             self._documents.clear()
             self._idle_documents.clear()
 
@@ -1495,6 +1877,7 @@ class SessionImpl:
             idle=len(self._idle_documents),
             attached=len(self._attached_documents),
             sweeps=self._sweep_jobs,
+            held=len(self._holds),
         )
 
     def _touch_document(self, address_id: str) -> None:
@@ -1517,6 +1900,9 @@ class SessionImpl:
             self._schedule_document_sweep()
 
     def _drop_document(self, address_id: str) -> None:
+        # Nothing here asks whether the document has held changes: the hold pins it out of the idle
+        # set, and the store at unload, at a version reload, and at close is what keeps its changes
+        # from being dropped unstored (`session.ts:996-999`).
         self._documents.pop(address_id, None)
         self._idle_documents.pop(address_id, None)
 
@@ -1616,6 +2002,11 @@ class SessionImpl:
         for cached_id, since in list(self._idle_documents.items()):
             if since > expired:
                 break
+            # A document with an unpublished change stays until its publication touches it -- the
+            # held changes of a deferred commit are exactly that, and their part is admitted before
+            # this sweep runs and published after it (`session.ts:1052-1053`).
+            if self._writer.gate(document_key(cached_id)) is not None:
+                continue
             self._drop_document(cached_id)
         self._schedule_document_sweep()
 
