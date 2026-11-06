@@ -26,6 +26,7 @@ from ..types import (
     Storage,
     TaskOutcome,
     TaskRecord,
+    watch_value_call,
 )
 from .scheduler import BlockedReason, blocked_subject, json_equal
 from .util import cancellation_error, closed_error, scan_all
@@ -96,7 +97,7 @@ class TaskGraph(TypedDict):
 
 
 TaskGraphWatch: TypeAlias = CommittedWatch
-"""A serialized exact-frame watch of the task graph."""
+"""A serialized coalesced watch of the task graph."""
 
 
 @dataclass(slots=True)
@@ -139,7 +140,7 @@ class TaskGraphView:
         return await self._attach(_state_observer, context)
 
     async def watch(self, context: Context) -> CommittedWatch:
-        """A serialized exact-frame watch of the graph; aborting ``context`` ends it ``aborted``."""
+        """A serialized coalesced watch of the graph; aborting ``context`` ends it ``aborted``."""
 
         observer = await self._attach(_watch_observer, context)
         signal = context.abort_signal
@@ -234,9 +235,9 @@ class TaskGraphView:
                 tasks[key] = cast(TaskGraphNode, {**current, "blocked": op[2]})
         mount.value = {"tasks": tasks}
         frame_context = without_abort_signal(BACKGROUND_CONTEXT)
+        call = watch_value_call(mount.value, ops)
         for observer in list(mount.observers):
-            advance = getattr(observer, "advance_frame", None) or observer.advance
-            contained(partial(advance, mount.value, ops, frame_context), self.report)
+            contained(partial(observer.advance, call, frame_context), self.report)
 
     async def _build(self, context: Context) -> tuple[TaskGraph, dict[str, dict[str, Any]]]:
         records: list[TaskRecord] = []
@@ -371,9 +372,9 @@ def advance_graph(
             tasks[path[1]] = {**current, "conversations": op[2]}
     mount.value = {"tasks": tasks}
     frame_context = without_abort_signal(context)
+    call = watch_value_call(mount.value, ops)
     for observer in list(mount.observers):
-        advance = getattr(observer, "advance_frame", None) or observer.advance
-        contained(partial(advance, mount.value, ops, frame_context), report)
+        contained(partial(observer.advance, call, frame_context), report)
 
 
 def _node_of(

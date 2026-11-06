@@ -108,11 +108,15 @@ __all__ = [
     "Tx",
     "TypedEntry",
     "TypedEntryDraft",
+    "WatchCall",
     "WatchEnd",
     "WatchEnded",
+    "WatchFailedCall",
     "WatchHandle",
+    "WatchValueCall",
     "entry_draft",
     "entry_record",
+    "watch_value_call",
 ]
 
 MessageRecord: TypeAlias = dict[str, JsonValue]
@@ -939,6 +943,50 @@ class CommitPublication(TypedDict):
     changes: list[CommitChange]
 
 
+class WatchValueCall(TypedDict, Generic[JsonValueT_co]):
+    """One listener call: the newest value, the operations that reach it, and a retirement.
+
+    ``ops`` turns the previously delivered value into ``value``: one commit's exact batch while the
+    listener keeps up, the folded batches of every commit since the previous call otherwise, or one
+    root replacement past :data:`~pi_durable.delta.MAX_PENDING_OPS` of them (spec §9.2). ``retired``
+    says the watched address went absent since the previous call, and is the only thing a retirement
+    carries: its value is the last one the watch was given and its operations those still pending.
+    """
+
+    kind: Literal["value"]
+    value: JsonValueT_co
+    ops: list[Op]
+    retired: bool
+
+
+class WatchFailedCall(TypedDict):
+    """A failure the source may recover from, after which the watch stays open.
+
+    Durable's failures are final — a Session that fails ends its watches ``failed`` — so the port
+    never sends one (spec §9.1). It is part of the listener's shape because the listener is written
+    once, against Chord's ``WatchCall``.
+    """
+
+    kind: Literal["failed"]
+    error: object
+
+
+WatchCall: TypeAlias = WatchValueCall[JsonValueT_co] | WatchFailedCall
+"""The one shape every watch listener takes: document, conversation view, and task graph alike."""
+
+WatchValueT = TypeVar("WatchValueT")
+
+
+def watch_value_call(
+    value: WatchValueT,
+    ops: list[Op] | None = None,
+    retired: bool = False,
+) -> WatchValueCall[Any]:
+    """Build one ``value`` call: the only call Durable ever delivers (spec §9.1)."""
+
+    return {"kind": "value", "value": value, "ops": [] if ops is None else ops, "retired": retired}
+
+
 class WatchEnded(TypedDict):
     """A watch that ended without an error.
 
@@ -1019,7 +1067,7 @@ def to_watch_end(end: WatchEndInput) -> WatchEnd:
 
 
 class WatchHandle(Protocol, Generic[JsonValueT_co]):
-    """Serialized exact-frame observation of an immutable value with bounded pending delivery."""
+    """Serialized coalesced observation of an immutable value with bounded pending delivery."""
 
     @property
     def value(self) -> JsonValueT_co:
@@ -1031,8 +1079,8 @@ class WatchHandle(Protocol, Generic[JsonValueT_co]):
         """Settle when the watch terminates; an already-running callback remains caller-owned."""
         ...
 
-    def start(self, listener: Callable[[JsonValueT_co, list[Op], Context], Any]) -> None:
-        """Install the sole asynchronous listener. Never invokes it inline."""
+    def start(self, listener: Callable[[WatchCall[Any], Context], Any]) -> None:
+        """Install the sole serialized asynchronous listener. Never invokes it inline."""
         ...
 
     def stop(self) -> asyncio.Future[WatchEnd]:
@@ -1045,8 +1093,8 @@ class WatchHandle(Protocol, Generic[JsonValueT_co]):
         ...
 
 
-DocumentWatch: TypeAlias = WatchHandle[JsonObject | None]
-"""Serialized exact-frame observation of one document incarnation."""
+DocumentWatch: TypeAlias = WatchHandle[JsonObject]
+"""Serialized coalesced observation of one document address."""
 
 
 class DocumentObserver(Protocol):

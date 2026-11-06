@@ -65,8 +65,13 @@ _Avoid_: checkpoint, digest
 
 **Watch**:
 One serialized observation of a committed value, held by a `WatchHandle`: `value`, `start`, `stop`,
-and `closed`. A watch is stopped, never closed, and a retirement is a change it is given rather than
-an end, so a watch whose document retired lives until it is stopped or its Session ends.
+and `closed`. Its one listener takes a `WatchCall` — `value`, `ops`, `retired` — shared by document,
+conversation-view and task-graph watches. A watch is stopped, never closed, and a retirement is a
+change it is given rather than an end, so a watch whose document retired lives until it is stopped or
+its Session ends. A document watch follows its address, not the incarnation it found there: the
+retirement carries the last value and no operations, and a document created at that address later
+arrives on the same watch as a root replacement. Termination drops every reference the watch holds
+into its Session and into its listener, keeping only its last value.
 _Avoid_: subscription, event stream, listener
 
 **Watch end**:
@@ -74,6 +79,15 @@ Why a watch stopped, tagged by `kind`: `stopped` from `stop()`, `aborted` from t
 context's abort signal, `ended` or `failed` from its Session, and `listener_error` from the error its
 own listener raised. There is no `cancelled` end, and there is no retirement end.
 _Avoid_: close reason, cancellation, terminal state
+
+**Coalesced change**:
+One watch delivery that folds the commits made while its listener ran, or before it started: the
+newest value, the operations of every commit since the previous call folded into one batch — appends
+joined, a per-field set keeping the last, a root replacement dropping everything before it — and the
+newest commit's `Context`. Past `MAX_PENDING_OPS` (10,000) pending operations the batch is one
+self-contained root replacement instead. Convergent observation, not an audit stream: a consumer that
+must see every transition persists those facts separately.
+_Avoid_: buffered frames, replay, event batch, snapshot
 
 **Conversation view**:
 A fixed structural mount of one conversation's active entries and built-in documents.

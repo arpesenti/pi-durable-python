@@ -72,9 +72,9 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     graph_state.subscribe(
         lambda value, ctx, delivery: state_listener(value, ctx, delivery, "graphState")
     )
-    doc_watch.start(lambda _value, _ops, _ctx: frames.append("docWatch"))
-    view_watch.start(lambda _value, _ops, _ctx: frames.append("viewWatch"))
-    graph_watch.start(lambda _value, _ops, _ctx: frames.append("graphWatch"))
+    doc_watch.start(lambda _call, _ctx: frames.append("docWatch"))
+    view_watch.start(lambda _call, _ctx: frames.append("viewWatch"))
+    graph_watch.start(lambda _call, _ctx: frames.append("graphWatch"))
     doc_value = doc_state.value
     view_value = view_state.value
 

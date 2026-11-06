@@ -312,11 +312,11 @@ async def test_builds_from_committed_tasks_shows_surviving_tasks_as_pending_and_
         replica: Any = watch.value
         frames: list[list[Any]] = []
 
-        async def listener(value: Any, ops: Any, _context: Any) -> None:
+        async def listener(call: Any, _context: Any) -> None:
             nonlocal replica
-            replica = apply_immutable(replica, ops)
-            assert replica == value
-            frames.append(ops)
+            replica = apply_immutable(replica, call["ops"])
+            assert replica == call["value"]
+            frames.append(call["ops"])
 
         watch.start(listener)
         harness.resume()

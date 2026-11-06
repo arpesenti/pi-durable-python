@@ -20,7 +20,9 @@ from ..types import (
     EntryRecord,
     Storage,
     SubmissionRecord,
+    WatchCall,
     to_document_commit_change,
+    watch_value_call,
 )
 from .agent import AgentDoc
 from .inbox import InboxState
@@ -75,6 +77,9 @@ class ToolEventCall(TypedDict):
 MessageChange: TypeAlias = dict[str, Any]
 """One change to the in-flight assistant message, relative to that message."""
 
+MAX_PENDING_EVENT_BATCHES = 100
+"""Batches one stream may hold undelivered before it converges on one snapshot instead."""
+
 AgentEvent: TypeAlias = dict[str, Any]
 """One translated event; every variant carries ``type`` in the coding agent's vocabulary."""
 
@@ -94,13 +99,13 @@ class AgentEventStream(Protocol):
 
 
 class _EventStream:
-    """One attached stream: its snapshot, its watch, and the delivery adapter."""
+    """One attached stream: its snapshot, and the observer that feeds its watch."""
 
-    __slots__ = ("_snapshot", "_watch")
+    __slots__ = ("_observer", "_snapshot")
 
-    def __init__(self, snapshot: SnapshotEvent, watch: CommittedWatch) -> None:
+    def __init__(self, snapshot: SnapshotEvent, observer: _EventsObserver) -> None:
         self._snapshot = snapshot
-        self._watch = watch
+        self._observer = observer
 
     @property
     def snapshot(self) -> SnapshotEvent:
@@ -109,35 +114,38 @@ class _EventStream:
     def start(
         self, listener: Callable[[list[AgentEvent], Context], Awaitable[None] | None]
     ) -> None:
-        def deliver(events: list[AgentEvent], _ops: list[Op], context: Context) -> Any:
-            return listener(events, context)
-
-        self._watch.start(deliver)
+        self._observer.start(listener)
 
     def stop(self) -> Any:
-        return self._watch.stop()
+        return self._observer.stop()
 
     @property
     def closed(self) -> Any:
-        return self._watch.closed
+        return self._observer.closed
 
 
 class _EventsObserver:
-    """The view observer that turns each publication into one event batch."""
+    """The view observer that turns each publication into one event batch.
 
-    __slots__ = ("_conversation_id", "_current", "_held", "_watch")
+    The batches queue here rather than in the watch: the stream owes its consumer one call per
+    batch, while the watch behind it folds what the listener never took into its newest value.
+    """
+
+    __slots__ = ("_conversation_id", "_held", "_listener", "_pending", "_watch")
 
     def __init__(
         self,
         conversation_id: ConversationId,
-        current: list[ConversationView],
         held: set[TaskId],
         watch: CommittedWatch,
     ) -> None:
         self._conversation_id = conversation_id
-        self._current = current
         self._held = held
         self._watch = watch
+        self._pending: list[list[AgentEvent]] = []
+        self._listener: Callable[[list[AgentEvent], Context], Awaitable[None] | None] | None = (
+            None
+        )
 
     def publication(
         self,
@@ -147,14 +155,53 @@ class _EventsObserver:
         publication: CommitPublication,
         context: Context,
     ) -> None:
-        self._current[0] = after
         events = translate(
             self._conversation_id, before, after, ops, publication, self._held
         )
-        if events:
-            self._watch.advance_frame(events, [], context)
+        if not events:
+            return
+        if len(self._pending) >= MAX_PENDING_EVENT_BATCHES:
+            # Past its bound the stream drops what the listener never took and converges on one
+            # snapshot instead of promising every transition it no longer holds.
+            self._pending = [[cast(AgentEvent, _snapshot_of(after))]]
+        else:
+            self._pending.append(events)
+        self._watch.advance(watch_value_call(list(self._pending)), context)
+
+    def start(
+        self, listener: Callable[[list[AgentEvent], Context], Awaitable[None] | None]
+    ) -> None:
+        self._listener = listener
+        self._watch.start(self._deliver)
+
+    async def _deliver(self, call: WatchCall[Any], context: Context) -> None:
+        if call["kind"] != "value" or self._listener is None:
+            return
+        delivered: list[list[AgentEvent]] = call["value"]
+        # A batch that arrives while the listener runs stays queued behind the ones this call covers.
+        taken = {id(batch) for batch in delivered}
+        while self._pending and id(self._pending[0]) in taken:
+            self._pending.pop(0)
+        listener = self._listener
+        for batch in delivered:
+            result = listener(batch, context)
+            if isinstance(result, Awaitable):
+                await result
+
+    def stop(self) -> Any:
+        """Drop the listener and what it never took, then end the stream's watch."""
+
+        self._listener = None
+        self._pending = []
+        return self._watch.stop()
+
+    @property
+    def closed(self) -> Any:
+        return self._watch.closed
 
     def close_session(self, failure: BaseException | None) -> None:
+        self._listener = None
+        self._pending = []
         self._watch.close_session(failure)
 
 
@@ -188,17 +235,17 @@ async def watch_events(
             )
         )
         held = {record["id"] for record in completing}
-        current = [initial]
         snapshot = _snapshot_of(initial)
         watch = CommittedWatch(
             [],
             release,
             attached_views.report,
-            replace=lambda: [_snapshot_of(current[0])],
         )
+        observer = _EventsObserver(conversation_id, held, watch)
         holder["snapshot"] = snapshot
         holder["watch"] = watch
-        return _EventsObserver(conversation_id, current, held, watch)
+        holder["observer"] = observer
+        return observer
 
     await views.attach(conversation_id, create, context)
     watch = holder["watch"]
@@ -208,7 +255,7 @@ async def watch_events(
         raise cancellation_error(signal)
     if signal is not None:
         watch.observe_cancellation(signal)
-    return _EventStream(holder["snapshot"], watch)
+    return _EventStream(holder["snapshot"], holder["observer"])
 
 
 def _parts(view: ConversationView) -> dict[str, Any]:

@@ -426,7 +426,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `Tx` | type | `Tx` | test_session_tables.py | tested |
 | `TypedEntry` | type | `TypedEntry` | test_entries.py, test_types.py | tested |
 | `TypedEntryDraft` | type | `TypedEntryDraft` | test_entries.py, test_types.py | tested |
-| `WatchCall` | type | `WatchCall` | — | planned (1.5.0: Chord's tagged listener call — `{kind: "value", value, ops, retired}`; #43) |
+| `WatchCall` | type | `WatchCall` | test_session_watches.py | tested (1.5.0: Chord's tagged listener call — `{kind: "value", value, ops, retired}`, the one shape the document, conversation-view and task-graph watches hand their listener; `failed` is part of the union and Durable never sends it; #43) |
 | `WatchEnd` | type | `WatchEnd` | test_session_watches.py, test_session_checkpoints_migrations.py, test_discriminant_spellings.py | tested (the shipped build's five ends, tagged by `kind`: `stopped` from `stop()`, `aborted` from the acquisition context, `ended`/`failed` from the Session, `listener_error`; #35) |
 | `WatchHandle` | type | `WatchHandle` | test_session_watches.py, test_session_checkpoints_migrations.py | tested (`value`/`start`/`stop`/`closed`; `stop()` is idempotent and yields `{kind: "stopped"}`, `chord/src/watch.ts:46-55`; #35) |
 
@@ -680,8 +680,8 @@ SQLite backend and migrations.
 | 8.6 Usage | tested |
 | 8.7 Compaction | planned (the restart-cutoff failure and the interrupted request's charge are #48 and #49. `trigger` names what started a compaction, in the live status and in what `compaction_start` and `compaction_end` report: test_harness_compaction.py, test_harness_events.py; #36) |
 | 9 Document observation and Chord | tested |
-| 9.1 Watches | planned (`WatchCall`, the tagged listener call, and the observer's `advance`/`end`; #43, #44. `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
-| 9.2 `watchDoc` | planned (one change object per listener, coalesced deliveries with folded operations, the 10,000-operation root replacement, and a watch that follows its address through a retirement; #43) |
+| 9.1 Watches | planned (the observer's `advance`/`end`, which #44 holds. `WatchCall`, the tagged listener call every watch's single listener takes, landed with #43; `WatchHandle`'s `value`/`start`/`stop`/`closed` and `WatchEnd`'s five `kind`-tagged ends, `aborted` among them, landed with #35. Supersedes the 1.4.0 Document state section, whose state getters #44 deletes) |
+| 9.2 `watchDoc` | tested (one change object per listener, coalesced deliveries with folded operations — appends joined, a per-field set keeping the last, the newest commit's context — the 10,000 pending-operation root replacement in place of the per-commit frame buffer, and a watch that follows its address through a retirement into a recreation: test_session_watches.py, translated case for case; #43) |
 | 9.3 Conversation view | planned (a per-watch, per-observer entry window with `before`, `ConversationWindow` bounds, and `ConversationTranscript`; everything a renderer draws is state here; #45, #46) |
 | 9.4 Agent events (experimental) | tested (translated in test_harness_events.py; upstream deletes the section and its five types, and #46 retires the row) |
 | 9.5 Task graph view | tested (translated in test_harness_task_graph.py; #46 re-keys this row to the vendored 9.4 and #44 adds the task-graph observer) |

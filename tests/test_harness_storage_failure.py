@@ -702,7 +702,7 @@ async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> 
     failure = RuntimeError("observer broke")
 
     class FailingObserver:
-        def advance_frame(self, *_args: Any) -> None:
+        def advance(self, *_args: Any) -> None:
             raise failure
 
         def close_session(self, _failure: Any) -> None:
@@ -714,7 +714,7 @@ async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> 
     await harness._views.attach(root.id, attach, context)
     watch = await root.watch(context)
     seen: list[Any] = []
-    watch.start(lambda value, _ops, _context: seen.append(value))
+    watch.start(lambda call, _context: seen.append(call["value"]))
     await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "note"}), context)
     await eventually(lambda: len(seen) > 0)
     assert opened["reports"] == [failure]
@@ -747,7 +747,7 @@ async def test_faults_only_the_task_and_ends_the_watch_for_an_unformattable_valu
     watch = await harness.watch_doc(LiveDoc, root.id, context)
     assert watch is not None
 
-    async def listener(_value: Any, _ops: Any, _context: Any) -> None:
+    async def listener(_call: Any, _context: Any) -> None:
         raise unformattable
 
     watch.start(listener)

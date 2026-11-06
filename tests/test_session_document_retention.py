@@ -185,9 +185,11 @@ async def test_never_evicts_an_observed_document_and_evicts_it_once_the_last_det
     state = await session.document_state(CounterDoc, conversation_id, context)
     assert watch is not None and state is not None
     seen: list[int] = []
-    watch.start(
-        lambda value, _ops, _context: seen.append(cast(int, value["count"]) if value else -1)
-    )
+    def counted(call: Any, _context: Any) -> None:
+        value = call["value"]
+        seen.append(cast(int, value["count"]) if value else -1)
+
+    watch.start(counted)
     clock.now += 1_000_000
     await bump(session, conversation_id)
     await settle_line(session)

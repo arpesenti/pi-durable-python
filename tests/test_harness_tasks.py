@@ -559,7 +559,9 @@ async def test_rejects_runtime_operations_after_the_invocation_ends() -> None:
         captured.append(runtime)
         handler_context.append(ctx)
         watch = await runtime.watch_doc(Notes, ctx)
-        watch.start(lambda value, _ops, _ctx: delivered.append((value or {}).get("text", "retired")))
+        watch.start(
+            lambda call, _ctx: delivered.append((call["value"] or {}).get("text", "retired"))
+        )
         watch_closed.append(watch.closed)
         await runtime.commit(lambda: completed(None), ctx)
 

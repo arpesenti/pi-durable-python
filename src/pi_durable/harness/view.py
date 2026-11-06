@@ -2,8 +2,9 @@
 
 The Harness keeps at most one mount per conversation. Its first observer builds the revision on
 the Session line from committed state, and the mount advances from the Session's commit
-publications, so every delivered frame is already durable. Document operations keep their exact
-shape under the mount path; entries keep the raw active-transcript shape of ``ContextView``.
+publications, so every delivered change is already durable. A watch of the mount delivers those
+publications coalesced, like every other watch. Document operations keep their exact shape under
+the mount path; entries keep the raw active-transcript shape of ``ContextView``.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from ..types import (
     EntryRecord,
     Storage,
     to_document_commit_change,
+    watch_value_call,
 )
 from .agent import AgentDoc
 from .context import capture_context_bounds, derive_context
@@ -90,7 +92,7 @@ class ConversationViews:
         return await self.attach(id, _state_observer, context)
 
     async def watch(self, id: ConversationId, context: Context) -> CommittedWatch:
-        """A serialized exact-frame watch of the view; aborting ``context`` ends it ``aborted``."""
+        """A serialized coalesced watch of the view; aborting ``context`` ends it ``aborted``."""
 
         observer = await self.attach(id, _watch_observer, context)
         signal = context.abort_signal
@@ -276,12 +278,11 @@ def advance_mount(
         }
         mount.value = value
         after = value
+        call = watch_value_call(value, ops)
         for observer in list(mount.observers):
-            advance = getattr(observer, "advance_frame", None) or getattr(
-                observer, "advance", None
-            )
+            advance = getattr(observer, "advance", None)
             if advance is not None:
-                contained(partial(advance, value, ops, frame_context), report)
+                contained(partial(advance, call, frame_context), report)
     # Every publication reaches event adapters, including one that changes no mounted state.
     for observer in list(mount.observers):
         publication_listener = getattr(observer, "publication", None)
