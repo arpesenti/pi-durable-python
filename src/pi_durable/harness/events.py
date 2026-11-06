@@ -21,7 +21,6 @@ from ..types import (
     Storage,
     SubmissionRecord,
     WatchCall,
-    to_document_commit_change,
     watch_value_call,
 )
 from .agent import AgentDoc
@@ -335,19 +334,17 @@ def translate(
     # documents may retire next.
     nested_results: dict[TaskId, NestedToolExecutionResult] = {}
     for change in publication["changes"]:
-        if change["type"] == "document":
-            settled = to_document_commit_change(change)
-            if (
-                settled["type"] == "document"
-                and settled["kind"] == "change"
-                and settled["record"]["kind"] == NestedCallDoc.definition.kind
-                and settled["conversationId"] == conversation_id
-            ):
-                nested_state = cast(NestedCallState, settled["value"])
-                task_id = nested_state.get("taskId")
-                result = cast(NestedToolExecutionResult | None, nested_state.get("result"))
-                if task_id is not None and result is not None:
-                    nested_results[task_id] = result
+        if (
+            change["type"] == "document"
+            and change["kind"] == "change"
+            and change["record"]["kind"] == NestedCallDoc.definition.kind
+            and change["conversationId"] == conversation_id
+        ):
+            nested_state = cast(NestedCallState, change["value"])
+            task_id = nested_state.get("taskId")
+            result = cast(NestedToolExecutionResult | None, nested_state.get("result"))
+            if task_id is not None and result is not None:
+                nested_results[task_id] = result
         if change["type"] == "entry" and change["value"]["conversationId"] == conversation_id:
             entries.append(change["value"])
         if change["type"] == "task" and change["value"]["conversationId"] == conversation_id:

@@ -25,13 +25,10 @@ from ..delta import Op, PendingOps
 from ..errors import is_failure
 from ..ids import DocumentId
 from ..types import (
-    DocumentCommitChangeInput,
+    DocumentCommitChange,
     WatchCall,
     WatchEnd,
-    WatchEndInput,
     WatchValueCall,
-    to_document_commit_change,
-    to_watch_end,
     watch_value_call,
 )
 
@@ -178,25 +175,24 @@ class CommittedState:
 
 def observed_operations(
     observed_version: int,
-    change: DocumentCommitChangeInput,
+    change: DocumentCommitChange,
 ) -> tuple[list[Op], int]:
     """Return the operations one observer applies for a committed change, and its version.
 
     An observer hydrated under another definition version holds a differently shaped value, so it
     receives the new value as a root replacement instead of operations for that shape. The change
-    arrives in either spelling (#33); the retirement is the ``kind`` tag, not a ``null`` value.
+    carries a single tag: the retirement is the ``kind`` tag, not a ``null`` value.
     """
 
-    settled = to_document_commit_change(change)
-    if settled["type"] != "document":
+    if change["type"] != "document":
         # A definition-free copy publishes no adopted value: an observer keeps what it holds.
         return [], observed_version
-    if settled["kind"] == "retire":
+    if change["kind"] == "retire":
         return RETIREMENT_OPERATIONS, observed_version
-    version = settled["version"]
+    version = change["version"]
     if version == observed_version:
-        return settled["ops"], observed_version
-    return [["r", settled["value"]]], version
+        return change["ops"], observed_version
+    return [["r", change["value"]]], version
 
 
 class CommittedWatch:
@@ -335,7 +331,7 @@ class CommittedWatch:
             return
         self._queue(call["value"], call["ops"], call["retired"], context)
 
-    def advance_document(self, change: DocumentCommitChangeInput, context: Context) -> None:
+    def advance_document(self, change: DocumentCommitChange, context: Context) -> None:
         """Queue the committed document change at this watch's address (spec §9.2).
 
         A watch follows its address rather than one incarnation: a retirement keeps the last value
@@ -345,22 +341,21 @@ class CommittedWatch:
 
         if self._end is not None:
             return
-        settled = to_document_commit_change(change)
-        if settled["type"] != "document":
+        if change["type"] != "document":
             return
-        if settled["kind"] == "retire":
+        if change["kind"] == "retire":
             # Durable has no value for an absent document: the retirement carries neither a value
             # nor operations, only the flag (spec §9.1).
             self._queue(UNCHANGED, [], True, context)
             return
-        ops, version = observed_operations(self._observed_version, settled)
-        if self._record_id is not None and settled["record"]["id"] != self._record_id:
-            ops, version = [["r", settled["value"]]], settled["version"]
+        ops, version = observed_operations(self._observed_version, change)
+        if self._record_id is not None and change["record"]["id"] != self._record_id:
+            ops, version = [["r", change["value"]]], change["version"]
         if not ops:
             return
         self._observed_version = version
-        self._record_id = settled["record"]["id"]
-        self._queue(settled["value"], ops, False, context)
+        self._record_id = change["record"]["id"]
+        self._queue(change["value"], ops, False, context)
 
     def _queue(
         self,
@@ -438,18 +433,18 @@ class CommittedWatch:
             if self._end is None and self._pending_change:
                 self._schedule()
 
-    def _terminate(self, end: WatchEndInput) -> None:
+    def _terminate(self, end: WatchEnd) -> None:
         """End the watch, once: drop every reference into the Session, and settle ``closed``.
 
         What is still queued is discarded, and the listener, the detach closure, the report sink,
         and the abort hook are released, so a stopped watch that is still referenced keeps nothing of
-        its Session or its listener — only its last value (spec §9.1). The end arrives in either
-        spelling (#33); ``closed`` settles with the ``kind`` one alone.
+        its Session or its listener — only its last value (spec §9.1). The end carries the one tag:
+        ``closed`` settles with the ``kind`` the port emits for the way this watch ended.
         """
 
         if self._end is not None:
             return
-        self._end = to_watch_end(end)
+        self._end = end
         self._pending = PendingOps()
         self._pending_change = False
         self._pending_retired = False

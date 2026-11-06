@@ -31,7 +31,6 @@ from ..types import (
     EntryQuery,
     EntryRecord,
     Storage,
-    to_document_commit_change,
     watch_value_call,
 )
 from .agent import AgentDoc
@@ -365,35 +364,34 @@ def advance_mount(
             continue
         if change["type"] != "document":
             continue
-        settled = to_document_commit_change(change)
-        if settled["type"] != "document" or settled["conversationId"] != id:
+        if change["conversationId"] != id:
             continue
-        kind = settled["record"]["kind"]
-        if kind not in MOUNTED_KINDS or "key" in settled["record"]:
+        kind = change["record"]["kind"]
+        if kind not in MOUNTED_KINDS or "key" in change["record"]:
             continue
         path = ["docs", kind]
         mounted = mount.incarnations.get(kind)
-        if settled["kind"] == "retire":
-            if mounted is None or mounted[0] != settled["record"]["id"]:
+        if change["kind"] == "retire":
+            if mounted is None or mounted[0] != change["record"]["id"]:
                 continue
             del mount.incarnations[kind]
             docs = {current: value for current, value in docs.items() if current != kind}
             doc_ops.append(["d", path])
         elif (
             mounted is not None
-            and mounted[0] == settled["record"]["id"]
-            and mounted[1] == settled["version"]
+            and mounted[0] == change["record"]["id"]
+            and mounted[1] == change["version"]
         ):
             current = docs[kind]
             docs = {
                 **docs,
-                kind: cast(JsonObject, apply_immutable(current, settled["ops"])),
+                kind: cast(JsonObject, apply_immutable(current, change["ops"])),
             }
-            doc_ops.extend(_prefixed(op, path) for op in settled["ops"])
+            doc_ops.extend(_prefixed(op, path) for op in change["ops"])
         else:
-            mount.incarnations[kind] = (settled["record"]["id"], settled["version"])
-            docs = {**docs, kind: settled["value"]}
-            doc_ops.append(["s", path, settled["value"]])
+            mount.incarnations[kind] = (change["record"]["id"], change["version"])
+            docs = {**docs, kind: change["value"]}
+            doc_ops.append(["s", path, change["value"]])
 
     frame_context = without_abort_signal(context)
     if not doc_ops and not appended:

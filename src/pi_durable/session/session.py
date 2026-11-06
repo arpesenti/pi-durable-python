@@ -21,7 +21,7 @@ from ..documents import (
 )
 from ..errors import ReadOnlySession, SessionFailed, StorageRequestError, is_failure
 from ..harness.context import read_context
-from ..harness.types import LISTENER, ContextView, ReportInfoInput, SetTimer, host_error
+from ..harness.types import LISTENER, ContextView, ReportInfo, SetTimer, host_error
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
 from ..json import JsonObject
 from ..timers import host_timers
@@ -46,7 +46,6 @@ from ..types import (
     Page,
     PublishingStorage,
     SessionEnd,
-    SessionEndInput,
     Storage,
     StorageWrite,
     StoredDocument,
@@ -54,8 +53,6 @@ from ..types import (
     SubmissionRecord,
     TaskQuery,
     TaskRecord,
-    to_document_commit_change,
-    to_session_end,
 )
 from .observation import (
     CommittedState,
@@ -340,7 +337,7 @@ class SessionImpl:
         except Exception:
             pass
 
-    def report(self, error: BaseException, info: ReportInfoInput | None = None) -> None:
+    def report(self, error: BaseException, info: ReportInfo | None = None) -> None:
         """Internal: the Session's failure and listener errors, which never fail what ran them.
 
         ``info`` defaults to a listener. A plain Session has no external report sink.
@@ -574,11 +571,11 @@ class SessionImpl:
                 else:
                     self._closing.set_exception(error)
 
-    def _settle_closed(self, end: SessionEndInput) -> None:
-        """Settle ``closed``, once, with the ``kind`` spelling of the end (#33 accepts either)."""
+    def _settle_closed(self, end: SessionEnd) -> None:
+        """Settle ``closed``, once, with the end the Session ended by."""
 
         if not self._closed.done():
-            self._closed.set_result(to_session_end(end))
+            self._closed.set_result(end)
 
     def _notify_close(self) -> None:
         self._cancel_document_sweep()
@@ -644,8 +641,7 @@ class SessionImpl:
         changes.extend(documents)
         publication: CommitPublication = {"seq": seq, "changes": changes}
         for state in list(self._states):
-            for change in documents:
-                settled = to_document_commit_change(change)
+            for settled in documents:
                 if settled["type"] != "document" or settled["record"]["id"] != state._record_id:
                     continue
                 ops, version = observed_operations(state._observed_version, settled)
@@ -660,8 +656,7 @@ class SessionImpl:
                 else:
                     state._advance(settled["value"], context)
         for entry in list(self._watches):
-            for change in documents:
-                settled = to_document_commit_change(change)
+            for settled in documents:
                 if (
                     settled["type"] != "document"
                     or _record_address_id(settled["record"]) != entry.address_id

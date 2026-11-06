@@ -458,7 +458,7 @@ Execution environment protocol and helpers.
 | `TextLineReader` | type | `TextLineReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `BinaryReader` | type | `BinaryReader` | test_env_posix.py, test_env_conformance.py | tested |
 | `WatchTarget` | type | `WatchTarget` | test_env_conformance.py, test_env_posix.py | tested |
-| `FileChange` | type | `FileChange` | test_env_conformance.py, test_env_posix.py, test_discriminant_spellings.py | tested (1.5.0 renames `WatchChange` to this and tags the three changes by `kind`: `paths`, `overflow`, `failed`; both spellings are read and only the `kind` one is emitted — #33, #35) |
+| `FileChange` | type | `FileChange` | test_env_conformance.py, test_env_posix.py, test_discriminant_spellings.py | tested (1.5.0 renames `WatchChange` to this and tags the three changes by `kind`: `paths`, `overflow`, `failed`; the untagged shapes #33 let readers accept are gone, so `kind` is the one tag read and the one emitted — #33, #35, #37) |
 | `FileWatcher` | type | `FileWatcher` | test_env_conformance.py, test_env_posix.py | tested (`stop(context)` replaces `close(context)` since #35; readers still close) |
 | `LineScan` | type | `LineScan` | test_env_line_scan.py, test_env_conformance.py | tested |
 | `DirReader` | type | `DirReader` | test_env_posix.py, test_env_conformance.py | tested |

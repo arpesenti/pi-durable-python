@@ -43,7 +43,7 @@ from .types import (
     ConversationHandle,
     RegistryReader,
     RegistrySnapshot,
-    ReportFromInput,
+    ReportFrom,
     ReportInfo,
     ReportReason,
     ReportTask,
@@ -52,7 +52,6 @@ from .types import (
     TaskInspection,
     Wake,
     host_error,
-    to_report_from,
 )
 from .util import Waiters, closed_error, optional_extension, rejected, resolved, scan_all
 
@@ -2410,27 +2409,25 @@ class _Runtime:
         self._check()
         return self._scheduler._now()
 
-    def report(self, error: BaseException, from_: ReportFromInput | None = None) -> None:
+    def report(self, error: BaseException, from_: ReportFrom | None = None) -> None:
         self._check()
         # The task's own failure names the task's extension; any other names whose code failed.
-        # The source arrives in either spelling (#33); the tag decides, not the presence of a key.
+        # The tag decides which, and ``kind`` is the only tag a source carries.
         task = report_task(self._invocation)
         if from_ is None:
             info: ReportInfo = {"kind": "task_error", **self._scheduler._about_task(self._invocation)}
+        elif from_["kind"] == "extension":
+            info = {
+                "kind": "extension_error",
+                "task": task,
+                **optional_extension(from_.get("extension")),
+            }
         else:
-            source = to_report_from(from_)
-            if source["kind"] == "extension":
-                info = {
-                    "kind": "extension_error",
-                    "task": task,
-                    **optional_extension(source.get("extension")),
-                }
-            else:
-                info = {
-                    "kind": "host_error",
-                    "callback": cast(Any, source.get("callback")),
-                    "task": task,
-                }
+            info = {
+                "kind": "host_error",
+                "callback": cast(Any, from_.get("callback")),
+                "task": task,
+            }
         self._scheduler._report(error, info)
 
     async def _read(self, read: Callable[[], Awaitable[Any]], context: Context) -> Any:

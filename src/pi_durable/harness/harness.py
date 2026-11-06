@@ -43,7 +43,6 @@ from .types import (
     RegistrySnapshot,
     Report,
     ReportInfo,
-    ReportInfoInput,
     SettledSubmissionRecord,
     SettledTask,
     Submission,
@@ -51,7 +50,6 @@ from .types import (
     Wake,
     WriteSubmissionDraft,
     host_error,
-    to_report_info,
 )
 from .usage import UsageDoc, UsageState, add_usage_state
 from .util import closed_error, scan_all
@@ -77,12 +75,12 @@ def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
 
 def _safe_report(
     on_report: Callable[[Report], Any] | None,
-) -> Callable[[BaseException, ReportInfoInput | None], None]:
+) -> Callable[[BaseException, ReportInfo | None], None]:
     """``on_report`` that cannot fail: it is the last place an error goes, so its own throw is dropped."""
 
-    def report(error: BaseException, info: ReportInfoInput | None = None) -> None:
-        # The host's sink is handed one report object, whichever spelling its info used (#33, #37).
-        values = to_report_info(info) if info is not None else LISTENER
+    def report(error: BaseException, info: ReportInfo | None = None) -> None:
+        # The host's sink is handed one report object: the info it was given, tagged by ``kind``.
+        values = info if info is not None else LISTENER
 
         def call() -> Any:
             if on_report is None:

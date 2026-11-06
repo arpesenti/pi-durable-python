@@ -18,7 +18,6 @@ from typing import (
     Protocol,
     TypeAlias,
     TypeVar,
-    cast,
     runtime_checkable,
 )
 
@@ -180,10 +179,10 @@ class WatchTarget(dict[str, Any]):
 
 # 1.5.0 tags what ``FileSystem.watch()`` reports by ``kind`` and renames the union to ``FileChange``
 # (upstream ``src/env/index.ts:127``); before it, the three shapes carried no tag and were told
-# apart by which keys they had, under the name ``WatchChange``. The port emits only the ``kind``
-# spelling and reads either, until #37 deletes the retired one, and it leaves ``WatchChange`` free
-# for what a watch listener is handed. The ledger of what this release retags, and of the unions it
-# leaves alone, is at the top of ``types.py``.
+# apart by which keys they had, under the name ``WatchChange``. The port emits and reads only the
+# ``kind`` spelling: #37 deleted the untagged shapes, and leaves ``WatchChange`` free for what a
+# watch listener is handed. The ledger of what this release retags, and of the unions it leaves
+# alone, is at the top of ``types.py``.
 
 
 class FileChangePaths(dict[str, Any]):
@@ -201,46 +200,11 @@ class FileChangeFailed(dict[str, Any]):
 
 
 FileChange: TypeAlias = FileChangePaths | FileChangeOverflow | FileChangeFailed
-"""What changed below a watched path, tagged by ``kind`` (upstream ``src/env/index.ts:127``)."""
+"""What changed below a watched path, tagged by ``kind`` (upstream ``src/env/index.ts:127``).
 
-
-class FileChangePathsLegacy(dict[str, Any]):
-    """The pre-1.5.0 ``paths`` change: no tag, only the paths themselves; #37 deletes it."""
-
-    paths: list[str]
-
-
-class FileChangeOverflowLegacy(dict[str, Any]):
-    """The pre-1.5.0 ``overflow`` change: ``overflow: true`` was the whole change; #37 deletes it."""
-
-    overflow: Literal[True]
-
-
-class FileChangeFailedLegacy(dict[str, Any]):
-    """The pre-1.5.0 ``failed`` change: the error alone was the change; #37 deletes it."""
-
-    error: FileError
-
-
-FileChangeLegacy: TypeAlias = FileChangePathsLegacy | FileChangeOverflowLegacy | FileChangeFailedLegacy
-
-FileChangeInput: TypeAlias = FileChange | FileChangeLegacy
-"""Either spelling of a file change a caller may hand the port."""
-
-
-def to_file_change(change: FileChangeInput) -> FileChange:
-    """The ``kind`` spelling of a file change, whichever spelling it arrived in (#33, #35, #37).
-
-    The retired shapes are told apart exactly as 1.4.0 told them apart: by the keys they carry.
-    """
-
-    if "kind" in change:
-        return cast(FileChange, change)
-    if "overflow" in change:
-        return FileChangeOverflow(kind="overflow")
-    if "error" in change:
-        return FileChangeFailed(kind="failed", error=change["error"])
-    return FileChangePaths(kind="paths", paths=list(change["paths"]))
+The three shapes are told apart by that tag alone: 1.4.0 told them apart by which keys they carried,
+and #37 deleted those untagged shapes.
+"""
 
 
 class FileWatcher(Protocol):

@@ -27,7 +27,7 @@ from pi_durable.context import BACKGROUND_CONTEXT as context
 from pi_durable.context import Context
 from pi_durable.env import FileError, Result, err
 from pi_durable.env.posix import PosixExecutionEnv
-from pi_durable.harness.types import ReportInfoInput
+from pi_durable.harness.types import ReportInfo
 from pi_durable.ids import (
     ROOT_CONVERSATION_ID,
     ConversationId,
@@ -650,9 +650,9 @@ class _ReportingSession(SessionImpl):
 
     def __init__(self, storage: Storage) -> None:
         super().__init__(storage, lambda: 1_000, lambda: 600_000)
-        self.reports: list[tuple[BaseException, ReportInfoInput | None]] = []
+        self.reports: list[tuple[BaseException, ReportInfo | None]] = []
 
-    def report(self, error: BaseException, info: ReportInfoInput | None = None) -> None:
+    def report(self, error: BaseException, info: ReportInfo | None = None) -> None:
         self.reports.append((error, info))
 
 

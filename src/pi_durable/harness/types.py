@@ -15,11 +15,9 @@ from typing import (
     Never,
     NotRequired,
     Protocol,
-    Required,
     TypeAlias,
     TypedDict,
     TypeVar,
-    cast,
     overload,
 )
 
@@ -402,8 +400,7 @@ AfterFailedRun = Literal["keep", "continue", "withdraw"]
 # words: `storage_failed` and `task_interrupted` join the kinds, and the host is handed one `Report`
 # — the fields of a `ReportInfo` beside the `error` — rather than an error and a description. The
 # ledger of what this release retags, and of the unions it leaves alone, is at the top of
-# `types.py`: both spellings are accepted on input (`to_report_info`, `to_report_from`), only
-# `kind` is emitted, and #37 deletes the retired spelling again.
+# `types.py`: `kind` is the one tag key here, and the `type` spelling #33 let readers accept is gone.
 
 
 class ReportTask(TypedDict):
@@ -505,63 +502,12 @@ class Report(ReportInfo):
     error: BaseException
 
 
-class ReportInfoLegacy(TypedDict, total=False):
-    """The pre-1.5.0 spelling of a report info, tagged by ``type``; #37 deletes it.
-
-    1.5.0 moved only the tag key: every field of the current spelling is carried the same way here.
-    """
-
-    type: Required[ReportKind]
-    task: ReportTask
-    extension: str
-    reason: ReportReason
-    restarts: int
-    callback: HostCallback
-    conversationId: ConversationId
-
-
-ReportInfoInput: TypeAlias = ReportInfo | ReportInfoLegacy
-"""Either spelling of a report info a caller may hand the port."""
-
-
-def to_report_info(info: ReportInfoInput) -> ReportInfo:
-    """The ``kind`` spelling of a report info, whichever spelling it arrived in (#33, #37)."""
-
-    if "type" not in info:
-        return info
-    retired = cast(ReportInfoLegacy, info)
-    values = {key: value for key, value in retired.items() if key != "type"}
-    return cast(ReportInfo, {"kind": retired["type"], **values})
-
-
 class ReportFrom(TypedDict, total=False):
     """Whose code a task's ``runtime.report()`` is about when not the task's own, tagged by ``kind``."""
 
     kind: Literal["extension", "host"]
     extension: str
     callback: HostCallback
-
-
-class ReportFromLegacy(TypedDict, total=False):
-    """The pre-1.5.0 spelling of a report source, tagged by ``type``; #37 deletes it."""
-
-    type: Required[Literal["extension", "host"]]
-    extension: str
-    callback: HostCallback
-
-
-ReportFromInput: TypeAlias = ReportFrom | ReportFromLegacy
-"""Either spelling of a report source a caller may hand the port."""
-
-
-def to_report_from(from_: ReportFromInput) -> ReportFrom:
-    """The ``kind`` spelling of a report source, whichever spelling it arrived in (#33, #37)."""
-
-    if "type" not in from_:
-        return from_
-    retired = cast(ReportFromLegacy, from_)
-    values = {key: value for key, value in retired.items() if key != "type"}
-    return cast(ReportFrom, {"kind": retired["type"], **values})
 
 
 class Wake(TypedDict):
@@ -766,7 +712,7 @@ class TaskRuntime(Protocol):
 
     def now(self) -> int: ...
 
-    def report(self, error: BaseException, from_: ReportFromInput | None = None) -> None:
+    def report(self, error: BaseException, from_: ReportFrom | None = None) -> None:
         """A ``task_error``, or with ``from_`` an ``extension_error`` or ``host_error``."""
         ...
 
