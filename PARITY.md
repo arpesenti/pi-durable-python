@@ -418,7 +418,7 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | `TaskOutcome` | type | `TaskOutcome` | test_types.py | tested |
 | `TaskOutcomeError` | type | `TaskOutcomeError` | test_types.py | tested |
 | `TaskOwnership` | type | `TaskOwnership` | test_types.py | tested |
-| `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py, test_testing_conformance.py | tested (scans `sleeping` tasks) |
+| `TaskQuery` | type | `TaskQuery` | test_types.py, test_storage_protocol.py, test_testing_conformance.py, test_sqlite_migrations.py | tested (scans `sleeping` tasks) |
 | `TaskRecord` | type | `TaskRecord` | test_types.py, test_storage_protocol.py | tested |
 | `TaskRuntime` | type | `TaskRuntime` | test_harness_tasks.py, test_harness_scheduler_indexes.py, test_harness_scheduler_retention.py | tested |
 | `TaskState` | type | `TaskState` | test_types.py, test_harness_sleep.py | tested (includes `sleeping`) |
@@ -923,10 +923,9 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | Shared provider plumbing: catalog lookup, request options, transcript replay, cross-model message adaptation, argument parsing, request-attempt retries, usage pricing, and the stream/abort wrapper | `pi_durable.providers.base`, `.request`, `.transcript`, `.json_parse`, `.retry`, `.usage`, `.stream` | tested through the adapter suites (`test_providers_openai.py`, `test_providers_anthropic.py`) |
 | OpenAI model adapter over Chat Completions | `pi_durable.providers.openai` | tested (`test_providers_openai.py`, `test_providers_extras.py`) |
 | Anthropic model adapter over Messages | `pi_durable.providers.anthropic` | tested (`test_providers_anthropic.py`, `test_providers_extras.py`) |
-
-| `ReportKind`, `ReportReason` | union aliases narrowing `ReportInfo.kind` and `.reason` | `pi_durable.harness.types` | used by `ReportInfo`; `test_harness_reports.py` exercises every member |
-| `Timers`, `host_timers`, `native_timer` | internal timer arming behind `HarnessOptions.set_timer` (upstream `hostTimers` / `nativeTimer`) | `pi_durable.timers` | `test_harness_sleep.py`, `test_session_document_retention.py` |
-| `blocked_subject`, `blocked_reason()` | what the task graph reads of a record to derive its blocked reason | `pi_durable.harness.scheduler` | `test_harness_blocked.py`, `test_harness_task_graph.py` |
+| `ReportKind`, `ReportReason` — union aliases narrowing `ReportInfo.kind` and `.reason` | `pi_durable.harness.types` | tested (`test_harness_reports.py` exercises every member; `ReportInfo` is their only user) |
+| `Timers`, `host_timers`, `native_timer` — internal timer arming behind `HarnessOptions.set_timer` (upstream `hostTimers` / `nativeTimer`) | `pi_durable.timers` | tested (`test_harness_sleep.py`, `test_session_document_retention.py`) |
+| `blocked_subject`, `blocked_reason()` — what the task graph reads of a record to derive its blocked reason | `pi_durable.harness.scheduler` | tested (`test_harness_blocked.py`, `test_harness_task_graph.py`) |
 
 The adapter suites inject fake `AsyncOpenAI`- and `AsyncAnthropic`-shaped clients, so they need no
 credentials and no network. `test_providers_extras.py` runs in subprocesses that block both SDK
@@ -944,11 +943,29 @@ work unchanged.
 The v1.4.0 parity audit is recorded in [`docs/parity-report.md`](./docs/parity-report.md): all 61
 in-scope upstream suites are translated, the excluded suites are listed above (telemetry,
 `indexeddb-storage`, `test-workers/*`, and `codemode-checkpoints` among them), two live credential
-cases skip by design, and every remaining deviation is explicit. It is that baseline's record: the
-v1.5.0 audit is written beside it, not over it, when this sync's suites are green, and it names the
-suites this baseline adds (`group-commit`, `deferred-commit`, `deferred-progress`, `observers`,
-`transcript`, `run-failure`, `turn-limit`, `after-run`, `continue`, `submit-in-commit`,
-`idle-scope`, and `restart-failure` among them) and every upstream case left untranslated.
+cases skip by design, and every remaining deviation is explicit. It is that baseline's record and
+it stays as written: a later sync writes beside it, never over it.
+
+**The v1.5.0 exclusion record has one owner: the dated v1.5.0 audit report,
+`docs/parity-report-1.5.0.md`, which #52 writes when this sync's suites are green.** That report —
+not this matrix and not the 1.4.0 record — names the suites this baseline adds (`group-commit`,
+`deferred-commit`, `deferred-progress`, `observers`, `transcript`, `run-failure`, `turn-limit`,
+`after-run`, `continue`, `submit-in-commit`, `idle-scope`, and `restart-failure` among them), every
+upstream case deliberately left untranslated, and every 1.5.0 deviation and exclusion. Until it
+exists, an exclusion this baseline takes is recorded only where a row must record it: the `excluded`
+rows above, each with its reason, and ADR 0003. Anything about 1.5.0 — an exclusion or a completion
+claim — that the 1.4.0 record carries before that report is written is provisional: it moves to
+`docs/parity-report-1.5.0.md`, so the same fact is never signed off twice in two places.
+
+**What `test_types.py` proves is an annotation-compile contract, not behaviour.** The rows whose
+`Tests` cell cites it, alone or beside a behavioural suite, cite it for the shapes it pins: each is
+a `TypedDict` or `Literal` literal asserted against its own annotation, so the case passes by
+construction and nothing in it can disagree with the implementation. The check that can is the
+`mypy` run CI performs over `tests/`, where `warn_unused_ignores` turns a vanished negative error
+into a failure — the same evidence upstream takes from `satisfies` and `@ts-expect-error` in its
+`types` suite, where the check is the `tsc` compile. The audit therefore reads these rows as
+compile contracts the type checker verifies rather than behavioural proof: a behavioural claim on
+such a row still owes a suite that runs.
 
 ## Milestones
 

@@ -18,6 +18,11 @@ UPSTREAM = ROOT / "docs" / "upstream"
 REFERENCE = UPSTREAM / "README.md"
 PARITY = ROOT / "PARITY.md"
 ADR_DIR = ROOT / "docs" / "adr"
+TESTS = ROOT / "tests"
+
+#: How a matrix row cites a translated suite: by file name, in its Tests cell or, for a port
+#: addition, in its Status cell.
+CITED_SUITE = re.compile(r"\btest_[A-Za-z0-9_]+\.py\b")
 
 #: The vendored baselines of earlier releases. They are the audit record of those ports, so their
 #: bytes are frozen here at the values the v1.5.0 baseline declaration found them at.
@@ -201,6 +206,30 @@ def matrix_table(heading: str) -> list[list[str]]:
     return rows
 
 
+def cited_suites() -> list[tuple[str, str]]:
+    """Every ``(row, suite)`` pair the matrix cites, keyed by the row that cites it.
+
+    A row cites a suite by file name, so the citation is a claim about the tree: it is resolved
+    here rather than read by eye, which is what lets a row name a suite that was never written.
+    """
+
+    citations: list[tuple[str, str]] = []
+    for heading in ("Root exports", "Optional subpaths"):
+        body = read(PARITY).split(f"## {heading}", 1)[-1].split("\n## Excluded", 1)[0]
+        for line in body.splitlines():
+            if not line.startswith("| `"):
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 5:
+                continue
+            row = f"{heading} / {cells[0]}"
+            citations += [(row, suite) for suite in CITED_SUITE.findall(cells[3])]
+    for cells in matrix_table("Port additions"):
+        row = f"Port additions / {cells[0]}"
+        citations += [(row, suite) for suite in CITED_SUITE.findall(" ".join(cells))]
+    return citations
+
+
 def spec_section_status() -> dict[str, str]:
     """The `## Spec sections` table as section number -> status cell."""
 
@@ -283,6 +312,35 @@ def test_a_matrix_row_without_a_suite_is_not_marked_as_one() -> None:
             if status in ("planned", "excluded") and cites_a_suite:
                 wrong.append(f"{cells[0]} ({status}, cites {cells[3]})")
     assert not wrong, f"these rows cite a translated suite without being tested: {wrong}"
+
+
+def test_every_cited_test_file_exists() -> None:
+    """A `tested` row may only cite a suite the tree actually holds.
+
+    The status and the Tests cell agreeing is half the contract; the other half is that the named
+    file is there to run. A row that cites a suite nobody wrote is an overclaim no suite can
+    contradict, so the citation is resolved against `tests/` here.
+    """
+
+    missing = sorted({(row, suite) for row, suite in cited_suites() if not (TESTS / suite).is_file()})
+    assert not missing, (
+        "these matrix rows cite a suite that is not in tests/: "
+        + "; ".join(f"{row} cites {suite}" for row, suite in missing)
+    )
+
+
+def test_every_port_additions_row_has_the_table_arity() -> None:
+    """A port addition is on the register only if it renders as one: a row of the header's cells.
+
+    A row written with more cells than the `Addition | Module | Status` header has does not render
+    as a table row at all, so no reader and no check of the rendered matrix ever sees it.
+    """
+
+    wrong = [cells for cells in matrix_table("Port additions") if len(cells) != 3]
+    assert not wrong, (
+        "these Port additions rows do not render as the 3-cell table rows the section's header "
+        f"declares: {'; '.join(' | '.join(cells) for cells in wrong)}"
+    )
 
 
 # --- The decision records bound this baseline -------------------------------------------------
