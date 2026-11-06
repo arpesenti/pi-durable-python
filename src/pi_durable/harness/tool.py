@@ -28,9 +28,10 @@ from ..ids import ConversationId, EntryId, TaskId
 from ..json import JsonValue, copy_json
 from ..session.transaction import Transaction
 from ..tasks import define_task
-from ..types import EntryDraft, MessageRecord, TaskRecord
+from ..types import CommitOptions, EntryDraft, MessageRecord, TaskRecord
 from .agent import DEFAULT_PROGRESS_POLICY, tool_extension
 from .live import (
+    PROGRESS_COMMIT,
     TOOL_TASK_KIND,
     LiveDoc,
     clear_progress,
@@ -225,19 +226,22 @@ async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     # Strict JSON: repair may set optional properties to None, which the slot and checkpoint cannot hold.
     final = cast(dict[str, JsonValue], copy_json(validated))
 
-    async def intent(tx: Transaction) -> dict[str, Any]:
-        live = await tx.doc(LiveDoc, runtime.conversation_id)
-        slot = tool_slot(live, runtime.task_id)
+    async def shown(tx: Transaction) -> None:
+        slot = tool_slot(await tx.doc(LiveDoc, runtime.conversation_id), runtime.task_id)
         if slot is not None:
             slot["status"] = "running"
-        # A nested slot shows the arguments the call runs with, which repair, hooks, and coercion may
-        # have changed. Compared with the input, which the slot got at admission: reading the draft
-        # would track every leaf.
-        changed = input["kind"] == "nested" and not json_equal(
-            cast(Any, input["call"]).get("arguments") or {}, final
-        )
-        if changed and slot is not None and "parentTaskId" in slot:
-            slot["arguments"] = final
+            # A nested slot shows the arguments the call runs with, which repair, hooks, and coercion may
+            # have changed. Assigned whole: an equal value records no change, and a rerun corrects what an
+            # earlier attempt showed.
+            if "parentTaskId" in slot:
+                slot["arguments"] = final
+
+    # The slot's status and arguments are presentation, stored like progress (`PROGRESS_COMMIT`); the
+    # intent is durable before the tool runs, so parallel calls of one round share no immediate write to
+    # `pi.live` (`tool.ts:181-196`).
+    await runtime.commit(shown, context, PROGRESS_COMMIT)
+
+    async def intent(_tx: Transaction) -> dict[str, Any]:
         return {
             "status": "running",
             "checkpoint": {
@@ -620,7 +624,9 @@ class ToolExecutionApiImpl:
 
         return wait()
 
-    async def commit(self, change: Callable[..., Any], context: Context) -> Any:
+    async def commit(
+        self, change: Callable[..., Any], context: Context, options: CommitOptions | None = None
+    ) -> Any:
         box: dict[str, Any] = {}
 
         async def apply(tx: Transaction) -> None:
@@ -629,7 +635,7 @@ class ToolExecutionApiImpl:
                 result = await cast(Awaitable[Any], result)
             box["value"] = result
 
-        await self._runtime.commit(apply, context)
+        await self._runtime.commit(apply, context, options)
         return box.get("value")
 
     async def memo(self, name: str, *args: Any) -> JsonValue | None:
@@ -811,7 +817,9 @@ def publish_progress(
                         for diagnostic in added:
                             slot["diagnostics"].append(diagnostic)
 
-            await runtime.commit(flush, context)
+            # Running output is presentation: deferred, so watches see it at once and Storage gets it with
+            # the next commit that reads pi.live, or at the deadline (`tool.ts:640-655`).
+            await runtime.commit(flush, context, PROGRESS_COMMIT)
             written["text"] = snapshot.text
             written["details"] = details
             written["diagnostics"] = diagnostics

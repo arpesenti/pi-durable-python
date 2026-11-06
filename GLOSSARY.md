@@ -164,7 +164,10 @@ _Avoid_: wait, delay, timeout
 
 **Timer**:
 A host-armed callback through `HarnessOptions.set_timer`. A foreground timer paces or resumes work
-and must fire; a background timer only frees memory and may be declined.
+and must fire; a background timer only frees memory and may be declined. Two uses are foreground:
+the scheduler's timer for the earliest sleep not yet due, and the Session's timer for the earliest
+persist-within deadline of its held changes. Neither wakes the other: a deadline stores progress, it
+does not make a task runnable.
 _Avoid_: sleep, scheduler tick
 
 **Wake**:
@@ -197,6 +200,22 @@ One group of writes a storage stores as one atomic commit with its own sequence.
 earlier ones left, and stops at the first batch its own rules refuse: those before it stand, it and
 every batch after it do not.
 _Avoid_: transaction, chunk, group of writes
+
+**Deferred commit**:
+A commit whose changes memory adopts at once and whose storage is held back to a later one. Only a
+commit that touches nothing but a latest, initial-fork document of the loaded history is eligible: a
+generation partial and running tool progress. Its own followers -- watches, views, document
+observers -- are shown each revision as it is adopted; the host's `observe_commits()` observer sees
+it only when its held changes are stored, together with whatever stored them.
+_Avoid_: background commit, lazy write, delayed commit
+
+**Persist-within deadline**:
+The time by which a deferred commit's held changes are stored, `settings.progress.persist_within_ms`
+or the commit's own `within_ms`. `0` stores them right after the commit; a larger number waits for
+whichever comes first, another trigger -- a commit reading or writing the document, a drop of its
+tracker, a version reload, or close -- or the deadline, which one foreground timer keeps for the
+earliest of them. `Infinity` waits for another trigger alone and arms no timer.
+_Avoid_: flush interval, write-behind window, timeout
 
 **Durability receipt**:
 The `receive(index, seq)` call a storage makes once per stored batch, in order, after all of them

@@ -7,27 +7,27 @@ values, in the upstream order. The authority for the behaviour is
 Cases the port does not run, and where they go
 ----------------------------------------------
 
-These upstream cases are neither translated nor stubbed here; each is named where it belongs:
+One upstream case is neither translated nor stubbed here, and it is named with the reason:
 
-* ``makes a document create visible to a reader waiting behind a deferred commit that a call holds,
-  and stores it`` -- deferred commits are #47 (``persistence`` exists in this port's types and nothing
-  consumes it).
-* ``delivers a read, a commit without writes, a callback error, and a deferred commit after an earlier
-  commit`` -- its ordering is asserted over a deferred commit: #47.
-* ``fails the Session for a deferred commit memory cannot adopt, and still closes``,
-  ``settles a deferred commit whose adoption throws, alone, and closes``,
-  ``publishes a deferred commit only once the commit before it is published``,
-  ``never publishes a deferred commit behind a commit that fails``,
-  ``stores held changes for an unload after the call in flight``,
-  ``stores held changes for a version reload inside a callback after the call in flight``,
-  ``stores held changes at their deadline after the call in flight``,
-  ``drains the calls in flight and stores held changes when it closes`` -- all eight need the deferred
-  buffer and its deadline, which is #47 (the last one also needs the writes-at-close the Harness runs,
-  #45's seam, through that buffer).
 * ``fails the Session for a throw in the read caches' write-through, and leaves the later parts
   unpublished`` -- there is no read-side record cache in this port (no ``CachedStorage``): the
   component the case injects into does not exist. Excluded, with the reason recorded in
   ``PARITY.md``.
+
+The twelve entries that once sat above it waited on the deferred-commit mechanism: the deferred
+buffer, its held changes, and the deadline that stores them. That mechanism landed with #47, and the
+eleven upstream cases behind those entries are translated -- ``makes a
+reader of a document whose held changes an unpublished commit stores wait, and store them once``,
+``makes a reader of a document held by a deferred commit behind a call wait for it, and store it``,
+``delivers a read, a commit without writes, a callback error, and a deferred commit after an earlier
+commit``, ``fails the Session for a deferred commit memory cannot adopt, and still closes``,
+``settles a deferred commit whose adoption throws, alone, and closes``, ``publishes a deferred commit
+only once the commit before it is published``, ``never publishes a deferred commit behind a commit
+that fails``, ``stores held changes for an unload after the call in flight``, ``stores held changes
+for a version reload inside a callback after the call in flight``, ``stores held changes at their
+deadline after the call in flight``, and ``drains the calls in flight and stores held changes when it
+closes``. The twelfth entry named no upstream case at all, and is gone: upstream has no case of that
+title, so it recorded a deferral that nothing owed.
 
 Two upstream details are spelled differently here, for reasons of the host rather than of the design:
 
@@ -62,9 +62,18 @@ from session_support import (
 )
 
 from pi_durable import define_doc
+from pi_durable.errors import SessionFailed
 from pi_durable.session.session import SessionImpl
-from pi_durable.session.transaction import Transaction
-from pi_durable.types import CommitPublication, ConversationId, Seq, StorageWrite
+from pi_durable.session.transaction import AdoptedDocuments, Transaction
+from pi_durable.types import (
+    CommitOptions,
+    CommitPublication,
+    ConversationId,
+    DocumentCommitChange,
+    ObservedCommit,
+    Seq,
+    StorageWrite,
+)
 
 Note = define_doc(
     {
@@ -75,6 +84,24 @@ Note = define_doc(
         "fork": "initial",
         "initial": lambda: {"n": 0},
         "checkpoint_when": lambda _value, _ops, _info: False,
+    }
+)
+
+
+#: The mark upstream's ``DEFERRED`` gives a commit in this suite.
+DEFERRED: CommitOptions = {"persistence": {"kind": "deferred"}}
+
+#: Version 2 of the note: reading it is what makes the Session reload a cached document.
+NoteV2 = define_doc(
+    {
+        "kind": "gc.note",
+        "version": 2,
+        "scope": "conversation",
+        "history": "latest",
+        "fork": "initial",
+        "initial": lambda: {"n": 0, "migrated": True},
+        "checkpoint_when": lambda _value, _ops, _info: False,
+        "migrate": lambda value, _version: {**cast("dict[str, Any]", value), "migrated": True},
     }
 )
 
@@ -119,8 +146,10 @@ class LineSession:
 
         return self._session
 
-    def commit(self, change: Callable[[Any], Any], ctx: Any = context) -> asyncio.Task[Any]:
-        return asyncio.ensure_future(self._session.commit(change, ctx))
+    def commit(
+        self, change: Callable[[Any], Any], ctx: Any = context, options: CommitOptions | None = None
+    ) -> asyncio.Task[Any]:
+        return asyncio.ensure_future(self._session.commit(change, ctx, options))
 
     def read_on_line(self, job: Callable[[Any], Any]) -> asyncio.Task[Any]:
         return asyncio.ensure_future(self._session.read_on_line(job))
@@ -172,11 +201,14 @@ async def open_group_commits(
     return backend, session, ids, published
 
 
-def bump(session: LineSession, id: ConversationId) -> asyncio.Task[int]:
+def bump(
+    session: LineSession, id: ConversationId, options: CommitOptions | None = None
+) -> asyncio.Task[int]:
     """One commit: increment the conversation's note.
 
     Started at once and returned as a task, because upstream's ``bump`` is a promise: a case that holds
-    a commit in flight starts several and awaits them later.
+    a commit in flight starts several and awaits them later. ``options`` is upstream's third parameter,
+    the ``persistence`` mark that makes the commit deferred.
     """
 
     async def change(tx: Any) -> int:
@@ -186,7 +218,7 @@ def bump(session: LineSession, id: ConversationId) -> asyncio.Task[int]:
         note["n"] = value + 1
         return value
 
-    return asyncio.ensure_future(session.commit(change, context))
+    return asyncio.ensure_future(session.commit(change, context, options))
 
 
 async def notes(storage: ControlledStorage, ids: list[ConversationId]) -> list[int]:
@@ -205,6 +237,18 @@ async def notes(storage: ControlledStorage, ids: list[ConversationId]) -> list[i
         stored = await storage.document(record["id"], "current", context)
         values.append(0 if stored is None else cast(int, stored["value"]["n"]))
     return values
+
+
+def observed_kind(publication: CommitPublication) -> str:
+    """Which side of the Session made the publication a follower was handed.
+
+    The follower seam is the Session's own, and upstream hands it an ``ObservedCommit`` -- a stored
+    publication or one memory adopted (``session.ts:86-88``). The port's helper types the seam as the
+    stored ``CommitPublication``, which carries no discriminator, so the one case that asserts which
+    audience saw a commit reads it through the union upstream uses.
+    """
+
+    return cast("ObservedCommit", publication)["kind"]
 
 
 def entry_kinds(publications: list[CommitPublication]) -> list[str]:
@@ -391,6 +435,124 @@ async def test_makes_a_write_to_a_conversation_an_unpublished_commit_creates_wai
     await session.close(context)
 
 
+async def test_makes_a_reader_of_a_document_whose_held_changes_an_unpublished_commit_stores_wait() -> None:
+    """Upstream: "makes a reader of a document whose held changes an unpublished commit stores wait,
+    and store them once".
+    """
+
+    storage, session, ids, _published = await open_group_commits(1)
+    id = ids[0]
+    await bump(session, id)
+    await bump(session, id, DEFERRED)
+    # The first commit only reads the held document: storing its held changes is its write of it.
+    held = storage.hold()
+
+    async def storing(tx: Any) -> None:
+        await tx.doc(Note, id)
+        await tx.append_entry(id, {"kind": "a"})
+
+    storing_task = session.commit(storing, context)
+    await held.entered.wait()
+    read = {"done": False}
+
+    async def reading(tx: Any) -> None:
+        await tx.doc(Note, id)
+        read["done"] = True
+        await tx.append_entry(id, {"kind": "b"})
+
+    reading_task = session.commit(reading, context)
+    await flush()
+    assert read["done"] is False
+    held.release()
+    await asyncio.gather(storing_task, reading_task)
+    changes = [
+        [write for batch in call for write in batch if write["type"] == "document.change"]
+        for call in storage.calls[-2:]
+    ]
+    assert [len(writes) for writes in changes] == [1, 0]
+    record = await storage.find_document(
+        {"kind": Note.definition["kind"], "scope": {"kind": "conversation", "conversationId": id}},
+        "current",
+        context,
+    )
+    assert record is not None
+    stored = await storage.document(record["id"], "current", context)
+    assert stored is not None and stored["deltasSinceBase"] == 1
+    await session.close(context)
+
+
+async def test_makes_a_reader_of_a_document_held_by_a_deferred_commit_behind_a_call_wait_for_it() -> None:
+    """Upstream: "makes a reader of a document held by a deferred commit behind a call wait for it,
+    and store it"."""
+
+    storage, session, ids, published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    await bump(session, a)
+    held = storage.hold()
+    first = bump(session, b)
+    await held.entered.wait()
+
+    async def holding(tx: Any) -> None:
+        (await tx.doc(Note, a))["n"] = 5
+
+    deferred_commit = session.commit(holding, context, DEFERRED)
+    reader = bump(session, a)
+    await flush()
+    # Nothing is published while the first commit is in flight, the deferred one neither.
+    assert len(published) == 1
+    held.release()
+    await asyncio.gather(first, deferred_commit)
+    assert await reader == 5
+    # The reader's own batch stored what the deferred commit held.
+    stored = [write for batch in storage.calls[-1] for write in batch]
+    assert len([write for write in stored if write["type"] == "document.change"]) == 1
+    await session.close(context)
+    storage.reopen()
+    assert await notes(storage, [a, b]) == [6, 1]
+
+
+async def test_delivers_a_read_a_commit_without_writes_a_callback_error_and_a_deferred_commit() -> None:
+    """Upstream: "delivers a read, a commit without writes, a callback error, and a deferred commit
+    after an earlier commit"."""
+
+    storage, session, ids, _published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    held = storage.hold()
+    first = bump(session, a)
+    await held.entered.wait()
+
+    async def reads(_storage: Any) -> str:
+        return "read"
+
+    async def writes_nothing(_tx: Any) -> str:
+        return "none"
+
+    async def throws(_tx: Any) -> None:
+        raise RuntimeError("own")
+
+    order, awaiting = settle_order(
+        {
+            "first": first,
+            "read": session.read_on_line(reads),
+            "none": session.commit(writes_nothing, context),
+            "error": session.commit(throws, context),
+            "deferred": bump(session, b, DEFERRED),
+        }
+    )
+    await flush()
+    assert order == []
+    held.release()
+    async def all_five() -> bool:
+        return len(order) == 5
+
+    await eventually(all_five)
+    # A callback's own error affects only its job.
+    assert order == ["first", "read", "none", "error!", "deferred"]
+    await asyncio.gather(*awaiting, return_exceptions=True)
+    await session.close(context)
+
+
+
 async def test_makes_every_outcome_after_a_fatal_failure_session_failed_and_keeps_the_earlier_ones() -> None:
     """Upstream: "makes every outcome after a fatal failure SessionFailed, and keeps the earlier ones"."""
 
@@ -489,6 +651,195 @@ async def test_makes_a_scan_that_cannot_be_keyed_wait_for_every_unpublished_comm
 # refused part with its refusal, ${value} included, and the parts after it with SessionFailed"), both
 # translated below.
 #
+async def test_fails_the_session_for_a_deferred_commit_memory_cannot_adopt_and_still_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream: "fails the Session for a deferred commit memory cannot adopt, and still closes"."""
+
+    _storage, session, ids, published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    await bump(session, a)
+    await bump(session, b)
+    published.clear()
+    failure = RuntimeError("held adoption failed")
+
+    def throwing(_tx: Transaction) -> list[DocumentCommitChange]:
+        raise failure
+
+    monkeypatch.setattr(Transaction, "adopt_held", throwing)
+    held = bump(session, a, DEFERRED)
+    after = bump(session, b)
+    with pytest.raises(RuntimeError, match="held adoption failed"):
+        await held
+    with pytest.raises(SessionFailed):
+        await after
+    assert published == []
+    assert await session.closed == {"kind": "failed", "error": failure}
+    await session.close(context)
+
+
+async def test_settles_a_deferred_commit_whose_adoption_throws_alone_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream: "settles a deferred commit whose adoption throws, alone, and closes".
+
+    Astra's: the only commit is the deferred one, on a storage that runs nothing else.
+    """
+
+    storage = ControlledStorage()
+    session = LineSession(SessionImpl(storage))
+
+    async def create(tx: Any) -> ConversationId:
+        record = await tx.create_conversation({"ownership": {"kind": "ownerless"}})
+        id = cast(ConversationId, record["id"])
+        await tx.doc(Note, id)
+        return id
+
+    id = await session.commit(create, context)
+    failure = RuntimeError("injected held adoption failure")
+
+    def throwing(_tx: Transaction) -> list[DocumentCommitChange]:
+        raise failure
+
+    monkeypatch.setattr(Transaction, "adopt_held", throwing)
+    with pytest.raises(RuntimeError, match="injected held adoption failure"):
+        await bump(session, id, DEFERRED)
+    assert session.failure is failure
+    await session.close(context)
+    assert await session.closed == {"kind": "failed", "error": failure}
+    assert session.line_sizes == {"outstanding": 0, "unpublished": 0}
+
+
+async def test_publishes_a_deferred_commit_only_once_the_commit_before_it_is_published() -> None:
+    """Upstream: "publishes a deferred commit only once the commit before it is published"."""
+
+    _storage, session, ids, published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    # Only a change of an existing document is held.
+    await bump(session, b)
+    published.clear()
+    held = _storage.hold()
+    first = bump(session, a)
+    await held.entered.wait()
+    later = bump(session, b, DEFERRED)
+    await flush()
+    assert len(published) == 0
+    held.release()
+    await asyncio.gather(first, later)
+    assert [observed_kind(publication) for publication in published] == ["stored", "memory"]
+    await session.close(context)
+
+
+async def test_never_publishes_a_deferred_commit_behind_a_commit_that_fails() -> None:
+    """Upstream: "never publishes a deferred commit behind a commit that fails"."""
+
+    storage, session, ids, published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    await bump(session, b)
+    published.clear()
+    held = storage.hold()
+    first = session.commit(lambda tx: tx.append_entry(a, {"kind": "refuse"}), context)
+    await held.entered.wait()
+    later = bump(session, b, DEFERRED)
+    storage.refuse = lambda batch: any(
+        write["type"] == "entry" and write["value"]["kind"] == "refuse" for write in batch
+    )
+    held.release()
+    with pytest.raises(RuntimeError, match="refused"):
+        await first
+    with pytest.raises(SessionFailed):
+        await later
+    assert published == []
+
+
+async def test_stores_held_changes_for_an_unload_after_the_call_in_flight() -> None:
+    """Upstream: "stores held changes for an unload after the call in flight"."""
+
+    storage, session, ids, _published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    await bump(session, a)
+    await bump(session, b, DEFERRED)
+    held = storage.hold()
+    first = bump(session, a)
+    await held.entered.wait()
+    unloading = asyncio.ensure_future(session.unload_documents())
+    assert await settled(unloading) is False
+    held.release()
+    await asyncio.gather(first, unloading)
+    assert [write for batch in storage.calls[-1] for write in batch][0]["type"] == "document.change"
+    assert await session.snapshot(Note, b, context) == {"n": 1}
+    await session.close(context)
+    storage.reopen()
+    assert await notes(storage, [a, b]) == [2, 1]
+
+
+async def test_stores_held_changes_for_a_version_reload_inside_a_callback_after_the_call_in_flight() -> None:
+    """Upstream: "stores held changes for a version reload inside a callback after the call in flight"."""
+
+    storage, session, ids, _published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    await bump(session, a)
+    await bump(session, b)
+    await bump(session, b, DEFERRED)
+    held = storage.hold()
+    first = bump(session, a)
+    await held.entered.wait()
+
+    async def reloading(tx: Any) -> int:
+        return cast(int, (await tx.doc(NoteV2, b))["n"])
+
+    reload_task = session.commit(reloading, context)
+    assert await settled(reload_task) is False
+    held.release()
+    await first
+    # The reload found what memory held, stored first.
+    assert await reload_task == 2
+    await session.close(context)
+
+
+async def test_stores_held_changes_at_their_deadline_after_the_call_in_flight() -> None:
+    """Upstream: "stores held changes at their deadline after the call in flight"."""
+
+    storage, session, ids, _published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    await bump(session, a)
+    held = storage.hold()
+    first = bump(session, a)
+    await held.entered.wait()
+    # A deadline of 0 is already past: the store is owed as soon as the commit is admitted.
+    later = bump(session, b, {"persistence": {"kind": "deferred", "within_ms": 0}})
+    await flush()
+    calls = len(storage.calls)
+    held.release()
+    await asyncio.gather(first, later)
+    async def one_more_call() -> bool:
+        return len(storage.calls) == calls + 1
+
+    await eventually(one_more_call)
+    assert [write for batch in storage.calls[-1] for write in batch][0]["type"] == "document.create"
+    await session.close(context)
+
+
+async def test_drains_the_calls_in_flight_and_stores_held_changes_when_it_closes() -> None:
+    """Upstream: "drains the calls in flight and stores held changes when it closes"."""
+
+    storage, session, ids, _published = await open_group_commits(2)
+    a, b = ids[0], ids[1]
+    held = storage.hold()
+    first = bump(session, a)
+    await held.entered.wait()
+    later = bump(session, b, DEFERRED)
+    await flush()
+    closing = asyncio.ensure_future(session.close(context))
+    held.release()
+    await asyncio.gather(first, later)
+    await closing
+    assert await session.closed == {"kind": "closed"}
+    storage.reopen()
+    assert await notes(storage, [a, b]) == [1, 1]
+
+
+
 async def test_reports_a_commit_whose_batch_adopted_no_part() -> None:
     """Upstream: "fails the Session when Storage resolves without adopting".
 
@@ -1022,7 +1373,7 @@ async def test_leaves_the_parts_after_a_throwing_adoption_unpublished() -> (
     adoptions = 0
     original = Transaction.adopt
 
-    def adopt(self: Transaction, seq: Seq) -> list[Any]:
+    def adopt(self: Transaction, seq: Seq) -> AdoptedDocuments:
         nonlocal adoptions
         adoptions += 1
         if adoptions == 3:

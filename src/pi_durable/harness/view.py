@@ -29,11 +29,11 @@ from ..session.observation import (
 )
 from ..session.session import SessionImpl, contained
 from ..types import (
-    CommitPublication,
     ConversationRecord,
     Cursor,
     EntryQuery,
     EntryRecord,
+    ObservedCommit,
     Observer,
     Storage,
     watch_value_call,
@@ -280,7 +280,7 @@ class ConversationViews:
             incarnations[kind] = (loaded.record["id"], loaded.value_version)
         return Mount(conversation=conversation, docs=docs, incarnations=incarnations)
 
-    def _on_publication(self, publication: CommitPublication, context: Context) -> None:
+    def _on_publication(self, publication: ObservedCommit, context: Context) -> None:
         for id, mount in list(self._mounts.items()):
             advance_mount(id, mount, publication, context, self.report)
 
@@ -378,7 +378,7 @@ def _watch_observer(
 def advance_mount(
     id: ConversationId,
     mount: Mount,
-    publication: CommitPublication,
+    publication: ObservedCommit,
     context: Context,
     report: Callable[[BaseException], None],
 ) -> None:

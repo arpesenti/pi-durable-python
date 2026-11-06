@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from ..documents import define_doc
+from ..session.session import persist_within
 from ..session.transaction import Transaction
 from ..types import ConversationId, ConversationRecord
 from .types import (
@@ -38,6 +39,9 @@ DEFAULT_COMPACTION_POLICY: dict[str, Any] = {
 DEFAULT_PROGRESS_POLICY: dict[str, Any] = {
     "partial_interval_ms": 100,
     "output_interval_ms": 100,
+    #: How long a deferred commit, including one of running progress, may stay in memory unstored
+    #: (`CommitPersistence`); a crash loses at most about this much of an answer (`agent.ts:77`).
+    "persist_within_ms": 1_000,
 }
 
 DEFAULT_CONTEXT_RETENTION_MS = 600_000
@@ -88,6 +92,8 @@ def resolve_settings(settings: Any) -> Settings:
         value = _field(progress_partial, key)
         if value is not None:
             progress[key] = value
+    # A host may hand Infinity or refuse a number outright, and the Session reads this at each use.
+    progress["persist_within_ms"] = persist_within(progress["persist_within_ms"])
     return Settings(
         extensions=extensions,
         stream=dict(_field(settings, "stream", {}) or {}),

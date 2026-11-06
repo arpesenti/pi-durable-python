@@ -25,8 +25,8 @@ from ..session.observation import (
 )
 from ..session.session import SessionImpl, contained
 from ..types import (
-    CommitPublication,
     JoinPolicy,
+    ObservedCommit,
     Observer,
     Storage,
     TaskOutcome,
@@ -296,7 +296,7 @@ class TaskGraphView:
             live[str(record["id"])] = subject
         return {"tasks": tasks}, live
 
-    def _on_publication(self, publication: CommitPublication, context: Context) -> None:
+    def _on_publication(self, publication: ObservedCommit, context: Context) -> None:
         if self._mount is not None:
             advance_graph(self._mount, publication, context, self.report, self._blocked)
 
@@ -318,7 +318,7 @@ def _watch_observer(
 
 def advance_graph(
     mount: GraphMount,
-    publication: CommitPublication,
+    publication: ObservedCommit,
     context: Context,
     report: Callable[[BaseException], None],
     blocked: Callable[[dict[str, Any]], BlockedReason | None],
