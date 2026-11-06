@@ -2,7 +2,9 @@ import pytest
 
 from pi_durable.errors import (
     ConversationBusy,
+    ConversationIdle,
     ReadAfterWrite,
+    ReadOnlySession,
     SessionFailed,
     StorageRequestError,
     error_message,
@@ -10,10 +12,15 @@ from pi_durable.errors import (
 from pi_durable.ids import ROOT_CONVERSATION_ID
 
 
-def test_read_after_write_names_the_method() -> None:
-    error = ReadAfterWrite("entry")
+def test_read_after_write_names_the_operation() -> None:
+    error = ReadAfterWrite("Tx.entry()")
     assert str(error) == "Tx.entry() cannot read tables after the first table write"
     assert error.name == "ReadAfterWrite"
+    # An admission names the call, not a ``Tx.`` method.
+    assert (
+        str(ReadAfterWrite("submit(tx, draft)"))
+        == "submit(tx, draft) cannot read tables after the first table write"
+    )
 
 
 def test_storage_request_error_is_a_plain_message() -> None:
@@ -44,6 +51,19 @@ def test_conversation_busy_carries_the_conversation() -> None:
     assert error.name == "ConversationBusy"
 
 
+def test_conversation_idle_carries_the_conversation() -> None:
+    error = ConversationIdle(ROOT_CONVERSATION_ID)
+    assert str(error) == "Conversation 1 is idle"
+    assert error.conversation_id == ROOT_CONVERSATION_ID
+    assert error.name == "ConversationIdle"
+
+
+def test_read_only_session_names_what_was_refused() -> None:
+    error = ReadOnlySession("a commit with writes")
+    assert str(error) == "Read-only Harness: a commit with writes refused"
+    assert error.name == "ReadOnlySession"
+
+
 def test_error_message_formats_values_without_raising() -> None:
     class BadString:
         def __str__(self) -> str:
@@ -56,7 +76,7 @@ def test_error_message_formats_values_without_raising() -> None:
 
 def test_errors_are_exceptions() -> None:
     for error in [
-        ReadAfterWrite("entry"),
+        ReadAfterWrite("Tx.entry()"),
         StorageRequestError("bad"),
         SessionFailed("cause"),
         ConversationBusy(ROOT_CONVERSATION_ID),

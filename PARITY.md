@@ -76,9 +76,9 @@ that ports the section moves the row, and is named in the row's parenthetical. A
 | Upstream | Kind | Python target | Tests | Status |
 | --- | --- | --- | --- | --- |
 | `ConversationBusy` | value | `ConversationBusy` | test_errors.py | tested |
-| `ConversationIdle` | value | `ConversationIdle` | — | planned (1.5.0: an input with `when_idle="reject"` against an idle conversation writes nothing; #50) |
+| `ConversationIdle` | value | `ConversationIdle` | test_errors.py, test_harness_submit_in_commit.py | tested (an input with `when_idle="reject"` against an idle conversation raises it and writes nothing) |
 | `ReadAfterWrite` | value | `ReadAfterWrite` | test_errors.py | tested |
-| `ReadOnlySession` | value | `ReadOnlySession` | — | planned (1.5.0: `HarnessOptions.read_only` opens a viewer of a session another process drives; #50) |
+| `ReadOnlySession` | value | `ReadOnlySession` | test_errors.py, test_harness_read_only.py | tested (`HarnessOptions.read_only` opens a viewer of a session another process drives) |
 | `SessionFailed` | value | `SessionFailed` | test_errors.py | tested |
 | `StorageRequestError` | value | `StorageRequestError` | test_errors.py | tested |
 

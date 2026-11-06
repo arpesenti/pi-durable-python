@@ -20,6 +20,7 @@ from typing import (
     TypedDict,
     TypeVar,
     cast,
+    overload,
 )
 
 from ..context import AbortSignal, Context
@@ -40,6 +41,8 @@ from ..documents import (
 from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
+    ContinueDoneRecord,
+    ContinueUnansweredRecord,
     ConversationOwnership,
     Cursor,
     DocumentReader,
@@ -822,6 +825,8 @@ class InputSubmissionDraft(TypedDict, total=False):
     requestId: str
     when_busy: Literal["steer", "followUp", "reject"]
     whenBusy: Literal["steer", "followUp", "reject"]
+    when_idle: Literal["reject"]
+    whenIdle: Literal["reject"]
 
 
 class WriteSubmissionDraft(TypedDict, total=False):
@@ -833,11 +838,30 @@ class WriteSubmissionDraft(TypedDict, total=False):
     requestId: str
 
 
-SubmissionDraft: TypeAlias = InputSubmissionDraft | WriteSubmissionDraft
-"""Either an input or a passive entry write."""
+class ContinueSubmissionDraft(TypedDict, total=False):
+    """Start a run on the context as it is, without a user message.
+
+    Only when idle: a busy conversation rejects it with :class:`ConversationBusy`, and it never
+    queues. Items kept in ``pi.inbox`` are placed first and join the run.
+    """
+
+    type: Literal["continue"]
+    request_id: str
+    requestId: str
+
+
+SubmissionDraft: TypeAlias = (
+    InputSubmissionDraft | WriteSubmissionDraft | ContinueSubmissionDraft
+)
+"""An input, a passive entry write, or a continue."""
 
 SettledSubmissionRecord: TypeAlias = (
-    InputDoneRecord | InputUnansweredRecord | WriteDoneRecord | WriteUnansweredRecord
+    InputDoneRecord
+    | InputUnansweredRecord
+    | WriteDoneRecord
+    | WriteUnansweredRecord
+    | ContinueDoneRecord
+    | ContinueUnansweredRecord
 )
 """A submission that reached ``done`` or ``unanswered``."""
 
@@ -856,7 +880,13 @@ class ConversationHandle(Protocol):
 
     id: ConversationId
 
-    async def submit(self, submission: Any, context: Context) -> Any: ...
+    # The same two forms as ``Conversation.submit()``: a draft with a context, or a transaction with
+    # a draft, which admits the submission in the caller's own commit.
+    @overload
+    async def submit(self, submission: SubmissionDraft, context: Context) -> Submission: ...
+
+    @overload
+    async def submit(self, tx: Transaction, submission: SubmissionDraft) -> SubmissionId: ...
 
     async def abort(self, context: Context, options: Mapping[str, Any] | None = None) -> None: ...
 
@@ -868,7 +898,13 @@ class Conversation(Protocol):
 
     id: ConversationId
 
+    # The overloads pair a draft with a context, and a transaction with a draft: the second admits
+    # the submission in the caller's own commit, stored or lost with it.
+    @overload
     async def submit(self, submission: SubmissionDraft, context: Context) -> Submission: ...
+
+    @overload
+    async def submit(self, tx: Transaction, submission: SubmissionDraft) -> SubmissionId: ...
 
     async def agent(self, context: Context) -> Agent: ...
 
@@ -947,6 +983,11 @@ class HarnessOptions(TypedDict, total=False):
     fails the Session: the ``ReportInfo`` fields tagged by ``kind``, beside ``error``.
     """
 
+    read_only: bool
+    """Open the Session as a viewer of what another process drives: every commit with writes, and every
+    call that would run tasks, is refused with :class:`ReadOnlySession`.
+    """
+
 
 T = TypeVar("T")
 
@@ -971,6 +1012,7 @@ __all__ = [
     "ConversationHandle",
     "ConversationInit",
     "ConversationRetryPolicy",
+    "ContinueSubmissionDraft",
     "ConversationStreamOptions",
     "DocFamilyToken",
     "DEFAULT_AFTER_FAILED_RUN",

@@ -341,6 +341,39 @@ class WriteUnansweredRecord(SubmissionRecordBase):
     answer: NotRequired[Never]
 
 
+class ContinuePlacedRecord(SubmissionRecordBase):
+    """A run started without a user message: owned by that run, and never queued."""
+
+    type: Literal["continue"]
+    status: Literal["placed"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueDoneRecord(SubmissionRecordBase):
+    """The run a continue started answered."""
+
+    type: Literal["continue"]
+    status: Literal["done"]
+    entry: NotRequired[Never]
+    answer: EntryId
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueUnansweredRecord(SubmissionRecordBase):
+    """The run a continue started ended without an answer."""
+
+    type: Literal["continue"]
+    status: Literal["unanswered"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: str
+    detail: NotRequired[JsonValue]
+
+
 SubmissionRecord: TypeAlias = (
     InputQueuedRecord
     | InputPlacedRecord
@@ -349,6 +382,9 @@ SubmissionRecord: TypeAlias = (
     | WriteQueuedRecord
     | WriteDoneRecord
     | WriteUnansweredRecord
+    | ContinuePlacedRecord
+    | ContinueDoneRecord
+    | ContinueUnansweredRecord
 )
 
 
@@ -421,6 +457,33 @@ class WriteUnansweredCreate(SubmissionCreateBase):
     answer: NotRequired[Never]
 
 
+class ContinuePlacedCreate(SubmissionCreateBase):
+    type: Literal["continue"]
+    status: Literal["placed"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueDoneCreate(SubmissionCreateBase):
+    type: Literal["continue"]
+    status: Literal["done"]
+    entry: NotRequired[Never]
+    answer: EntryId
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueUnansweredCreate(SubmissionCreateBase):
+    type: Literal["continue"]
+    status: Literal["unanswered"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: str
+    detail: NotRequired[JsonValue]
+
+
 SubmissionCreate: TypeAlias = (
     InputQueuedCreate
     | InputPlacedCreate
@@ -429,6 +492,9 @@ SubmissionCreate: TypeAlias = (
     | WriteQueuedCreate
     | WriteDoneCreate
     | WriteUnansweredCreate
+    | ContinuePlacedCreate
+    | ContinueDoneCreate
+    | ContinueUnansweredCreate
 )
 
 

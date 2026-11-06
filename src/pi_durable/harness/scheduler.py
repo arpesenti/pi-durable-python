@@ -19,7 +19,7 @@ from ..context import (
     with_abort_signal,
     without_abort_signal,
 )
-from ..errors import error_message, is_failure
+from ..errors import ReadOnlySession, error_message, is_failure
 from ..ids import ConversationId, TaskId
 from ..json import JsonValue, copy_json
 from ..session.session import SessionImpl
@@ -360,7 +360,9 @@ class TaskScheduler:
         withdraw_inputs: Callable[[Transaction, ConversationId, str], Awaitable[None]],
         conversation: Callable[[ConversationId, Any, Context], Awaitable[ConversationHandle | None]],
         context: Context,
+        read_only: bool = False,
     ) -> None:
+        self._read_only = read_only
         self._session = session
         self._storage = storage
         self._registry = registry
@@ -427,7 +429,8 @@ class TaskScheduler:
         """Load live tasks and change surviving ``running`` tasks back to ``pending``, counting the restart.
 
         A task that reaches the restart limit this way is parked; 1.5.0 has no report for it, and #49
-        ends it instead, reported by its kind.
+        ends it instead, reported by its kind. Read-only, it only loads them: a ``running`` task stays
+        as committed, running in another process.
         """
 
         self._session.observe_commits(self._observe)
@@ -452,6 +455,8 @@ class TaskScheduler:
             for records in scans:
                 for record in records:
                     self._track(None, record)
+                    if self._read_only:
+                        continue
                     if record.get("abandonOnRestart") is True:
                         self._abandoned.add(record["id"])
                     if record["state"]["status"] == "running":
@@ -466,6 +471,8 @@ class TaskScheduler:
                         self._fail_fast_checks.add(record["id"])
 
         await self._session.commit_with(load, context)
+        if self._read_only:
+            return
         # Derive abort marks a crash left unapplied below cancelled owners, and finalize held outcomes.
         self._cascade_pending = True
         self._schedule_reconcile()
@@ -477,6 +484,8 @@ class TaskScheduler:
         A host wakeup, such as an alarm, calls this. Idempotent; the kick does nothing once closing.
         """
 
+        if self._read_only:
+            raise ReadOnlySession("running tasks")
         self._enabled = True
         self._wake_due()
         self._kick()
@@ -536,6 +545,9 @@ class TaskScheduler:
     def wake(self) -> Wake:
         """When the Session next needs a process: ``active`` now, and ``at`` for the earliest sleep."""
 
+        # A read-only Harness runs nothing, so it never needs a process.
+        if self._read_only:
+            return {"active": False}
         now = self._now()
         # A reconcile pass with work to do is work too: it finalizes held outcomes and marks cascades,
         # at open as recovery. A process that dies before it lands must be woken again.
@@ -859,7 +871,9 @@ class TaskScheduler:
         self._expiry_handle = None
         self._settle_idle()
     def _schedule_reconcile(self) -> None:
-        if self._reconcile_scheduled or self._closing:
+        # A read-only reconcile could only fail: what it writes is refused, and its own commits
+        # fail the Session.
+        if self._reconcile_scheduled or self._closing or self._read_only:
             return
         self._reconcile_scheduled = True
         asyncio.get_running_loop().call_soon(lambda: self._spawn(self._reconcile()))
@@ -1351,7 +1365,7 @@ class TaskScheduler:
     def _schedule_wake(self) -> None:
         """Recompute the wake off the Session line: arm the built-in timer, or tell ``on_wake``."""
 
-        if self._wake_scheduled or self._closing:
+        if self._wake_scheduled or self._closing or self._read_only:
             return
         self._wake_scheduled = True
 

@@ -31,9 +31,30 @@ Safe for concurrent threads sharing one `Session` or `Storage`. Reserved: nothin
 _Avoid_: free-threaded-clean
 
 **Submission**:
-A durable admission of user input or a passive entry write.
-It is `queued` in the inbox, `placed` as an entry, then `done` or `unanswered`.
+A durable admission of user input, a passive entry write, or a continue.
+An input or a write is `queued` in the inbox, `placed` as an entry, then `done` or `unanswered`; a
+continue is never queued and places no entry of its own.
 _Avoid_: message, job
+
+**Continue submission**:
+A submission of `type: "continue"`: it starts a run on the context as it is, without a user message.
+It is admitted only while the conversation is idle — a busy one refuses it with `ConversationBusy` —
+it is never queued, and it places no entry: it is `placed` with no `entry`, then settles `done` with
+an `answer` like an input. Items a failed run left in the inbox are placed first and join its run.
+_Avoid_: retry, resume, replay
+
+**Idle rejection**:
+An input draft's `when_idle: "reject"`: an idle conversation refuses it with `ConversationIdle` and
+writes nothing, so the input never starts a run of its own. It pairs with `when_busy`, which decides
+what a working conversation does with the same draft.
+_Avoid_: busy rejection, not-found, no-op
+
+**In-commit admission**:
+A submission admitted inside the caller's own commit — `submit(tx, draft)` — so it is stored or lost
+with that commit. It must come before the commit's first table write, another admission's included;
+after it, the call raises `ReadAfterWrite`. A transaction of another Session, or one merely wrapped,
+is refused before anything is read.
+_Avoid_: nested commit, side write, two-phase submit
 
 **Inbox**:
 The built-in `pi.inbox` conversation document holding queued submissions in submission-ID order.
@@ -44,7 +65,8 @@ A point in a run (`postTools` or `final`) where queued submissions are selected 
 _Avoid_: flush, drain, checkpoint
 
 **Run**:
-The `pi.generation` task named by `pi.live.run` that owns the placed input submissions it must answer.
+The `pi.generation` task named by `pi.live.run` that owns the placed submissions it must answer: an
+input's, a queued input's placed at its boundary, or a continue's.
 A run is present exactly while the conversation is busy.
 _Avoid_: turn, request, generation
 
@@ -114,6 +136,14 @@ A failure that does not fail the calling operation, or the Session's own failure
 `on_report(report)` as one `Report`: the fields of a `ReportInfo` tagged by `kind` — what happened,
 from `storage_failed` to `listener_error` — beside the `error` itself.
 _Avoid_: log, error event, notification, report info argument
+
+**Read-only Harness**:
+A Harness opened with `HarnessOptions.read_only`: a viewer of a session another process drives, such
+as a synced copy on another device. It loads live tasks as committed, `running` ones included, and
+schedules nothing; a commit with writes, and every call that would run tasks, is refused with
+`ReadOnlySession`, while reads and a commit that writes nothing keep working. Recovery is left to the
+next writable open.
+_Avoid_: replica, mirror, offline session
 
 **Commit batch**:
 One group of writes a storage stores as one atomic commit with its own sequence. One

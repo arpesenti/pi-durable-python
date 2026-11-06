@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import partial
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, overload
 
 from ..context import Context, with_abort_signal, without_abort_signal
 from ..entries import ResetEntry
@@ -16,6 +16,7 @@ from ..types import (
     ROOT_CONVERSATION_ID,
     ConversationOwnership,
     ConversationRecord,
+    EntryDraft,
     EntryRecord,
     Page,
     Storage,
@@ -46,7 +47,9 @@ from .types import (
     SettledSubmissionRecord,
     SettledTask,
     Submission,
+    SubmissionDraft,
     Wake,
+    WriteSubmissionDraft,
     host_error,
     to_report_info,
 )
@@ -55,6 +58,12 @@ from .util import closed_error, scan_all
 from .view import ConversationViews
 
 _SCAN_PAGE_SIZE = 256
+
+
+def _is_draft(first: Any) -> bool:
+    """Whether the first argument of a ``submit`` overload is a submission draft, not a transaction."""
+
+    return isinstance(first, Mapping) and "type" in first
 
 
 def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
@@ -126,18 +135,29 @@ class BoundConversation:
     def _bind(self, context: Context) -> Context:
         return _bind_context(self._binding, context)
 
-    async def submit(self, submission: Any, context: Context) -> Any:
+    @overload
+    async def submit(self, first: SubmissionDraft, second: Context) -> BoundSubmission: ...
+
+    @overload
+    async def submit(self, first: Transaction, second: SubmissionDraft) -> SubmissionId: ...
+
+    async def submit(self, first: Any, second: Any) -> Any:
         cast(Callable[[], None], self._binding["check"])()
-        # An invocation-bound handle accepts only input submissions; tools use ordinary transaction
-        # writes for passive entries (spec section 7.3).
-        if not isinstance(submission, Mapping):
+        # The overloads pair a draft with a context, and anything else (a transaction) with a draft.
+        if not _is_draft(first):
+            # The caller's commit carries its own context, so the invocation's abort is checked here.
+            signal = self._binding["signal"]
+            if signal is not None:
+                signal.raise_if_aborted()
+            return await self._harness.admit(first, self.id, second)
+        # An invocation-bound handle admits input and continue submissions; a passive write keeps
+        # its own refusal, because a tool writes entries through the transaction (spec section 7.3).
+        kind = first.get("type")
+        if kind is None and "content" not in first:
             raise TypeError("A conversation handle accepts only input submissions")
-        kind = submission.get("type")
-        if kind is not None and kind != "input":
+        if kind is not None and kind not in ("input", "continue"):
             raise TypeError("A conversation handle accepts only input submissions")
-        if kind is None and "content" not in submission:
-            raise TypeError("A conversation handle accepts only input submissions")
-        admitted = await self._harness.submit(self.id, submission, self._bind(context))
+        admitted = await self._harness.submit(self.id, first, self._bind(second))
         return BoundSubmission(admitted, self._binding)
 
     async def abort(self, context: Context, options: Mapping[str, Any] | None = None) -> None:
@@ -195,8 +215,17 @@ class ConversationHandleImpl:
 
         await self._harness.commit(apply, context)
 
-    async def submit(self, submission: Any, context: Context) -> Any:
-        return await self._harness.submit(self.id, submission, context)
+    @overload
+    async def submit(self, first: SubmissionDraft, second: Context) -> Submission: ...
+
+    @overload
+    async def submit(self, first: Transaction, second: SubmissionDraft) -> SubmissionId: ...
+
+    async def submit(self, first: Any, second: Any) -> Any:
+        # The overloads pair a draft with a context, and anything else (a transaction) with a draft.
+        if _is_draft(first):
+            return await self._harness.submit(self.id, first, second)
+        return await self._harness.admit(first, self.id, second)
 
     async def commit(self, change: Callable[[Transaction], Any], context: Context) -> Any:
         return await self._harness.commit_with(change, context, TransactionScope(conversation_id=self.id))
@@ -243,7 +272,8 @@ class ConversationHandleImpl:
         entry: dict[str, Any] = {"kind": ResetEntry.kind, "head": "self"}
         if handoff is not None:
             entry["model"] = [{"role": "user", "content": handoff, "timestamp": self._harness.now}]
-        await self.submit({"type": "write", "entry": entry}, context)
+        draft: WriteSubmissionDraft = {"type": "write", "entry": cast(EntryDraft, entry)}
+        await self.submit(draft, context)
 
     async def view_state(self, context: Context) -> Any:
         return await self._harness._views.state(self.id, context)
@@ -260,11 +290,13 @@ class Harness(SessionImpl):
         now = safe_now(options.get("now"), report)
         settings_option = options.get("settings")
         host_settings = _current_settings(settings_option)
+        read_only = options.get("read_only", options.get("readOnly")) is True
         super().__init__(
             raw_storage,
             now,
             lambda: _settings_value(host_settings(), "document_retention_ms"),
             options.get("set_timer", options.get("setTimer")),
+            read_only,
         )
         self._options = dict(options)
         self._report_sink = report
@@ -292,6 +324,7 @@ class Harness(SessionImpl):
                 id, binding, call_context
             ),
             context=without_abort_signal(context),
+            read_only=read_only,
         )
         self._graph = TaskGraphView(
             self,
@@ -545,6 +578,13 @@ class Harness(SessionImpl):
         self, conversation_id: ConversationId, submission: Any, context: Context
     ) -> Submission:
         return await self._submissions.submit(conversation_id, submission, context)
+
+    async def admit(
+        self, tx: Transaction, conversation_id: ConversationId, draft: Any
+    ) -> SubmissionId:
+        """Admit a submission inside the caller's commit ``tx``, with the rules of ``submit()``."""
+
+        return await self._submissions.admit(tx, conversation_id, draft)
 
     async def submission(self, id: SubmissionId, context: Context) -> Submission | None:
         return await self._submissions.get(id, context)

@@ -19,7 +19,7 @@ from ..documents import (
     materialize_document,
     resolve_address,
 )
-from ..errors import SessionFailed, StorageRequestError, is_failure
+from ..errors import ReadOnlySession, SessionFailed, StorageRequestError, is_failure
 from ..harness.context import read_context
 from ..harness.types import LISTENER, ContextView, ReportInfoInput, SetTimer, host_error
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
@@ -227,7 +227,9 @@ class SessionImpl:
         now: Callable[[], int] | None = None,
         document_retention_ms: int | float | Callable[[], int | float | None] | None = None,
         set_timer: SetTimer | None = None,
+        read_only: bool = False,
     ) -> None:
+        self._read_only = read_only
         self._documents: dict[str, LoadedDocument] = {}
         # Cached documents with no observer attached, by address, oldest use first.
         self._idle_documents: dict[str, int | float] = {}
@@ -295,6 +297,15 @@ class SessionImpl:
         """The Session's guarded Storage, as the Harness components use it."""
 
         return cast(Storage, self._storage)
+
+    def owns_transaction(self, tx: Any) -> bool:
+        """Internal: whether ``tx`` is the transaction of one of this Session's commits.
+
+        A wrapper that forwards attribute reads is not one of them: only a Transaction this Session
+        created, holding this Session's own host, is.
+        """
+
+        return type(tx) is Transaction and tx._host is self._host
 
     @property
     def failed(self) -> asyncio.Future[SessionFailed]:
@@ -370,6 +381,11 @@ class SessionImpl:
                 tx.discard()
                 self._sweep_documents()
                 return result
+            if self._read_only:
+                # Refused before Storage: the Session stays healthy, and the caller sees why.
+                tx.discard()
+                self._sweep_documents()
+                raise ReadOnlySession("a commit with writes")
             try:
                 seq = await self._store_one_batch(writes, context)
             except BaseException:
@@ -658,12 +674,17 @@ class SessionImpl:
     # ── Document cache ─────────────────────────────────────────────────────
 
     def _cached(self, address_id: str) -> LoadedDocument | None:
+        if self._read_only:
+            # A read-only Session shows a Storage another process writes, so nothing it reads stays current.
+            return None
         cached = self._documents.get(address_id)
         if cached is not None:
             self._touch_document(address_id)
         return cached
 
     def _install(self, document: LoadedDocument) -> None:
+        if self._read_only:
+            return
         self._documents[document.address_id] = document
         self._touch_document(document.address_id)
 
@@ -679,7 +700,7 @@ class SessionImpl:
         address: DocumentAddress,
         context: Context,
     ) -> LoadedDocument | None:
-        cached = self._documents.get(address_id)
+        cached = None if self._read_only else self._documents.get(address_id)
         if cached is not None and cached.value_version == definition.version:
             self._touch_document(address_id)
             return cached

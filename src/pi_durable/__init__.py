@@ -39,7 +39,14 @@ from .entries import (
     UserEntry,
     define_entry,
 )
-from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError
+from .errors import (
+    ConversationBusy,
+    ConversationIdle,
+    ReadAfterWrite,
+    ReadOnlySession,
+    SessionFailed,
+    StorageRequestError,
+)
 from .harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_PROGRESS_POLICY,
@@ -212,6 +219,7 @@ __all__ = [
     "ConversationDocFamilyToken",
     "ConversationDocToken",
     "ConversationHandle",
+    "ConversationIdle",
     "ConversationInit",
     "ConversationRetryPolicy",
     "ConversationStreamOptions",
@@ -280,6 +288,7 @@ __all__ = [
     "ProviderState",
     "QueueMode",
     "ReadAfterWrite",
+    "ReadOnlySession",
     "Registry",
     "RegistryReader",
     "RegistrySnapshot",

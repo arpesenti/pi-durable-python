@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal, cast
 
 from ..context import Context
-from ..errors import ConversationBusy
+from ..errors import ConversationBusy, ConversationIdle, ReadAfterWrite
 from ..ids import ConversationId, SubmissionId
 from ..json import JsonValue, copy_json
 from ..session.drafts import DocumentDraft
@@ -53,6 +53,10 @@ def _request_id(draft: Mapping[str, Any]) -> str | None:
 
 def _when_busy(draft: Mapping[str, Any]) -> str | None:
     return draft.get("when_busy", draft.get("whenBusy"))
+
+
+def _when_idle(draft: Mapping[str, Any]) -> str | None:
+    return draft.get("when_idle", draft.get("whenIdle"))
 
 
 def is_settled(record: SubmissionRecord) -> bool:
@@ -117,6 +121,30 @@ class Submissions:
 
         id = await self._session.commit_with(admit, context)
         return SubmissionHandle(cast(SubmissionId, id), self)
+
+    async def admit(self, tx: Transaction, conversation_id: ConversationId, draft: Any) -> SubmissionId:
+        """Admit a submission inside the caller's commit ``tx``, with the rules of ``submit()``.
+
+        The admission is stored or lost with that commit. It must come before the commit's first
+        table write, another admission's included.
+        """
+
+        if not self._session.owns_transaction(tx):
+            raise ValueError("The transaction belongs to another Session")
+        # Enforced on every path: admission reads tables only on some paths (request IDs, an idle
+        # boundary, a steer's trace).
+        if tx.has_table_write:
+            raise ReadAfterWrite("submit(tx, draft)")
+        # Inputs and continues start runs, so the admission asks for the progress one needs.
+        self._resume()
+        return await admit_submission(
+            tx,
+            conversation_id,
+            cast(Mapping[str, Any], draft),
+            self._now(),
+            self._queue_modes(),
+            self._start_run,
+        )
 
     async def _record(self, id: SubmissionId, context: Context) -> SubmissionRecord | None:
         return await self._session.read_on_line(
@@ -212,8 +240,10 @@ async def admit_submission(
     """Admit one submission inside a commit (spec section 6)."""
 
     kind = _type(draft)
-    if kind not in ("input", "write"):
-        raise TypeError(f"Submission draft type must be 'input' or 'write', got {kind!r}")
+    if kind not in ("input", "write", "continue"):
+        raise TypeError(
+            f"Submission draft type must be 'input', 'write', or 'continue', got {kind!r}"
+        )
     entry = draft.get("entry")
     if kind == "input" and entry is not None:
         if not isinstance(entry, Mapping):
@@ -244,6 +274,31 @@ async def admit_submission(
     when_busy = _when_busy(draft)
     if busy and kind == "input" and when_busy == "reject":
         raise ConversationBusy(conversation_id)
+    if not busy and kind == "input" and _when_idle(draft) == "reject":
+        raise ConversationIdle(conversation_id)
+    if kind == "continue":
+        # Never queued: whether a run can continue depends on how the current one ends, so this is
+        # refused before any write.
+        if busy:
+            raise ConversationBusy(conversation_id)
+        opened = await prepare_boundary(tx, conversation_id, queue_modes)
+        record = await tx.create_submission(
+            cast(
+                SubmissionCreate,
+                {
+                    "conversationId": conversation_id,
+                    **request,
+                    "type": "continue",
+                    "status": "placed",
+                },
+            )
+        )
+        id = record["id"]
+        # Items an earlier failed run left queued (`afterFailedRun: "keep"`) are placed first and join
+        # the run, so the context it starts holds everything the conversation had left to say.
+        placed = await apply_boundary(tx, opened, "final", now)
+        await start_run(tx, conversation_id, live, [*placed.users, id])
+        return id
 
     boundary = None if busy else await prepare_boundary(tx, conversation_id, queue_modes)
     if boundary is None or len(boundary.inbox["items"]) > 0:

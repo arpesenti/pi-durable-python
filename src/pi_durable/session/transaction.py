@@ -185,7 +185,7 @@ def _apply_submission_change(current: SubmissionRecord, change: SubmissionChange
         status = "placed" if current["type"] == "input" else "done"
         return cast(SubmissionRecord, {**current, "status": status, "entry": change["entry"]})
     if change.get("status") == "done" and current["status"] != "placed":
-        raise ValueError(f"Submission {current['id']} is not a placed input")
+        raise ValueError(f"Submission {current['id']} is not a placed input or continue")
     return cast(SubmissionRecord, {**current, **change})
 
 
@@ -1012,8 +1012,14 @@ class Transaction:
     async def _read(self, method: str, read: Any) -> Any:
         self._assert_open()
         if self._has_table_write:
-            raise ReadAfterWrite(method)
+            raise ReadAfterWrite(f"Tx.{method}()")
         return await self._track(read())
+
+    @property
+    def has_table_write(self) -> bool:
+        """Whether this commit has written a table row: admission must come before that first write."""
+
+        return self._has_table_write
 
     async def _write(self, write: Any) -> Any:
         self._assert_open()

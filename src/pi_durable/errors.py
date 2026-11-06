@@ -37,13 +37,14 @@ class _NamedError(Exception):
 
 
 class ReadAfterWrite(_NamedError):
-    """A transaction read a table after its first table write.
+    """A transaction read a table after its first table write, or admitted a submission after it.
 
-    Read every required row before writing.
+    Read every required row, and admit, before writing. ``operation`` names the call, such as
+    ``Tx.task()`` or ``submit(tx, draft)``.
     """
 
-    def __init__(self, method: str) -> None:
-        super().__init__(f"Tx.{method}() cannot read tables after the first table write")
+    def __init__(self, operation: str) -> None:
+        super().__init__(f"{operation} cannot read tables after the first table write")
 
 
 class StorageRequestError(_NamedError):
@@ -72,6 +73,17 @@ class SessionFailed(_NamedError):
             self.__cause__ = cause
 
 
+class ReadOnlySession(_NamedError):
+    """The Harness was opened read-only (``HarnessOptions.read_only``): a commit with writes, or a
+    call that would run tasks, was refused.
+
+    Nothing was written, and the Harness stays usable for reads.
+    """
+
+    def __init__(self, what: str) -> None:
+        super().__init__(f"Read-only Harness: {what} refused")
+
+
 class ConversationBusy(_NamedError):
     """A submission reached a busy conversation and was not admitted."""
 
@@ -80,8 +92,18 @@ class ConversationBusy(_NamedError):
         self.conversation_id = conversation_id
 
 
+class ConversationIdle(_NamedError):
+    """A ``whenIdle: "reject"`` input reached an idle conversation and was not admitted."""
+
+    def __init__(self, conversation_id: ConversationId) -> None:
+        super().__init__(f"Conversation {conversation_id} is idle")
+        self.conversation_id = conversation_id
+
+
 __all__ = [
     "ConversationBusy",
+    "ConversationIdle",
+    "ReadOnlySession",
     "ReadAfterWrite",
     "SessionFailed",
     "StorageRequestError",
