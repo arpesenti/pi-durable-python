@@ -535,10 +535,28 @@ and remaining callable by other tools; the exact result text and `modelTools` `{
 order rather than registry order; names recorded without the registry, including unknown and
 non-deferred ones, with `remove` winning until a load lifts it; an extension disappearing and
 coming back; per-branch loads and the post-reset baseline; and an unrelated query loading nothing.
-The unit cases pin tokenization (camel-case and acronym boundaries, stop words, naive plural stems),
-BM25 length normalization, ties in document order, the limit, and the empty-query and positive-
-integer-limit diagnostics. `pi_durable.search` is the internal port of `src/search.ts`; it is not
-a public subpath export.
+The unit cases pin tokenization (camel-case and acronym boundaries, stop words, naive plural stems)
+and translate the `rankDocuments` cases of upstream `test/search.test.ts` one for one — every
+non-Unicode assertion of them, over the same fixtures and the same expected orders. The three v1.5.0
+ranking rules each have the case that proves it (#57): the name scored as a field of its own, where
+one mention in it beats three in a description, by
+`test_ranks_a_name_match_above_mentions_in_descriptions` (`test/search.test.ts:105`); the bonus for a
+query carrying a tool's whole local name after the last `__`, by
+`test_ranks_a_tool_first_when_the_query_contains_its_whole_name` (`test/search.test.ts:117`), whose
+`peekaboo app` query answers `mcp__peekaboo__see` once upstream's own `score += fullNameBonus` line is
+deleted from its `src/search.ts`; and exact-name-first, by
+`test_ranks_a_tool_first_when_the_query_is_its_name` (`test/search.test.ts:89`) together with
+`test_ranks_an_exact_name_query_ahead_of_the_document_that_outscores_it` — the upstream case alone
+does not see the rule, because its two documents already land in that order on the name weight and
+the bonus, while the second case's competitor outscores the named tool and wins only when the query
+is not its exact name. Term relevance and the limit, the namespace field, and coverage above score
+follow in `test_ranks_by_term_relevance_and_respects_the_limit`, `test_searches_the_namespace_text`
+and `test_ranks_a_tool_matching_more_query_terms_first_whatever_the_scores`; what the ranker already
+had stays pinned by `test_ranks_by_bm25_keeps_ties_in_document_order_and_honors_the_limit` (length
+normalization, ties in document order, the limit), and the empty-query and positive-integer-limit
+diagnostics by the tool cases. The eight Unicode `rankDocuments` cases are not translated: they reach
+terms through the word segmenter the port does not have. `pi_durable.search` is the internal port of
+`src/search.ts`; it is not a public subpath export.
 
 ### `src/testing/index.ts` → `pi_durable.testing`
 
@@ -654,7 +672,7 @@ SQLite backend and migrations.
 | 5.5 Structured concurrency | planned (the tasks an `afterRun` hook asks for are generation children, so Stop and idle waits include them; #48) |
 | 5.6 Sleeping, timers, and wakeups | planned (`on_wake` runs in a microtask the line never waits for, and the foreground timer now also arms a deferred commit's deadline; #47) |
 | 6 Submissions and inbox | planned (continue submissions, `when_idle="reject"` with `ConversationIdle`, and `submit(tx, draft)` inside a commit landed with #50: test_harness_continue.py, test_harness_submit_in_commit.py. What this section still owes is the answer-resolves-while-busy rule — a run that answered keeping `run`, with an empty ID list and `run.afterRun` set, until the tasks its `afterRun` hooks asked for are terminal, so a queued input waits behind an answer already settled — which #48 owns) |
-| 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py; code mode excluded) |
+| 7 Extensions, hooks, tools, and system prompt | tested (tool search in test_tool_search.py, whose ranker cases translate upstream test/search.test.ts and hold the v1.5.0 ranking: the name as a field of its own, the whole-local-name `__` bonus, and exact-name-first, each by the case that proves it (#57); code mode excluded) |
 | 7.1 Extensions, registry, and agent resolution | tested (a call to a tool its request did not offer resolves `tool_unavailable` through the phase's tool lookup; test_harness_tools.py, test_harness_tools_recovery.py. That the registry is never touched for it is proven behaviourally only — the cases show a deferred tool the agent has but never offered simply never runs — so that clause still owes a registry lookup spy to be observed rather than inferred, and is claimed no further than that; #36) |
 | 7.2 Hooks | planned (`afterTool` on every result the tool task writes, `beforeProviderRequest`, `afterRun` with `RunSummary` and `RunEndTask`, and `HookApi.entry()`/`entries()`; #36, #48) |
 | 7.3 Tools | planned (deferred tool progress is #47: `ToolApi.commit` takes no `options`, and a tool's `details()` partial is not yet stored on section 4.1's deferred window. Parameters as plain JSON Schema closed by default with pi-schema's validator wording landed with #51, and `ConversationHandle.submit(tx, ...)` with #50: test_harness_submit_in_commit.py, over the rule in `harness/submissions.py`. `unoffered` slots and the hidden call's own task are tested in test_harness_tools.py and test_harness_live_migrations.py; #36) |
@@ -910,7 +928,7 @@ These are required by the chosen scope but are not upstream 1.5.0 exports.
 | Bounded output windows and adaptive progress commits | `pi_durable.harness.output` | tested (`test_harness_output.py`, `test_harness_tools.py`, `test_harness_live_deltas.py`) |
 | Tool argument repair, coercion, and validation; object schemas closed by default; the structured-output validator and upstream's wording | `pi_durable.harness.validation` | tested (`test_harness_validation.py`, `test_harness_tools.py`, `test_harness_structured_output.py`, `test_harness_structured_output_wording.py`, `test_harness_tool_schemas.py`) |
 | Built-in `pi.tool` task, result entries, and replay policy | `pi_durable.harness.tool` | tested (`test_harness_tools.py`, `test_harness_tools_recovery.py`) |
-| BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`) |
+| BM25 tool search behind `tool_search` | `pi_durable.search` | tested (`test_tool_search.py`, which translates upstream `test/search.test.ts`'s `rankDocuments` cases one for one and proves the three v1.5.0 ranking rules each by its own case: `test_ranks_a_name_match_above_mentions_in_descriptions` for the name as a field of its own, `test_ranks_a_tool_first_when_the_query_contains_its_whole_name` for the whole-local-name `__` bonus, `test_ranks_an_exact_name_query_ahead_of_the_document_that_outscores_it` for exact-name-first over two documents; #57) |
 | Shared truncation utilities from `truncate.ts` | `pi_durable.truncate` | tested (`test_env_truncate.py`) |
 | Pre-upgrade stored databases, written by this port's `v1.4.0` tag and opened by this release | `tests/fixtures/pre-1.5.0` (see its README) | tested (`test_harness_live_migrations.py`) |
 | Shared provider plumbing: catalog lookup, request options, transcript replay, cross-model message adaptation, argument parsing, request-attempt retries, usage pricing, and the stream/abort wrapper | `pi_durable.providers.base`, `.request`, `.transcript`, `.json_parse`, `.retry`, `.usage`, `.stream` | tested through the adapter suites (`test_providers_openai.py`, `test_providers_anthropic.py`) |
