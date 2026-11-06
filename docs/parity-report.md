@@ -333,17 +333,33 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   and the retirement's `null` value was superseded by #43, which made a retirement a value call with
   the last value and `retired` set, so the observer half is `test_follows_a_conversation_documents_address_through_a_retirement_into_its_recreation`
   and the watch half lives in `test_session_watches.py`.
-- **The task document's watch, ended by its owner, is #54's.** Seven upstream `harness-observers`
-  cases wait on it and are named, with their reasons, in `EXCLUDED_WATCH_CASES` in
-  `tests/test_harness_observers.py`: `:290`, `:331`, `:352`, `:373`, `:386`, `:417`, and `:441`. All
-  seven need a task document's *watch* to be retired and ended by the commit that ends its owning task
-  — unbuilt Session behaviour under Chord's `endAfterDelivery`, held by no `PARITY.md` row and no
-  ticket while #44 ran. The one case of that family that observes rather than watches,
-  `:308` — "an observer gets the retirement, then its end, at the publication of the commit that ends
-  the task" — is implemented for real here, so `ended` is reachable for an observed owner that ended.
-  `:441` is held with them because it is gated on the same `watch.closed == {kind: ended}`; the half
-  of it that is about the delivered change is held by the watch suite's snapshot case and, for an
-  observer, by `test_hands_the_very_committed_value_the_publication_and_the_snapshot_carry`.
+- **The task document's watch, ended by its owner, landed with #54.** All seven upstream
+  `harness-observers` task-document cases — `:290`, `:331`, `:352`, `:373`, `:386`, `:417` and
+  `:441` — are translated, one for one, in `tests/test_harness_observers.py`: the commit that makes
+  the owner task terminal releases the watch's pin and ends it `ended` once the retirement it
+  published has been delivered
+  (`test_delivers_the_retirement_of_the_commit_that_ends_its_task_then_ends_ended`, whose single
+  delivered call is that retirement — the value held before the commit, no operations, `retired` set,
+  and the address absent for good afterwards;
+  `test_keeps_no_task_document_watch_alive_once_its_task_ended`, whose weakref half proves the ended
+  watch keeps neither itself in the Session's cache nor anything of the Harness); a watch whose
+  listener never started stays open after its task ended, until the Harness's close ends it `ended`
+  (`test_a_watch_never_started_when_its_task_ends_ends_with_the_close_keeping_nothing`) or a storage
+  failure ends it `failed` with that error
+  (`test_a_watch_never_started_when_its_task_ends_fails_with_the_harness`); a watch busy in an earlier
+  call fails with the Harness *before* its retirement is ever delivered
+  (`test_a_watch_busy_in_an_earlier_call_when_its_task_ends_fails_before_its_retirement_call`); a
+  watch whose retirement call is still running ends only after that call returns
+  (`test_a_watch_whose_retirement_call_runs_when_its_task_ends_ends_only_after_it_returns`, which
+  asserts `closed` unsettled while the call runs rather than that both events happen); and every
+  change a listener was handed across the end is strict JSON carrying nothing of the Harness, which
+  the Harness's own collection then proves
+  (`test_hands_listeners_changes_that_keep_nothing_of_the_harness`). No case of the family is left
+  deferred: `EXCLUDED_WATCH_CASES` is gone, and the module docstring records that all fifteen upstream
+  cases are translated. The one case of that family that observes rather than watches, `:308` — "an
+  observer gets the retirement, then its end, at the publication of the commit that ends the task" —
+  #44 implemented for real, so `ended` was reachable for an observed owner that ended before this
+  ticket made it reachable for a watch.
 - **Two cases here have no upstream counterpart and are named for what they prove.**
   `test_harness_observers.py::test_catches_an_entry_dropped_by_the_first_page` is the observing face
   of #45's window drop: upstream proves a drop only from a watch, and the bounded window is #45's

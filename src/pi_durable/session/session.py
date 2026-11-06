@@ -136,6 +136,35 @@ def _record_address_id(record: DocumentRecord) -> str:
     return address_id(address)
 
 
+def _owner_task_of(loaded: LoadedDocument) -> TaskId | None:
+    """The task whose end ends a follower of this document's address, if the address is a task's.
+
+    A task document belongs to its task: when that task goes terminal the document retires and is
+    never created again, so the terminal write is the last change a follower of it will ever see.
+    """
+
+    scope = loaded.record["scope"]
+    return scope["taskId"] if scope["kind"] == "task" else None
+
+
+def _ends_the_owner(writes: list[StorageWrite], owner_task_id: TaskId | None) -> bool:
+    """Whether one of this commit's writes makes the owner task of a task document terminal.
+
+    The one commit that ends a task document's owner is recognised by the task record it writes, not
+    by the retirement beside it: a commit that retires the document without ending the task leaves
+    both the watch and the observer following the address (spec §9.1).
+    """
+
+    if owner_task_id is None:
+        return False
+    return any(
+        write["type"] == "task"
+        and write["value"]["id"] == owner_task_id
+        and write["value"]["state"]["status"] == "terminal"
+        for write in writes
+    )
+
+
 @dataclass(slots=True)
 class _WatchAttachment:
     """One follower of a document address — a watch or an observer — and the incarnation it pins.
@@ -143,13 +172,16 @@ class _WatchAttachment:
     Both followers follow the address rather than one incarnation, so a retirement unpins what the
     attachment held and a document created at that address later is pinned again for the same
     attachment (spec §9.2). The follower decides what it does with the change: a watch folds it
-    behind its listener, an observer mirrors it synchronously.
+    behind its listener, an observer mirrors it synchronously. ``owner_task_id`` is the task whose
+    terminal write ends the follower, for the address of a task document: that write is the last
+    that can change the address, so the pin goes and the follower ends with it.
     """
 
     address_id: str
     record_id: DocumentId | None
     follower: CommittedWatch | AttachedObserver
     release: Callable[[], None] | None
+    owner_task_id: TaskId | None = None
 
 
 @dataclass(slots=True)
@@ -646,6 +678,11 @@ class SessionImpl:
         for entry in list(self._observers):
             self._advance_observer(entry, documents, writes, context)
         for entry in list(self._watches):
+            watch = cast(CommittedWatch, entry.follower)
+            if watch.ending:
+                # The commit that ended the owner already took this watch off the line: no later
+                # change reaches it, and only its pending end remains (§9.1).
+                continue
             for settled in documents:
                 if (
                     settled["type"] != "document"
@@ -654,18 +691,15 @@ class SessionImpl:
                     continue
                 # A watch follows its address: while it is absent the watch pins nothing, and a new
                 # incarnation is pinned for the same watch.
-                if settled["kind"] == "retire":
-                    if entry.release is not None:
-                        entry.release()
-                    entry.release = None
-                    entry.record_id = None
-                elif entry.record_id != settled["record"]["id"]:
-                    if entry.release is not None:
-                        entry.release()
-                    entry.record_id = settled["record"]["id"]
-                    entry.release = self._pin_document(entry.address_id, settled["record"]["id"])
-                watch = cast(CommittedWatch, entry.follower)
+                self._follow_address(entry, settled)
                 watch.advance_document(settled, context)
+            if _ends_the_owner(writes, entry.owner_task_id):
+                # The commit that made the owner task terminal retired the task's document, and that
+                # retirement is this watch's last call: the pin goes with the line, and the watch
+                # ends once that call returned — or at the Session's close or failure, if its
+                # listener never starts to deliver it (spec §9.1).
+                self._release_pin(entry)
+                watch.end_after_delivery()
         for listener in list(self._internal_listeners):
             contained(partial(listener, publication, context), self.fail)
         for observer in list(self._commit_observers):
@@ -688,15 +722,19 @@ class SessionImpl:
         """
 
         if settled["kind"] == "retire":
-            if entry.release is not None:
-                entry.release()
-            entry.release = None
+            self._release_pin(entry)
             entry.record_id = None
         elif entry.record_id != settled["record"]["id"]:
-            if entry.release is not None:
-                entry.release()
+            self._release_pin(entry)
             entry.record_id = settled["record"]["id"]
             entry.release = self._pin_document(entry.address_id, settled["record"]["id"])
+
+    def _release_pin(self, entry: _WatchAttachment) -> None:
+        """Release the pin one attachment holds, once, leaving it free to take another."""
+
+        release, entry.release = entry.release, None
+        if release is not None:
+            release()
 
     def _advance_observer(
         self,
@@ -729,16 +767,11 @@ class SessionImpl:
             follower.advance_document(change, context)
             if not follower.attached:
                 return
-        owner = follower.owner_task_id
+        owner = entry.owner_task_id
         if owner is None:
             return
-        for write in writes:
-            if write["type"] != "task":
-                continue
-            record = write["value"]
-            if record["id"] == owner and record["state"]["status"] == "terminal":
-                follower.end(ENDED)
-                return
+        if _ends_the_owner(writes, owner):
+            follower.end(ENDED)
 
     # ── Document cache ─────────────────────────────────────────────────────
 
@@ -953,7 +986,11 @@ class SessionImpl:
             loaded.record["id"],
         )
         attachment = _WatchAttachment(
-            loaded.address_id, loaded.record["id"], watch, release
+            loaded.address_id,
+            loaded.record["id"],
+            watch,
+            release,
+            _owner_task_of(loaded),
         )
         self._watches.append(attachment)
         return watch
@@ -977,8 +1014,6 @@ class SessionImpl:
             if release_now is not None:
                 release_now()
 
-        scope = loaded.record["scope"]
-        owner_task_id = scope["taskId"] if scope["kind"] == "task" else None
         follower = AttachedObserver(
             observer,
             detach,
@@ -986,10 +1021,13 @@ class SessionImpl:
             loaded.value,
             loaded.value_version,
             loaded.record["id"],
-            owner_task_id,
         )
         attachment = _WatchAttachment(
-            loaded.address_id, loaded.record["id"], follower, release
+            loaded.address_id,
+            loaded.record["id"],
+            follower,
+            release,
+            _owner_task_of(loaded),
         )
         self._observers.append(attachment)
         return AttachedObservation(loaded.value, follower)

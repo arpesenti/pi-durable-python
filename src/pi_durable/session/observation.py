@@ -25,7 +25,7 @@ from typing import Any, Protocol, cast
 from ..context import BACKGROUND_CONTEXT, AbortSignal, Context, without_abort_signal
 from ..delta import Op, PendingOps
 from ..errors import is_failure
-from ..ids import DocumentId, TaskId
+from ..ids import DocumentId
 from ..types import (
     CommitObserver,
     DocumentCommitChange,
@@ -130,6 +130,7 @@ class CommittedWatch:
         "_cancellation_remove",
         "_cancellation_signal",
         "_closed",
+        "_ending",
         "_terminal",
         "_detach",
         "_end",
@@ -175,6 +176,7 @@ class CommittedWatch:
         self._scheduled = False
         self._running = False
         self._end: WatchEnd | None = None
+        self._ending = False
         self._cancellation_signal: AbortSignal | None = None
         self._cancellation_remove: Callable[[], None] | None = None
 
@@ -187,6 +189,17 @@ class CommittedWatch:
     @property
     def closed(self) -> asyncio.Future[WatchEnd]:
         return self._terminal
+
+    @property
+    def ending(self) -> bool:
+        """Internal: whether the watch is ended by its owner and only owes its last call.
+
+        The Session stops handing a watch of a task document the commits after the one that ended
+        its task, which is what unsubscribing it from the line means (§9.1). Hosts have no use for
+        it: :meth:`stop` stays the only cancel entry point a caller has.
+        """
+
+        return self._ending
 
     def start(
         self,
@@ -234,12 +247,52 @@ class CommittedWatch:
         self._terminate({"kind": "aborted"})
 
     def close_session(self, failure: BaseException | None = None) -> None:
-        """End with ``ended``, or with ``failed`` and the error that failed the Session."""
+        """End with ``ended``, or with ``failed`` and the error that failed the Session.
+
+        This ends the watch at once, whatever was still owed to the listener: a retirement the watch
+        never delivered — because its listener never started, or was still busy in an earlier call —
+        is dropped rather than delivered first (spec §9.1).
+        """
 
         if failure is None:
             self._terminate({"kind": "ended"})
         else:
             self._terminate({"kind": "failed", "error": failure})
+
+    def end_after_delivery(self) -> None:
+        """End ``ended`` once the call this watch owes its listener returned (spec §9.1).
+
+        Internal, the Session's own entry point beside :meth:`close_session`: a task document's
+        watch is owed the retirement that the commit ending its task published, and that call is its
+        last. Three dispositions are distinguished here, and collapsing them is what the upstream
+        suite catches:
+
+        - the retirement is queued behind a listener that has not been called yet, or the listener
+          is busy in an earlier call: the end comes after that call returns;
+        - the listener was never started: the owed call never arrives, so the watch stays open until
+          the Session's close or failure ends it at once, dropping the retirement;
+        - nothing is owed at all — the retirement was already delivered and returned: the watch ends
+          now.
+
+        The end is ``ended``, never ``failed``: the owner ended, the Session did not fail. Only
+        :meth:`stop` and the acquisition abort are the host's cancel entry points.
+        """
+
+        if self._end is not None or self._ending:
+            return
+        self._ending = True
+        self._end_if_delivered()
+
+    def _end_if_delivered(self) -> None:
+        """End the watch its owner ended by, once nothing is owed to the listener any more."""
+
+        if not self._ending or self._end is not None:
+            return
+        if not self._started or self._running or self._scheduled or self._pending_change:
+            # A call is running or still queued; a listener that never started owes one that never
+            # arrives, which only the Session's own end discharges.
+            return
+        self._terminate(ENDED)
 
     def advance(self, call: WatchCall[Any], context: Context) -> None:
         """Queue one committed call: the seam a mount, or an observer of one, advances.
@@ -248,7 +301,7 @@ class CommittedWatch:
         operations, and the watch stays open until :meth:`stop` or the Session's own end.
         """
 
-        if self._end is not None or call["kind"] != "value":
+        if self._end is not None or self._ending or call["kind"] != "value":
             return
         self._queue(call["value"], call["ops"], call["retired"], context)
 
@@ -260,7 +313,7 @@ class CommittedWatch:
         replacement of the new incarnation, folded with what is pending.
         """
 
-        if self._end is not None:
+        if self._end is not None or self._ending:
             return
         if change["type"] != "document":
             return
@@ -351,8 +404,11 @@ class CommittedWatch:
                     break
         finally:
             self._running = False
-            if self._end is None and self._pending_change:
-                self._schedule()
+            if self._end is None:
+                if self._pending_change:
+                    self._schedule()
+                else:
+                    self._end_if_delivered()
 
     def _terminate(self, end: WatchEnd) -> None:
         """End the watch, once: drop every reference into the Session, and settle ``closed``.
@@ -526,7 +582,7 @@ class AttachedObserver(GuardedObserver):
     document, after the retirement that ends it — rather than living until it is stopped.
     """
 
-    __slots__ = ("_observed_version", "_owner_task_id", "_record_id", "_value")
+    __slots__ = ("_observed_version", "_record_id", "_value")
 
     def __init__(
         self,
@@ -536,25 +592,17 @@ class AttachedObserver(GuardedObserver):
         value: Any,
         observed_version: int,
         record_id: DocumentId,
-        owner_task_id: TaskId | None = None,
     ) -> None:
         super().__init__(observer, detach, report)
         self._value: Any = value
         self._observed_version = observed_version
         self._record_id: DocumentId | None = record_id
-        self._owner_task_id = owner_task_id
 
     @property
     def value(self) -> Any:
         """The revision the observer is at: what every later call reaches from."""
 
         return self._value
-
-    @property
-    def owner_task_id(self) -> TaskId | None:
-        """The task whose end ends this observer, for an address owned by a task."""
-
-        return self._owner_task_id
 
     def advance_document(self, change: DocumentCommitChange, context: Context) -> None:
         """Deliver one committed change at the followed address, unfolded and in line order.
