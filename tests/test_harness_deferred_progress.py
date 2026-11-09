@@ -6,12 +6,16 @@ Translated case for case from upstream ``test/harness-deferred-progress.test.ts`
 simulated by failing the Harness: from that moment nothing more reaches Storage, as when the process
 dies, and the reopened Harness resumes from what was stored.
 
-Two suites of upstream's file are here and the reasons any case is not are stated at the case. The
+All 11 cases of upstream's file are here, each naming the upstream title it translates. The
 two audiences this ticket rests on are pinned from both sides: the Session's own follower is handed
 every partial as memory adopts it (`memory_partials`), and the host's ``observe_commits()`` observer
 is handed nothing at all for a partial that has been adopted and not yet stored
 (:func:`test_hands_the_host_commit_observer_nothing_for_a_partial_that_was_only_adopted`), which is
 the direction most easily lost by a later change that publishes a held revision twice.
+
+Two cases are the port's own, because upstream has none where the tool side asks to be deferred: a
+running call's ``details()`` value riding the held commit, and a tool's own ``api.commit`` honouring
+the persistence mark it was handed. Both are named at the case and on the 7.3 row of ``PARITY.md``.
 """
 
 from __future__ import annotations
@@ -31,10 +35,11 @@ from chat_support import (
 )
 from session_support import ControlledStorage, context, eventually, observe_commits, observe_commits_as_host
 from task_support import aborted, deferred
-from tool_support import add_task, add_tool, calls, tool
+from tool_support import DONE, add_task, add_tool, calls, tool
 
 from pi_durable import AssistantEntry, LiveDoc
 from pi_durable.delta import apply_immutable
+from pi_durable.harness.live import PROGRESS_COMMIT
 from pi_durable.tasks import define_task
 from pi_durable.types import ConversationId, JsonObject
 
@@ -685,3 +690,140 @@ async def _audit_run(task: Any, runtime: Any, call_context: Any) -> None:
 
 async def _audit_abort(_task: Any, _runtime: Any, _context: Any) -> None:
     return None
+
+
+def held_tool(name: str, gate: Any, write: Any) -> Any:
+    """A tool that runs ``write`` against its api, then waits for ``gate`` to end the call."""
+
+    async def execute(_args: Any, api: Any, call_context: Any) -> Any:
+        await write(api, call_context)
+        await gate.promise
+        return {}
+
+    return tool(name, execute)
+
+
+def slot_by_call_id(live: Any, call_id: str) -> dict[str, Any] | None:
+    """The slot of ``call_id`` in a ``pi.live`` value, model-issued calls only."""
+
+    for slot in (live or {}).get("tools") or ():
+        if slot.get("callId") == call_id:
+            return cast(dict[str, Any], slot)
+    return None
+
+
+async def shown_slot(harness: Any, conversation_id: Any, call_id: str) -> dict[str, Any] | None:
+    """The slot of ``call_id`` as memory shows it, the way a watch of ``pi.live`` does."""
+
+    return slot_by_call_id(await harness.snapshot(LiveDoc, conversation_id, context), call_id)
+
+
+async def stored_slot(
+    storage: ControlledStorage, conversation_id: Any, call_id: str
+) -> dict[str, Any] | None:
+    """The slot of ``call_id`` as Storage has it."""
+
+    return slot_by_call_id(await stored_live(storage, conversation_id), call_id)
+
+
+async def test_shows_a_running_tools_details_at_once_and_stores_them_with_the_next_trigger() -> None:
+    """No upstream counterpart: the `details()` half of the deferred window (`PARITY.md` 7.3).
+
+    Upstream's progress writer commits a running call's last `details()` value inside the same deferred
+    commit as its output (`harness/tool.ts:634-655`), and this tree's writer does the same
+    (`harness/tool.py:945-957`). Upstream's suites prove the output half and say nothing of `details`,
+    so the row's claim rests on this case: what a running call reports through `details()` is shown to
+    memory as it is reported, and reaches Storage only with a trigger -- here, the next commit that
+    reads the document.
+    """
+
+    storage = ControlledStorage()
+    setup = slow_setup(float("inf"))
+    gate = deferred()
+    details = {"step": 1, "log": "working"}
+    add_tool(
+        setup.registry,
+        held_tool("work", gate, lambda api, call_context: api.details(details, call_context)),
+    )
+    setup.faux.set_responses([calls(["work", {}, "c1"]), DONE])
+    opened = await open(storage, setup)
+    submission = (await opened["root"].submit({"type": "input", "content": "go"}, context)).id
+
+    async def reported() -> bool:
+        slot = await shown_slot(opened["harness"], opened["root"].id, "c1")
+        return slot is not None and slot.get("details") == details
+
+    await eventually(reported)
+    # Memory shows the reported details. Storage has the slot -- its creation is a commit of its own,
+    # and a creation that survived a crash has to be durable -- but not what was reported into it.
+    stored = await stored_slot(storage, opened["root"].id, "c1")
+    assert stored is not None and "details" not in stored
+    # A commit that reads the document is the trigger: it takes the held revision with it, beside its
+    # own writes. Appending the entry alone would be no trigger at all -- it leaves `pi.live` alone.
+    async def touch(tx: Any) -> None:
+        await tx.doc(LiveDoc, opened["root"].id)
+        await tx.append_entry(opened["root"].id, {"kind": "note"})
+
+    await opened["root"].commit(touch, context)
+    stored = await stored_slot(storage, opened["root"].id, "c1")
+    assert stored is not None and stored["details"] == details
+    gate.resolve()
+    await (await opened["harness"].submission(submission, context)).wait(context)
+    await opened["harness"].close(context)
+
+
+async def test_defers_a_running_tools_own_commit_only_when_it_asks_for_it() -> None:
+    """No upstream counterpart: `ToolApi.commit(change, context, options)` (`PARITY.md` 7.3).
+
+    Upstream's tool api hands the running tool its task's commit with the persistence mark passed
+    through (`harness/types.ts:282-283`, `harness/tool.ts:487-496`); this tree's does the same
+    (`harness/tool.py:762-774`). No upstream case commits through that api with a mark, so the meaning
+    of the parameter rests on this case: a deferred commit of a running call's own slot is shown and
+    not stored, and the next commit of the same document -- unmarked, as every tool commit that asks
+    for nothing is -- stores it.
+    """
+
+    storage = ControlledStorage()
+    setup = slow_setup(float("inf"))
+    held = deferred()
+    finish = deferred()
+
+    async def write(api: Any, call_context: Any) -> None:
+        async def mark(tx: Any, key: str) -> None:
+            live = await tx.doc(LiveDoc, api.conversation_id)
+            slot = next(slot for slot in live["tools"] if slot["callId"] == "c1")
+            slot[key] = True
+
+        await api.commit(lambda tx: mark(tx, "shown"), call_context, PROGRESS_COMMIT)
+        await held.promise
+        await api.commit(lambda tx: mark(tx, "stored"), call_context)
+        await finish.promise
+
+    add_tool(setup.registry, held_tool("work", finish, write))
+    setup.faux.set_responses([calls(["work", {}, "c1"]), DONE])
+    opened = await open(storage, setup)
+    submission = (await opened["root"].submit({"type": "input", "content": "go"}, context)).id
+
+    async def shown() -> bool:
+        slot = await shown_slot(opened["harness"], opened["root"].id, "c1")
+        return slot is not None and slot.get("shown") is True
+
+    await eventually(shown)
+    # The mark is in memory and nowhere else: what Storage has of the slot is what its creation commit
+    # stored, and the tool's own commit carried the deferred mark.
+    stored = await stored_slot(storage, opened["root"].id, "c1")
+    assert stored is not None and "shown" not in stored
+    # The tool's next commit of the same document is unmarked, so it stores its own write and the one
+    # that was held.
+    held.resolve()
+
+    async def stored_too() -> bool:
+        slot = await stored_slot(storage, opened["root"].id, "c1")
+        return slot is not None and slot.get("stored") is True
+
+    await eventually(stored_too)
+    held_slot = await stored_slot(storage, opened["root"].id, "c1")
+    assert held_slot is not None and held_slot["shown"] is True
+    finish.resolve()
+    await (await opened["harness"].submission(submission, context)).wait(context)
+    await opened["harness"].close(context)

@@ -4,6 +4,14 @@ What a renderer sees of a run is the transcript window and ``pi.live``, and ever
 makes, rebuilt from operations alone. This is where the assertions that rode on the deleted agent
 event adapter live now: the same facts about a run, read through the windowed view and the live
 document instead of through translated events (spec §9.3).
+
+Every one of the upstream file's 13 cases is here, beside two the port added of its own. The
+streamed-partials tail -- "streams a tool-call partial as appends at its argument paths", "commits a
+growing text and tool call at a cost that follows the new text, not the string lengths", and "keeps a
+watcher's memory proportional to a long streamed text and tool call, not to their commits" -- is told
+with the port's measures: upstream weighs V8's heap, which has no counterpart here, so the cases weigh
+what the commits carry and what the watcher is handed. Each docstring names the measure it took and
+``docs/parity-report-1.5.0.md`` records the half this tree cannot weigh.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ from chat_support import (
     assistant_message,
     chat_setup,
     faux_text,
+    faux_tool_call,
     open_chat,
     slow_message,
     text_of,
@@ -472,6 +481,112 @@ async def test_ends_a_call_that_never_runs_and_one_aborted_with_its_generation()
     await harness.close(context)
 
 
+MESSAGE_PATH = ["docs", "pi.live", "generation", "message"]
+"""Where the answer being generated lives in the viewed document."""
+
+
+def _message_ops(frames: list[dict[str, Any]]) -> list[tuple[str, list[Any], Any]]:
+    """Every operation the frames made on the in-flight message, each path relative to the message.
+
+    Upstream's ``onMessage`` (`harness-view-run.test.ts:529-536`): a root replacement carries no
+    path, and an operation elsewhere in the document is not this stream's.
+    """
+
+    ops: list[tuple[str, list[Any], Any]] = []
+    for frame in frames:
+        for op in frame["ops"]:
+            if op[0] == "r":
+                ops.append(("r", [], None))
+                continue
+            path = list(op[1])
+            if path[: len(MESSAGE_PATH)] == MESSAGE_PATH:
+                ops.append((op[0], path[len(MESSAGE_PATH) :], op[2] if len(op) > 2 else None))
+    return ops
+
+
+def _token_stream(message: dict[str, Any], *, piece: int, interval: float) -> Step:
+    """A stream that grows each block ``piece`` characters at a time, as upstream's faux does per token.
+
+    Upstream's faux answers at ``tokensPerSecond`` with a ``tokenSize`` (``chat-support.ts``); the
+    port's faux has no token clock, so the case hands it the piece size and the pause between events
+    -- the same stand-in ``slow_message`` uses. Each event carries the partial as far as it has
+    streamed and the piece that arrived as ``delta``, which is what upstream's events carry even
+    though this tree's stream reads only the partial (``harness/generation.py``'s ``stream_response``).
+
+    A tool call's arguments grow member by member, parsed as far as their text has reached, which is
+    what upstream's ``StreamingJsonParser`` hands durable per ``toolcall_delta``
+    (``harness/partial-changes.ts:64-84``). The port's own adapters hold a call's arguments at ``{}``
+    until its whole text parses (the deviation ``PARITY.md`` records as "Streaming tool-call
+    arguments"), so this is the shape a provider that reports what has parsed so far gives durable;
+    what the cases below pin is durable's half -- that such a call is committed as appends at its
+    argument paths, and that no commit carries the raw argument text.
+    """
+
+    def build(_request: Any, _options: Any) -> AssistantStream:
+        async def events() -> Any:
+            base = cast(dict[str, Any], copy_json(message))
+            base["content"] = []
+            base["stopReason"] = "pending"
+            yield {"type": "start", "partial": base}
+            blocks: list[dict[str, Any]] = []
+            for block in message["content"]:
+                if block["type"] == "thinking":
+                    blocks.append({"type": "thinking", "thinking": ""})
+                elif block["type"] == "text":
+                    blocks.append({"type": "text", "text": ""})
+                else:
+                    blocks.append(
+                        {
+                            "type": "toolCall",
+                            "id": block["id"],
+                            "name": block["name"],
+                            "arguments": {},
+                        }
+                    )
+            partial = cast(dict[str, Any], copy_json(base))
+            partial["content"] = blocks
+            for index, block in enumerate(message["content"]):
+                if block["type"] == "toolCall":
+                    arguments = cast(dict[str, Any], block["arguments"])
+                    for name in list(arguments):
+                        value = str(arguments[name])
+                        for end in range(piece, len(value) + piece, piece):
+                            grown = value[:end]
+                            blocks[index]["arguments"] = {
+                                **blocks[index]["arguments"],
+                                name: grown,
+                            }
+                            yield {
+                                "type": "toolcall_delta",
+                                "delta": value[max(0, end - piece) : end],
+                                "partial": copy_json(partial),
+                            }
+                            await asyncio.sleep(interval)
+                        blocks[index]["arguments"] = {
+                            **blocks[index]["arguments"],
+                            name: copy_json(arguments[name]),
+                        }
+                    continue
+                field = "text" if block["type"] == "text" else "thinking"
+                value = str(block[field])
+                kind = "text_delta" if field == "text" else "thinking_delta"
+                for end in range(piece, len(value) + piece, piece):
+                    blocks[index][field] = value[:end]
+                    yield {
+                        "type": kind,
+                        "delta": value[max(0, end - piece) : end],
+                        "partial": copy_json(partial),
+                    }
+                    await asyncio.sleep(interval)
+                blocks[index][field] = value
+
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        future.set_result(message)
+        return AssistantStream(events(), future)
+
+    return Step(build)
+
+
 def _running(states: list[dict[str, Any]], call_id: str) -> bool:
     """Whether any value showed call ``call_id`` running, model-issued or nested."""
 
@@ -537,56 +652,6 @@ async def test_rebuilds_a_sliding_tail_window_from_output_trims_and_appends() ->
     await harness.close(context)
 
 
-def _stream_of(message: dict[str, Any]) -> Step:
-    """A stream whose committed partials grow thinking, text, and tool-call arguments."""
-
-    def build(_request: Any, _options: Any) -> AssistantStream:
-        async def events() -> Any:
-            base = cast(dict[str, Any], copy_json(message))
-            base["content"] = []
-            base["stopReason"] = "pending"
-            yield {"type": "start", "partial": base}
-            await asyncio.sleep(0.005)
-            thinking = message["content"][0]
-            text = message["content"][1]
-            call = message["content"][2]
-            blocks: list[dict[str, Any]] = [
-                {"type": "thinking", "thinking": ""},
-                {"type": "text", "text": ""},
-                {"type": "toolCall", "id": call["id"], "name": call["name"], "arguments": {}},
-            ]
-            partial = cast(dict[str, Any], copy_json(base))
-            content = cast("list[dict[str, Any]]", copy_json(blocks))
-            partial["content"] = content
-            yield {"type": "thinking_delta", "partial": copy_json(partial)}
-            await asyncio.sleep(0.005)
-            for end in range(10, len(thinking["thinking"]) + 10, 10):
-                content[0]["thinking"] = thinking["thinking"][:end]
-                yield {"type": "thinking_delta", "partial": copy_json(partial)}
-                await asyncio.sleep(0.005)
-            await asyncio.sleep(0.005)
-            for end in range(10, len(text["text"]) + 10, 10):
-                content[1]["text"] = text["text"][:end]
-                yield {"type": "text_delta", "partial": copy_json(partial)}
-                await asyncio.sleep(0.005)
-            path = call["arguments"]["path"]
-            for end in range(10, len(path) + 10, 10):
-                content[2]["arguments"] = {"path": path[:end], "note": ""}
-                yield {"type": "toolcall_delta", "partial": copy_json(partial)}
-                await asyncio.sleep(0.005)
-            note = call["arguments"]["note"]
-            for end in range(10, len(note) + 10, 10):
-                content[2]["arguments"] = {"path": path, "note": note[:end]}
-                yield {"type": "toolcall_delta", "partial": copy_json(partial)}
-                await asyncio.sleep(0.005)
-
-        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        future.set_result(message)
-        return AssistantStream(events(), future)
-
-    return Step(build)
-
-
 async def test_rebuilds_thinking_text_and_tool_call_arguments_from_the_views_operations() -> None:
     setup = chat_setup()
     message = assistant_message(
@@ -603,7 +668,9 @@ async def test_rebuilds_thinking_text_and_tool_call_arguments_from_the_views_ope
         stop_reason="toolUse",
     )
     setup.settings["progress"] = {"partial_interval_ms": 0}
-    setup.faux.set_responses([_stream_of(message), assistant_message([faux_text("done")])])
+    setup.faux.set_responses(
+        [_token_stream(message, piece=10, interval=0.005), assistant_message([faux_text("done")])]
+    )
     opened = await open_chat(MemoryStorage(), setup)
     harness, root = opened["harness"], opened["root"]
     partials = partials_of(harness)
@@ -673,6 +740,192 @@ async def test_applies_later_operations_to_an_overflow_replacement_holding_a_par
         {"type": "text", "text": "hello"}
     ]
     await watch.stop()
+    await harness.close(context)
+
+
+async def test_streams_a_tool_call_partial_as_appends_at_its_argument_paths() -> None:
+    """Upstream: "streams a tool-call partial as appends at its argument paths".
+
+    The committed partial is written as appends at each growing argument, and never carries the raw
+    argument text beside the parsed arguments.
+    """
+
+    setup = chat_setup()
+    setup.settings["progress"] = {"partial_interval_ms": 20, "output_interval_ms": 100}
+    args = {"path": "src/file.ts", "content": "const a = 1;\n" * 150}
+    setup.faux.set_responses(
+        [
+            _token_stream(
+                assistant_message(
+                    [faux_tool_call("missing", args, id="c1")], stop_reason="toolUse"
+                ),
+                piece=4,
+                interval=0.002,
+            ),
+            assistant_message([faux_text("done")]),
+        ]
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    partials = partials_of(harness)
+    history = await view_history(harness, root.id)
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await drained()
+    history["detach"]()
+    on_message = _message_ops(history["frames"])
+    argument_appends = [
+        op for op in on_message if op[0] == "a" and len(op[1]) > 2 and op[1][2] == "arguments"
+    ]
+    assert len(argument_appends) > 10
+    assert all(str(op[1][-1]) in ("path", "content") for op in argument_appends)
+    # The call is set whole only when a member appears (at most once per argument); growing strings
+    # are appends. With the raw argument text on the block, every commit resent the whole call.
+    block_sets = [op for op in on_message if op[0] != "a" and len(op[1]) == 2]
+    assert len(block_sets) <= 2
+    # The committed partials carry only the parsed arguments, never the raw argument text.
+    assert partials
+    for partial in partials:
+        for block in partial["content"]:
+            assert sorted(block) == ["arguments", "id", "name", "type"]
+    await harness.close(context)
+
+
+async def test_commits_a_growing_text_at_a_cost_that_follows_the_new_text_not_the_string_lengths() -> None:
+    """Upstream: "commits a growing text and tool call at a cost that follows the new text, not the
+    string lengths". The cost of committing a growing answer follows the text it adds.
+
+    Upstream measures this with V8's heap (``GCProfiler`` and ``used_heap_size``,
+    `harness-view-run.test.ts:476-492`): reassigning a growing string made every commit allocate and
+    carry the whole thing. This tree cannot take that measure -- ``tracemalloc`` is disabled on the
+    free-threaded builds of the verified set, and a commit allocates its own share of plain Python
+    strings however the operations read -- so it weighs what the commits carry instead: the bytes of
+    the operations each one writes. A commit that resent the whole string would grow its
+    bytes with the answer exactly as upstream's heap did, which is what makes this bound red. The
+    two answers are a tenth of upstream's 40 KB and 400 KB -- the 10x scale the case argues from is
+    what matters, and each commit costs this port more than it costs V8.
+    """
+
+    async def stream(size: int) -> dict[str, float]:
+        setup = chat_setup()
+        setup.settings["progress"] = {"partial_interval_ms": 1, "output_interval_ms": 100}
+        # Keep `pi.live` cached between commits, as the default retention does. Evicted after each
+        # use, every commit replays the document's delta chain: a cost of eviction, not of appending.
+        setup.settings["document_retention_ms"] = 60_000
+        text = 'streamed text with "quotes" and \\ escapes\n' * (size // 40)
+        setup.faux.set_responses(
+            [
+                _token_stream(
+                    assistant_message(
+                        [
+                            faux_text(text),
+                            faux_tool_call("missing", {"path": "a.ts", "content": text}, id="c1"),
+                        ],
+                        stop_reason="toolUse",
+                    ),
+                    piece=64,
+                    interval=0.0003,
+                ),
+                assistant_message([faux_text("done")]),
+            ]
+        )
+        opened = await open_chat(MemoryStorage(), setup)
+        harness, root = opened["harness"], opened["root"]
+        history = await view_history(harness, root.id)
+        harness.resume()
+        await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+        await drained()
+        history["detach"]()
+        await harness.close(context)
+        commits = 0
+        written = 0
+        appends = 0
+        for frame in history["frames"]:
+            ops = _message_ops([frame])
+            if not ops:
+                continue
+            commits += 1
+            written += sum(len(op[2]) for op in ops if isinstance(op[2], str))
+            appends += sum(1 for op in ops if op[0] == "a")
+        return {"commits": commits, "bytes": written, "appends": appends}
+
+    small = await stream(10_000)
+    large = await stream(100_000)
+    # The answer arrives as appends, most commit carrying one: a commit that rewrote the message
+    # whole carries none, and no bound below would notice what it costs.
+    assert small["appends"] > small["commits"] // 2 and large["appends"] > large["commits"] // 2
+    assert large["commits"] > small["commits"] * 5
+    # Per commit, the cost stays flat: comparing the whole strings on every commit made it grow with
+    # their length.
+    per_small = small["bytes"] / small["commits"]
+    per_large = large["bytes"] / large["commits"]
+    assert per_large / per_small < 2
+
+
+async def test_keeps_a_watchers_memory_proportional_to_a_long_streamed_text_not_to_its_commits() -> None:
+    """Upstream: "keeps a watcher's memory proportional to a long streamed text and tool call, not to
+    their commits". A watcher's operations follow a long streamed answer, not its commit count.
+
+    Upstream weighs the watcher's heap: two 140 KB strings, over 500 commits, and 20 MB of slack for
+    the 3 MB they cost (`harness-view-run.test.ts:581-618`); sliced append operations are what keeps
+    it there, where a copy of the text per commit cost well over 100 MB. The port can weigh the
+    operations a watcher holds -- the bytes each commit hands it stay proportional to the text -- but
+    not the values it holds with them: CPython has no substring views over an immutable string, so
+    applying an append builds a fresh copy of the whole text, and a watcher that keeps every frame
+    keeps one copy per frame. ``PARITY.md`` records that half as a deviation; what follows is the
+    half this tree does keep.
+    """
+
+    setup = chat_setup()
+    setup.settings["progress"] = {"partial_interval_ms": 1, "output_interval_ms": 100}
+
+    def line(index: int) -> str:
+        return f'line {index}: some streamed source text with "quotes" and \\ escapes\n'
+
+    text = "".join(line(index) for index in range(2_000))
+    content = "".join(line(index) for index in range(2_000))
+    setup.faux.set_responses(
+        [
+            _token_stream(
+                assistant_message(
+                    [
+                        faux_text(text),
+                        faux_tool_call("missing", {"path": "a.ts", "content": content}, id="c1"),
+                    ],
+                    stop_reason="toolUse",
+                ),
+                piece=32,
+                interval=0.0002,
+            ),
+            assistant_message([faux_text("done")]),
+        ]
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    history = await view_history(harness, root.id)
+    harness.resume()
+    submission = await root.submit({"type": "input", "content": "go"}, context)
+    await submission.wait(context)
+    await drained()
+    history["detach"]()
+
+    commits = 0
+    operations: list[tuple[str, list[Any], Any]] = []
+    for frame in history["frames"]:
+        ops = _message_ops([frame])
+        if ops:
+            commits += 1
+            operations.extend(ops)
+    assert commits > 500
+    appends = [op for op in operations if op[0] == "a" and isinstance(op[2], str)]
+    written = sum(len(op[2]) for op in appends)
+    # Every byte of the two strings reaches the watcher once, as appends: nothing of the answer
+    # arrives any other way, and a copy of the text per commit would exceed this by the number of
+    # commits.
+    assert written >= (len(text) + len(content)) * 0.9
+    assert written <= 4 * (len(text) + len(content))
+    # And no single commit re-sends either string whole.
+    assert max(len(op[2]) for op in appends) < (len(text) + len(content)) // 10
     await harness.close(context)
 
 

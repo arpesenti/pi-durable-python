@@ -72,7 +72,7 @@ baseline left alone. These are the rows this baseline adds or moves.
 | --- | --- |
 | `harness-observers` | `test_harness_observers.py` |
 | `harness-hook-reads` | `test_harness_hook_reads.py` (the hook half of the upstream file is deferred; see **Cases completed under this baseline**) |
-| `harness-view-run` | `test_harness_view_run.py`, `test_harness_nested_tools.py`, `test_harness_compaction.py`, `test_session_document_retention.py` |
+| `harness-view-run` | `test_harness_view_run.py` (all 13 cases; #47 corrected this row, which named three more files whose cases belong to their own upstream suites and cite this one nowhere) |
 | `harness-nested-tools` | `test_harness_nested_tools.py` (the agent-event half went with `test_harness_events.py`, deleted by #46) |
 | `session-observers` | `test_session_observers.py` |
 | `session-states` | `test_session_observers.py`, `test_session_document_retention.py`, `test_session_checkpoints_migrations.py` (upstream 1.5.0 deletes the state getters this suite tested; where each of its guarantees is proved now is itemised under **Remaining deviations**) |
@@ -179,26 +179,61 @@ the 1.4.0 record. On top of them:
 
 These are deliberate and are also recorded under **Allowed deviations** in `PARITY.md`.
 
-- **The streamed-partials half of `harness-view-run` waits for #47.** Upstream v1.5.0 adds
-  `test/harness-view-run.test.ts` — its one describe, "a run as the conversation view shows it", 13
-  cases that read run state (`pi.live`, `pi.inbox`, streamed partials, tool slots) out of the windowed
-  view's operations. #46 translated the run cases there — they are where the assertions the deleted
-  agent event adapter carried now ride — in `test_harness_view_run.py`, and the nested-call and
-  compaction cases of that file in `test_harness_nested_tools.py`, `test_harness_compaction.py`, and
-  `test_session_document_retention.py`. What remains is the streamed-partials tail of the file —
-  `:505` "streams a tool-call partial as appends at its argument paths", `:547` "commits a growing
-  text and tool call at a cost that follows the new text, not the string lengths", and `:581` "keeps a
-  watcher's memory proportional to a long streamed text and tool call, not to their commits" — which
-  belongs to #47. The two translated cases that read `runFailure` (`:372` and `:436`) now assert it as
-  upstream states it, landed with #48: `test_ends_a_call_that_never_runs_and_one_aborted_with_its_generation`
-  asserts `{inputs: [submission.id], reason: "aborted"}` on the newest state and
-  `test_converts_a_streamed_partial_into_one_aborted_answer_entry` the reason on the state that shows the
-  run gone — deleting `live["runFailure"] = failure` in `src/pi_durable/harness/live.py` turns both red.
+- **The streamed-partials tail of `harness-view-run` is told with the port's measures (#47).**
+  Upstream v1.5.0 adds `test/harness-view-run.test.ts` — its one describe, "a run as the conversation
+  view shows it", 13 cases that read run state (`pi.live`, `pi.inbox`, streamed partials, tool slots)
+  out of the windowed view's operations. All 13 are in `test_harness_view_run.py`: #46 carried the ten
+  run cases — they are where the assertions the deleted agent event adapter carried now ride — and #47
+  added the streamed-partials tail, `:505` "streams a tool-call partial as appends at its argument
+  paths", `:547` "commits a growing text and tool call at a cost that follows the new text, not the
+  string lengths", and `:581` "keeps a watcher's memory proportional to a long streamed text and tool
+  call, not to their commits". The first is portable whole; the other two weigh V8's heap, which this
+  tree has no way to weigh, so each takes the measure its docstring names:
+  - `:547` counts the bytes V8 allocated (`GCProfiler` beside `used_heap_size`). `tracemalloc` is
+    disabled on the free-threaded builds the verified set runs, and a commit allocates its own share of
+    plain Python strings however its operations read, so the case counts the bytes the commits *carry*
+    instead: per commit that stays flat while the answer grows tenfold, where a commit that reassigned
+    the whole string made it grow with the answer — the regression upstream wrote `PartialChanges` for.
+    Making `session/drafts.py` write every changed leaf as a whole-value set turns the case red, and so
+    does making the partial commit rewrite the message whole in `harness/generation.py`.
+  - `:581` weighs the watcher's heap — 20 MB of slack for the 3 MB two 140 KB strings cost, where a
+    copy of the text per commit cost well over 100 MB. This port cannot keep that bound and does not
+    claim it: applying an append here builds a fresh copy of the whole text (`delta.py`), so a watcher
+    that keeps every frame keeps one copy of the answer per frame, and
+    `PARITY.md` records it under **Allowed deviations**. The portable half is asserted: the operations
+    the watcher is handed stay proportional to the two strings (measured at 1.0x their bytes over more
+    than 500 commits), and no commit re-sends either string whole.
+  - `:505` needs no measure, only the shape. Upstream's faux streams a call's raw argument text and
+    durable parses what has arrived (`harness/partial-changes.ts:64-84`); the port's adapters hold a
+    call's arguments at `{}` until its whole text parses (the "Streaming tool-call arguments" row of
+    `PARITY.md`), so the faux here reports them member by member as far as they have parsed, and the
+    case pins durable's half: appends at each growing argument, the block set whole at most once per
+    argument, and never the raw text beside the parsed arguments. Injecting a raw member into the
+    committed partial, or writing leaves as whole-value sets, turns it red.
+  - **#47 corrected the file list this entry and the suite table above carried.** Both named three
+    further files as translations of this suite; nothing in those files cites `harness-view-run`, and
+    all 13 cases are in the one file. The `runFailure` reads this entry quoted are assertions inside
+    the two cases #46 did translate (`:372` and `:436`), not cases of their own, and what they now
+    assert is written up on the 9.3 row of `PARITY.md`: `{inputs: [submission.id], reason: "aborted"}`
+    on the newest state, the reason on the state that shows the run gone, both red when
+    `live["runFailure"] = failure` is deleted from `src/pi_durable/harness/live.py`.
   - **#55 corrected the counts as it moved this entry.** The moved text said "14 cases", a second
     "streamed partials" describe, and "two upstream cases that read `runFailure`". The vendored
     upstream file has one describe and 13 `it()` cases, the three quoted above are its
     streamed-partials tail, and the two `runFailure` reads are assertions inside the two cases #46
     did translate.
+- **`harness/partial-changes.ts` has no module of its own.** Upstream collects, from the response's
+  events, what grew in the partial since the last partial commit — the text and thinking deltas, and a
+  `StreamingJsonParser` fed with each call's raw argument text — and commits exactly that, so a partial
+  commit costs the new text. This port commits the copied partial and lets the draft layer diff it
+  (`harness/util.py`'s `assign_json` and `session/drafts.py`'s `_emit_changed`), which produces the same
+  operations — appends for grown strings, appends inside a call's arguments — while comparing the whole
+  strings, so its per-commit cost follows the answer's length rather than the new text. Nothing a host
+  can read differs: what a watch is handed, what Storage stores, and what a reopened host recovers are
+  asserted case for case by `test_harness_view_run.py`, `test_harness_live_deltas.py`, and
+  `test_harness_deferred_progress.py`. The raw argument text a provider streams never reaches durable
+  here at all, so there is no parser to port. `PARITY.md` records the whole of it as one
+  **Allowed deviations** row beside the watcher-memory cost it leaves behind.
 - **The deleted agent event adapter's own batching bound is not carried over.** `MAX_PENDING_EVENT_BATCHES`
   (100 undelivered batches before one snapshot replaced them) was the deleted adapter's private rule,
   owned by no seam the port keeps, and upstream v1.5.0 deletes it with the section, so no case is kept
