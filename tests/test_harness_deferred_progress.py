@@ -731,10 +731,12 @@ async def test_shows_a_running_tools_details_at_once_and_stores_them_with_the_ne
 
     Upstream's progress writer commits a running call's last `details()` value inside the same deferred
     commit as its output (`harness/tool.ts:634-655`), and this tree's writer does the same
-    (`harness/tool.py:945-957`). Upstream's suites prove the output half and say nothing of `details`,
-    so the row's claim rests on this case: what a running call reports through `details()` is shown to
-    memory as it is reported, and reaches Storage only with a trigger -- here, the next commit that
-    reads the document.
+    (`harness/tool.py:945-957`). Upstream's suites prove what a reported `details()` value *diffs into*
+    -- `harness-live-deltas.test.ts:236-262`, translated here as
+    `tests/test_harness_live_deltas.py::test_diffs_details_leaf_by_leaf_and_appends_diagnostics` -- but
+    none of them puts it on the deferred window, so the row's claim rests on this case: what a running
+    call reports through `details()` is shown to memory as it is reported, and reaches Storage only with
+    a trigger -- here, the next commit that reads the document.
     """
 
     storage = ControlledStorage()
@@ -754,8 +756,9 @@ async def test_shows_a_running_tools_details_at_once_and_stores_them_with_the_ne
         return slot is not None and slot.get("details") == details
 
     await eventually(reported)
-    # Memory shows the reported details. Storage has the slot -- its creation is a commit of its own,
-    # and a creation that survived a crash has to be durable -- but not what was reported into it.
+    # Memory shows the reported details. Storage has the slot -- it arrived with the round's commit,
+    # which is immediate because it creates the tool's task (`generation.py:1038`) -- but not what was
+    # reported into it.
     stored = await stored_slot(storage, opened["root"].id, "c1")
     assert stored is not None and "details" not in stored
     # A commit that reads the document is the trigger: it takes the held revision with it, beside its
@@ -809,7 +812,7 @@ async def test_defers_a_running_tools_own_commit_only_when_it_asks_for_it() -> N
         return slot is not None and slot.get("shown") is True
 
     await eventually(shown)
-    # The mark is in memory and nowhere else: what Storage has of the slot is what its creation commit
+    # The mark is in memory and nowhere else: what Storage has of the slot is what the round's commit
     # stored, and the tool's own commit carried the deferred mark.
     stored = await stored_slot(storage, opened["root"].id, "c1")
     assert stored is not None and "shown" not in stored

@@ -5,7 +5,8 @@ makes, rebuilt from operations alone. This is where the assertions that rode on 
 event adapter live now: the same facts about a run, read through the windowed view and the live
 document instead of through translated events (spec §9.3).
 
-Every one of the upstream file's 13 cases is here, beside two the port added of its own. The
+Every one of the upstream file's 13 cases is here, each naming the upstream title it translates,
+beside two of the port's own that say so at the case. The
 streamed-partials tail -- "streams a tool-call partial as appends at its argument paths", "commits a
 growing text and tool call at a cost that follows the new text, not the string lengths", and "keeps a
 watcher's memory proportional to a long streamed text and tool call, not to their commits" -- is told
@@ -17,6 +18,7 @@ what the commits carry and what the watcher is handed. Each docstring names the 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any, cast
 
 from chat_support import (
@@ -36,6 +38,7 @@ from task_support import aborted, deferred, eventually
 from tool_support import DONE, add_tool, tool
 
 from pi_durable import AgentDoc, LiveDoc, MemoryStorage, UsageDoc
+from pi_durable.context import AbortError
 from pi_durable.delta import apply_immutable
 from pi_durable.json import copy_json
 
@@ -520,9 +523,14 @@ def _token_stream(message: dict[str, Any], *, piece: int, interval: float) -> St
     arguments"), so this is the shape a provider that reports what has parsed so far gives durable;
     what the cases below pin is durable's half -- that such a call is committed as appends at its
     argument paths, and that no commit carries the raw argument text.
+
+    Like :func:`chat_support.slow_message`, the stream stops on the request's abort signal: a case
+    that interrupts a run must not be left waiting on a provider that keeps answering.
     """
 
-    def build(_request: Any, _options: Any) -> AssistantStream:
+    def build(_request: Any, _options: Mapping[str, Any]) -> AssistantStream:
+        signal = _options.get("signal")
+
         async def events() -> Any:
             base = cast(dict[str, Any], copy_json(message))
             base["content"] = []
@@ -562,6 +570,8 @@ def _token_stream(message: dict[str, Any], *, piece: int, interval: float) -> St
                                 "partial": copy_json(partial),
                             }
                             await asyncio.sleep(interval)
+                            if signal is not None and signal.aborted:
+                                raise AbortError(signal.reason)
                         blocks[index]["arguments"] = {
                             **blocks[index]["arguments"],
                             name: copy_json(arguments[name]),
@@ -578,6 +588,8 @@ def _token_stream(message: dict[str, Any], *, piece: int, interval: float) -> St
                         "partial": copy_json(partial),
                     }
                     await asyncio.sleep(interval)
+                    if signal is not None and signal.aborted:
+                        raise AbortError(signal.reason)
                 blocks[index][field] = value
 
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -744,7 +756,8 @@ async def test_applies_later_operations_to_an_overflow_replacement_holding_a_par
 
 
 async def test_streams_a_tool_call_partial_as_appends_at_its_argument_paths() -> None:
-    """Upstream: "streams a tool-call partial as appends at its argument paths".
+    """Upstream: "streams a tool-call partial as appends at its argument paths"
+    (`harness-view-run.test.ts` :505).
 
     The committed partial is written as appends at each growing argument, and never carries the raw
     argument text beside the parsed arguments.
@@ -793,7 +806,8 @@ async def test_streams_a_tool_call_partial_as_appends_at_its_argument_paths() ->
 
 async def test_commits_a_growing_text_at_a_cost_that_follows_the_new_text_not_the_string_lengths() -> None:
     """Upstream: "commits a growing text and tool call at a cost that follows the new text, not the
-    string lengths". The cost of committing a growing answer follows the text it adds.
+    string lengths" (`harness-view-run.test.ts` :547). The cost of committing a growing answer
+    follows the text it adds.
 
     Upstream measures this with V8's heap (``GCProfiler`` and ``used_heap_size``,
     `harness-view-run.test.ts:476-492`): reassigning a growing string made every commit allocate and
@@ -802,7 +816,8 @@ async def test_commits_a_growing_text_at_a_cost_that_follows_the_new_text_not_th
     strings however the operations read -- so it weighs what the commits carry instead: the bytes of
     the operations each one writes. A commit that resent the whole string would grow its
     bytes with the answer exactly as upstream's heap did, which is what makes this bound red. The
-    two answers are a tenth of upstream's 40 KB and 400 KB -- the 10x scale the case argues from is
+    two answers are a tenth of upstream's ``stream(40_000)`` and ``stream(400_000)`` characters --
+    the 10x scale the case argues from is
     what matters, and each commit costs this port more than it costs V8.
     """
 
@@ -864,7 +879,8 @@ async def test_commits_a_growing_text_at_a_cost_that_follows_the_new_text_not_th
 
 async def test_keeps_a_watchers_memory_proportional_to_a_long_streamed_text_not_to_its_commits() -> None:
     """Upstream: "keeps a watcher's memory proportional to a long streamed text and tool call, not to
-    their commits". A watcher's operations follow a long streamed answer, not its commit count.
+    their commits" (`harness-view-run.test.ts` :581). A watcher's operations follow a long streamed
+    answer, not its commit count.
 
     Upstream weighs the watcher's heap: two 140 KB strings, over 500 commits, and 20 MB of slack for
     the 3 MB they cost (`harness-view-run.test.ts:581-618`); sliced append operations are what keeps
@@ -923,6 +939,15 @@ async def test_keeps_a_watchers_memory_proportional_to_a_long_streamed_text_not_
     # arrives any other way, and a copy of the text per commit would exceed this by the number of
     # commits.
     assert written >= (len(text) + len(content)) * 0.9
+    # Measured at 0.998x the two strings together (257 780 bytes) over the 1611 commits this case
+    # produces, well inside the 4x the bound allows.
+    assert written <= (len(text) + len(content)) * 4, written
+    # And no commit re-sends either string whole. The bound is over every str any operation carries,
+    # not over appends alone, so a change of representation that handed the watcher a whole-value set
+    # of the answer on every commit would fail here rather than only on the appends above.
+    payloads = [len(op[2]) for op in operations if isinstance(op[2], str)]
+    assert payloads
+    assert max(payloads) < (len(text) + len(content)) // 10, max(payloads)
     assert written <= 4 * (len(text) + len(content))
     # And no single commit re-sends either string whole.
     assert max(len(op[2]) for op in appends) < (len(text) + len(content)) // 10
@@ -930,6 +955,14 @@ async def test_keeps_a_watchers_memory_proportional_to_a_long_streamed_text_not_
 
 
 async def test_a_commit_that_changes_only_a_submission_record_leaves_the_view_alone() -> None:
+    """No upstream counterpart: a commit the view has nothing to say about.
+
+    Upstream's file watches a commit that changes what the view shows; this one pins the other half of
+    the same code path, a commit whose only change is a submission record the conversation does not
+    mount. It publishes no view frame at all, so a renderer is not woken to repaint an unchanged
+    conversation, while the record itself is still stored and readable by ID.
+    """
+
     opened = await open_chat(MemoryStorage(), chat_setup())
     harness, root = opened["harness"], opened["root"]
     history = await view_history(harness, root.id)
@@ -958,6 +991,14 @@ async def test_a_commit_that_changes_only_a_submission_record_leaves_the_view_al
 
 
 async def test_shows_every_change_to_the_live_document_as_one_value_per_commit() -> None:
+    """No upstream counterpart: the shape of a ``pi.live`` frame, which the port's draft layer decides.
+
+    Upstream hands the view a frame per commit here too, but never says what is in one. This port's
+    draft layer (`session/drafts.py`) hands whole values where upstream's `partial-changes.ts` walks
+    leaves, so the case holds the promise the view actually makes: one value per changed member per
+    commit, and no operation that a viewer would have to reassemble.
+    """
+
     opened = await open_chat(MemoryStorage(), chat_setup())
     harness, root = opened["harness"], opened["root"]
     history = await view_history(harness, root.id)

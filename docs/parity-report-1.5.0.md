@@ -129,14 +129,17 @@ baseline left alone. These are the rows this baseline adds or moves.
   what Storage received attach a host `CommitObserver` (`harness-live-deltas.test.ts:118,342,385,428`),
   and the tools case sets `progress.persist_within_ms` as upstream's does (`:339`).
   What the same behaviour costs above the Session, translated case for case: `tests/test_harness_deferred_progress.py`
-  runs all 11 cases of `test/harness-deferred-progress.test.ts`, plus one port-side case that pins the
-  negative the mechanism rests on: the partial answer and the streaming
+  runs all 11 cases of `test/harness-deferred-progress.test.ts`, plus three port-side cases. The first
+  pins the negative the mechanism rests on: the partial answer and the streaming
   tool output visible to watches while Storage is held, converted to durable by a crash, by a clean
   close, or by their deadline, with the progress commits of a cut-off task never counted as progress
   (`#11139`) and a third party reading the held answer inside its own commit. The host's
   `CommitObserver` is asserted there to receive nothing at all for a partial only memory adopted --
   the assertion reads the published values, not the operation paths, because a held revision can reach
-  Storage folded into another commit's base write.
+  Storage folded into another commit's base write. The other two landed with #47 and hold the tool
+  side of the window, which upstream has no case for: a running call's `details()` value riding the
+  held commit to the next trigger, and a tool's own `api.commit` honouring the persistence mark it was
+  handed.
   In `tests/test_session_group_commit.py`, the eleven cases that had waited on this mechanism (`:325`,
   `:360`, `:390`, `:596`, `:615`, `:662`, `:680`, `:839`, `:857`, `:885`, `:902`) are translated into
   its table, and an entry that named no upstream case at all is gone from that module's deferral block;
@@ -194,15 +197,18 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
     plain Python strings however its operations read, so the case counts the bytes the commits *carry*
     instead: per commit that stays flat while the answer grows tenfold, where a commit that reassigned
     the whole string made it grow with the answer — the regression upstream wrote `PartialChanges` for.
-    Making `session/drafts.py` write every changed leaf as a whole-value set turns the case red, and so
-    does making the partial commit rewrite the message whole in `harness/generation.py`.
+    Making `session/drafts.py` never append a growing string -- writing every changed leaf as a
+    whole-value set -- turns both bounds red, and so does making `harness/generation.py`'s partial
+    writer commit only its first revision (five cases of this file fail that way, three of them here).
   - `:581` weighs the watcher's heap — 20 MB of slack for the 3 MB two 140 KB strings cost, where a
     copy of the text per commit cost well over 100 MB. This port cannot keep that bound and does not
     claim it: applying an append here builds a fresh copy of the whole text (`delta.py`), so a watcher
     that keeps every frame keeps one copy of the answer per frame, and
     `PARITY.md` records it under **Allowed deviations**. The portable half is asserted: the operations
-    the watcher is handed stay proportional to the two strings (measured at 1.0x their bytes over more
-    than 500 commits), and no commit re-sends either string whole.
+    the watcher is handed stay proportional to the two strings -- the case asserts between 0.9x and 4x
+    their bytes, and measures 0.998x of them over the 1611 commits it produces -- and no commit
+    re-sends either string whole, a bound taken over every str any operation carries rather than over
+    the appends alone, so a representation that re-sent the answer as a whole-value set fails here too.
   - `:505` needs no measure, only the shape. Upstream's faux streams a call's raw argument text and
     durable parses what has arrived (`harness/partial-changes.ts:64-84`); the port's adapters hold a
     call's arguments at `{}` until its whole text parses (the "Streaming tool-call arguments" row of
