@@ -626,12 +626,17 @@ def only_failure(
     detail: str | None = None,
     with_first: bool = True,
 ) -> None:
-    """Assert ``pi.live`` holds nothing but ``runFailure``, with the fields upstream asserts.
+    """Assert ``pi.live`` holds nothing but ``runFailure``, with the fields the run's end owes.
 
-    Every upstream case that ends a run without an answer asserts the whole live document with
-    ``toEqual({runFailure: ...})``, so the run's own presentation is gone and only the reason stays.
-    ``first`` is ``expect.any(Number)`` upstream; ``detail`` upstream matches with
-    ``stringContaining`` in some cases and exactly in others, so it matches as a fragment.
+    Upstream asserts the whole document that way where a run ended with nothing running --
+    ``harness-run-failure.test.ts:49`` and ``:91`` compare ``pi.live`` with
+    ``toEqual({runFailure: ...})`` -- and reaches for the weaker ``toMatchObject`` on the record alone
+    where the document still carries more (``:73``, ``:133``, ``:135``, ``:156``, ``:159``). Every
+    translated case that calls this helper ends a run with the document emptied, so it asserts the
+    stronger shape in all of them: something upstream tolerates here, a leftover ``run`` or a field
+    off the reason set, is a port bug this would notice. ``first`` is ``expect.any(Number)`` upstream;
+    ``detail`` upstream matches with ``stringContaining`` in some cases and exactly in others, so it
+    matches as a fragment.
     """
 
     state = dict(value or {})

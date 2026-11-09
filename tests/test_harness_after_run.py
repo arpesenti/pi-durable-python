@@ -42,6 +42,7 @@ from session_support import context
 from task_support import aborted, completed, deferred, eventually, settled
 from tool_support import add_hooks, add_tool, tool
 
+import pi_durable
 from pi_durable import (
     CompactionTask,
     ConversationBusy,
@@ -57,6 +58,7 @@ from pi_durable import (
     hook,
     run_end_task,
 )
+from pi_durable.harness import types as types_module
 from pi_durable.storage.sqlite.posix import open_posix_sqlite_storage
 
 TestsEntry: Any = define_entry("test.tests")
@@ -1551,7 +1553,9 @@ async def test_the_hook_is_handed_the_surface_run_summary_and_asks_with_the_surf
     ``src/harness/types.ts:1011-1026``: the object ``afterRun`` is handed has exactly ``reason``,
     ``first``, ``answer`` and ``last``, and a task it asks for is exactly ``{ task, input }``. The
     translated cases of this suite assert what those fields *mean*; this one pins that the objects
-    carry nothing else and nothing less, and that :func:`run_end_task` is what builds the second.
+    carry nothing else and nothing less, that :func:`run_end_task` is what builds the second, and that
+    a host reaches both where upstream's ``src/index.ts:117-118`` puts them — the package surface, not
+    only the module that declares them.
     """
 
     setup = chat_setup()
@@ -1563,6 +1567,9 @@ async def test_the_hook_is_handed_the_surface_run_summary_and_asks_with_the_surf
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
     await root.wait_for_idle(context)
     assert len(state["asked"]) == 1
+    assert RunSummary is types_module.RunSummary
+    assert RunEndTask is types_module.RunEndTask
+    assert {"RunSummary", "RunEndTask"} <= set(pi_durable.__all__)
     assert set(state["asked"][0]) == {"reason", "first", "answer", "last"}
     assert state["runs"] == ["run 1"]
     asked_for = run_end_task(tests, {"label": "run 1"})

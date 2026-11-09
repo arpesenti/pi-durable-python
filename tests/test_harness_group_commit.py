@@ -10,9 +10,11 @@ Cases this module does NOT run
 ------------------------------
 
 * `:646` -- "reads no task record from Storage for more live and awaited tasks than the record cache's
-  count": excluded outright, because this port has no read-side record cache and no ``CachedStorage``,
-  so the component the case measures does not exist. Recorded the same way in ``PARITY.md``, next to
-  its sibling ``session-group-commit.test.ts:635``.
+  count": excluded outright, because this port has no read-side record cache and no ``CachedStorage``
+  (``src/pi_durable/session/session.py:584-585`` says the port carries no read-side record cache), so
+  the component the case measures does not exist. The record both this module and
+  ``test_session_group_commit.py``'s ``:635`` point at is
+  `docs/parity-report-1.5.0.md`, under **Exclusions this baseline takes**.
 
 Cases that run but are NOT evidence of the mechanism they name
 --------------------------------------------------------------

@@ -234,6 +234,8 @@ def test_the_surface_run_failure_has_upstream_requiredness_and_the_whole_reason_
 
 
 if TYPE_CHECKING:
-    # The three required fields are required: a failure with no task is not a ``RunFailure``.
+    # The three required fields are required: each on its own, a failure without one is not a
+    # ``RunFailure``.
     _no_task: RunFailure = {"inputs": [], "reason": "aborted"}  # type: ignore[typeddict-item]
+    _no_inputs: RunFailure = {"taskId": id_from_number(1), "reason": "aborted"}  # type: ignore[typeddict-item]
     _no_reason: RunFailure = {"taskId": id_from_number(1), "inputs": []}  # type: ignore[typeddict-item]

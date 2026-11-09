@@ -398,7 +398,7 @@ async def test_converts_a_streamed_partial_into_one_aborted_answer_entry() -> No
     assert len(answers) == 1
     assert answers[0]["model"][0]["role"] == "assistant"
     assert answers[0]["model"][0]["stopReason"] == "aborted"
-    # Upstream's own tail assertion for this case (harness-view-run.test.ts:438): the run that ended
+    # Upstream's own tail assertion for this case (harness-view-run.test.ts:436): the run that ended
     # leaves its reason where a renderer reads it, in the value that shows the run gone.
     ended = next(
         index

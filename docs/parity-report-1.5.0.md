@@ -168,6 +168,13 @@ the 1.4.0 record. On top of them:
   `test_types.py::test_the_public_types_exclude_the_native_watch_call_by_name` pins it beside the
   three watch re-exports of that same upstream line the port does carry.
 
+- **The record-cache case of `harness-group-commit`.** `test/harness-group-commit.test.ts:646` — "reads
+  no task record from Storage for more live and awaited tasks than the record cache's count" — is
+  excluded outright: this port has no read-side record cache and no `CachedStorage`, so the component the
+  case measures does not exist. Its session sibling, `test/session-group-commit.test.ts:635`, is excluded
+  on the same ground and is the one exclusion `tests/test_session_group_commit.py` records there; each of
+  the two modules names its own case in its header, and this is the record both point at.
+
 ## Remaining deviations under this baseline
 
 These are deliberate and are also recorded under **Allowed deviations** in `PARITY.md`.

@@ -1196,3 +1196,46 @@ async def test_answers_the_calls_an_aborted_round_never_started_with_their_own_a
     assert any("Tool a was aborted" in text for text in texts), texts
     assert any("Tool b was aborted" in text for text in texts), texts
     await harness.close(context)
+
+
+async def test_answers_an_unoffered_call_the_aborted_round_left_pending_with_unavailable() -> None:
+    """1.5.0's built-in entries, the other arm of the half 1.5.0 rewrote: a call the request never
+    offered -- a tool the registry dropped after the model asked for it -- that was still in the
+    round's ``pending`` when the run was aborted gets the ``tool_unavailable`` result from the run's
+    abort handler, because a call its request did not offer could not have run either way.
+
+    Upstream ``src/harness/generation.ts``'s abort handler branches on the slot's ``unoffered`` flag
+    for exactly this case; the port's other ``tool_unavailable`` results come from the call's own tool
+    task (``test_harness_tools.py:130``, ``:155``, ``:176``, ``:232``), never from here.
+    """
+
+    setup = chat_setup()
+    # Sequential, so the round starts `a` and leaves the unoffered call pending.
+    setup.settings["tool_execution"] = "sequential"
+    started = asyncio.Event()
+
+    async def hold(_args: Any, _api: Any, call_context: Any) -> Any:
+        started.set()
+        await aborted(call_context.abort_signal)
+        return {"output": []}
+
+    add_tool(setup.registry, tool("a", hold))
+    # `ghost` is in no registry at all: the request does not offer it, and its task would only answer
+    # it with `tool_unavailable` had the round ever reached it.
+    setup.faux.set_responses([calls(["a", {}, "c1"], ["ghost", {}, "c2"]), DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await root.submit({"type": "input", "content": "go"}, context)
+    await started.wait()
+    generation = await _generation_task(harness, root.id)
+    assert await harness.abort_task(generation, context) == "marked"
+    settled = await harness.wait_for_task(generation, context)
+    assert settled["state"]["outcome"]["status"] == "aborted"
+    texts = [result_text(item) for item in results(await all_entries(root))]
+    # The running call is answered as aborted; the unoffered one is answered as unavailable, which is
+    # a different result from anything the tool-task path writes.
+    assert any("Tool a was aborted" in text for text in texts), texts
+    assert any("Tool ghost is not available" in text for text in texts), texts
+    assert not any("Tool ghost was aborted" in text for text in texts), texts
+    await harness.close(context)
