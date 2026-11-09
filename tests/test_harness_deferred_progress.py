@@ -32,12 +32,13 @@ from chat_support import (
     open_chat,
     slow_message,
     text_of,
+    usage,
 )
 from session_support import ControlledStorage, context, eventually, observe_commits, observe_commits_as_host
 from task_support import aborted, deferred
 from tool_support import DONE, add_task, add_tool, calls, tool
 
-from pi_durable import AssistantEntry, LiveDoc
+from pi_durable import AssistantEntry, DocDefinition, LiveDoc, UsageDoc
 from pi_durable.delta import apply_immutable
 from pi_durable.harness.live import PROGRESS_COMMIT
 from pi_durable.tasks import define_task
@@ -113,12 +114,14 @@ async def crash(harness: Any) -> None:
     await harness.closed
 
 
-async def stored_live(storage: ControlledStorage, conversation_id: ConversationId) -> JsonObject | None:
-    """``pi.live`` as Storage has it, read past the Session, also after a crash closed it."""
+async def stored_doc(
+    storage: ControlledStorage, conversation_id: ConversationId, definition: DocDefinition
+) -> JsonObject | None:
+    """One document's stored value, read past the Session, also after a crash closed it."""
 
     storage.reopen()
     address = {
-        "kind": LiveDoc.definition["kind"],
+        "kind": definition["kind"],
         "scope": {"kind": "conversation", "conversationId": conversation_id},
     }
     record = await storage.find_document(cast(Any, address), "current", context)
@@ -126,6 +129,18 @@ async def stored_live(storage: ControlledStorage, conversation_id: ConversationI
         return None
     found = await storage.document(record["id"], "current", context)
     return None if found is None else found["value"]
+
+
+async def stored_live(storage: ControlledStorage, conversation_id: ConversationId) -> JsonObject | None:
+    """``pi.live`` as Storage has it."""
+
+    return await stored_doc(storage, conversation_id, LiveDoc.definition)
+
+
+async def stored_usage(storage: ControlledStorage, conversation_id: ConversationId) -> JsonObject | None:
+    """``pi.usage`` as Storage has it, which is the only way to read it after a crash."""
+
+    return await stored_doc(storage, conversation_id, UsageDoc.definition)
 
 
 def generation_of(live: JsonObject | None) -> dict[str, Any]:
@@ -227,7 +242,13 @@ async def test_converts_what_was_stored_into_the_aborted_entry_after_a_crash() -
 
 
 async def test_leaves_no_aborted_entry_for_a_stream_that_crashed_before_its_first_store() -> None:
-    """Upstream: "leaves no aborted entry for a stream that crashed before its first store"."""
+    """Upstream: "leaves no aborted entry for a stream that crashed before its first store".
+
+    The port adds the second half of the clause upstream's case leaves out: such an attempt also
+    records no usage. Usage is added in the commit that appends the provider's result
+    (`harness/generation.py:1679-1688`), and for a stream that died before its first store there is no
+    such commit. The reopened answer carries usage so the read below cannot pass by being vacuous.
+    """
 
     storage = ControlledStorage()
     setup = slow_setup(float("inf"))
@@ -243,12 +264,19 @@ async def test_leaves_no_aborted_entry_for_a_stream_that_crashed_before_its_firs
     # The attempt is presentation, deferred like the partials: none of it was stored.
     assert generation_of(await stored_live(storage, opened["root"].id)) == {}
     assert stored_text(await stored_live(storage, opened["root"].id)) is None
+    # And it spent nothing: usage rides the commit that appends the result, which never happened. The
+    # ledger is there -- the conversation opens it -- but holds no bucket for the attempt that died.
+    assert await stored_usage(storage, opened["root"].id) in (None, {"models": {}, "tools": {}})
 
-    setup.faux.set_responses([assistant_message("answer")])
+    setup.faux.set_responses([assistant_message("answer", usage=usage(input=3, output=2))])
     opened = await open(storage, setup)
     settled = await (await opened["harness"].submission(submission, context)).wait(context)
     assert settled["status"] == "done"
     assert answers(await all_entries(opened["root"])) == [{"text": "answer", "stopReason": "stop"}]
+    # The attempt that did store has its usage, which is what makes the read above a proof.
+    assert (await opened["harness"].snapshot(UsageDoc, opened["root"].id, context))["models"][
+        "faux/faux-1"
+    ] == usage(input=3, output=2)
     await opened["harness"].close(context)
 
 
