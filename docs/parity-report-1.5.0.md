@@ -172,7 +172,7 @@ the 1.4.0 record. On top of them:
 
 These are deliberate and are also recorded under **Allowed deviations** in `PARITY.md`.
 
-- **The streamed-partials half of `harness-view-run` waits for #47 and #48.** Upstream v1.5.0 adds
+- **The streamed-partials half of `harness-view-run` waits for #47.** Upstream v1.5.0 adds
   `test/harness-view-run.test.ts` — its one describe, "a run as the conversation view shows it", 13
   cases that read run state (`pi.live`, `pi.inbox`, streamed partials, tool slots) out of the windowed
   view's operations. #46 translated the run cases there — they are where the assertions the deleted
@@ -182,9 +182,11 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `:505` "streams a tool-call partial as appends at its argument paths", `:547` "commits a growing
   text and tool call at a cost that follows the new text, not the string lengths", and `:581` "keeps a
   watcher's memory proportional to a long streamed text and tool call, not to their commits" — which
-  belongs to #47 and #48. Two of the translated cases also read `runFailure` in their assertions
-  (`:372` and `:436`); the port asserts everything beside them, because it carries no run-failure
-  state until #48 lands it.
+  belongs to #47. The two translated cases that read `runFailure` (`:372` and `:436`) now assert it as
+  upstream states it, landed with #48: `test_ends_a_call_that_never_runs_and_one_aborted_with_its_generation`
+  asserts `{inputs: [submission.id], reason: "aborted"}` on the newest state and
+  `test_converts_a_streamed_partial_into_one_aborted_answer_entry` the reason on the state that shows the
+  run gone — deleting `live["runFailure"] = failure` in `src/pi_durable/harness/live.py` turns both red.
   - **#55 corrected the counts as it moved this entry.** The moved text said "14 cases", a second
     "streamed partials" describe, and "two upstream cases that read `runFailure`". The vendored
     upstream file has one describe and 13 `it()` cases, the three quoted above are its

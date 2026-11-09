@@ -387,6 +387,7 @@ async def test_converts_a_streamed_partial_into_one_aborted_answer_entry() -> No
     await submission.wait(context)
     await drained()
     history["detach"]()
+    states = history["live"]()
     # The partial the view showed is converted, once, into the answer entry the abort commits.
     answers = [
         entry
@@ -397,6 +398,16 @@ async def test_converts_a_streamed_partial_into_one_aborted_answer_entry() -> No
     assert len(answers) == 1
     assert answers[0]["model"][0]["role"] == "assistant"
     assert answers[0]["model"][0]["stopReason"] == "aborted"
+    # Upstream's own tail assertion for this case (harness-view-run.test.ts:438): the run that ended
+    # leaves its reason where a renderer reads it, in the value that shows the run gone.
+    ended = next(
+        index
+        for index, state in enumerate(states)
+        if index > 0 and state.get("run") is None
+    )
+    failure = states[ended].get("runFailure")
+    assert failure is not None
+    assert failure["reason"] == "aborted"
     await harness.close(context)
 
 
@@ -452,6 +463,12 @@ async def test_ends_a_call_that_never_runs_and_one_aborted_with_its_generation()
     assert done_wait is not None
     assert done_wait["entry"] == history["views"][done]["entries"][-1]["id"]
     assert history["views"][done]["entries"][-1]["model"][0]["role"] == "toolResult"
+    # Upstream's own tail assertion for this case (harness-view-run.test.ts:372): the newest state
+    # keeps the failure of the run that never answered, naming the inputs it was answering.
+    failure = states[-1].get("runFailure")
+    assert failure is not None
+    assert failure["reason"] == "aborted"
+    assert failure["inputs"] == [submission.id]
     await harness.close(context)
 
 

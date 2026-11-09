@@ -86,6 +86,8 @@ from .harness.live import (
     LiveState,
     NestedToolSlot,
     NestedToolSummary,
+    RunFailure,
+    RunFailureReason,
     ToolSlot,
 )
 from .harness.provider import ProviderDoc, ProviderState
@@ -305,6 +307,8 @@ __all__ = [
     "RewindableConversationDocFamilyToken",
     "RewindableConversationDocToken",
     "RunEndTask",
+    "RunFailure",
+    "RunFailureReason",
     "RunSummary",
     "section",
     "Session",

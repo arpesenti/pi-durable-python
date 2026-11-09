@@ -24,7 +24,7 @@ import asyncio
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from chat_support import (
@@ -49,6 +49,8 @@ from pi_durable import (
     InboxDoc,
     LiveDoc,
     MemoryStorage,
+    RunEndTask,
+    RunSummary,
     define_entry,
     define_extension,
     define_task,
@@ -1540,3 +1542,36 @@ async def test_stores_the_answers_held_progress_with_commit_a_and_asks_again_aft
     assert len(state["asked"]) == 3
     assert state["runs"] == ["run"]
     await opened["harness"].close(context)
+
+
+async def test_the_hook_is_handed_the_surface_run_summary_and_asks_with_the_surface_task() -> None:
+    """Port-authored, not translated: ``RunSummary`` and ``RunEndTask`` as the surface has them.
+
+    Upstream declares both where a host can reach them (``src/index.ts:117-118``) and shapes them at
+    ``src/harness/types.ts:1011-1026``: the object ``afterRun`` is handed has exactly ``reason``,
+    ``first``, ``answer`` and ``last``, and a task it asks for is exactly ``{ task, input }``. The
+    translated cases of this suite assert what those fields *mean*; this one pins that the objects
+    carry nothing else and nothing less, and that :func:`run_end_task` is what builds the second.
+    """
+
+    setup = chat_setup()
+    state = probe()
+    tests = install(setup, state)
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    await root.wait_for_idle(context)
+    assert len(state["asked"]) == 1
+    assert set(state["asked"][0]) == {"reason", "first", "answer", "last"}
+    assert state["runs"] == ["run 1"]
+    asked_for = run_end_task(tests, {"label": "run 1"})
+    assert asked_for == {"task": tests, "input": {"label": "run 1"}}
+    assert set(asked_for) == {"task", "input"}
+    await harness.close(context)
+
+
+if TYPE_CHECKING:
+    # Both are total TypedDicts, as upstream declares every member required.
+    _short_summary: RunSummary = {"reason": "answer", "first": 1, "answer": 2}  # type: ignore[typeddict-item]
+    _short_end_task: RunEndTask = {"task": None}  # type: ignore[typeddict-item]

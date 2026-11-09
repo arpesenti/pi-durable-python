@@ -47,19 +47,23 @@ tool results, so no request was sent. ``turn_limit``: a tool round reached the c
 """
 
 
-class RunFailure(TypedDict, total=False):
-    """The newest run that ended without an answer."""
+class RunFailure(TypedDict):
+    """The newest run that ended without an answer.
+
+    ``taskId``, ``inputs`` and ``reason`` are required, as upstream declares them
+    (``src/harness/live.ts:121-140``); ``detail`` and ``first`` carry meaning only for some reasons.
+    """
 
     taskId: TaskId
     """The task that ended the run: the run's task at its end."""
     inputs: list[SubmissionId]
     """The run's inputs, settled ``unanswered``."""
     reason: RunFailureReason
-    detail: str
+    detail: NotRequired[str]
     """``model_error``: the error text; ``no_model``: which model is missing; ``faulted``: the error
     message; ``orphaned``: why the task could not run; ``interrupted`` and ``restart_limit``: what was
     cut off, and how often; ``turn_limit``: the tool rounds the run took."""
-    first: EntryId
+    first: NotRequired[EntryId]
     """The failed run's ``run.first``, so a continue's ``afterRun`` hooks see its history too."""
 
 

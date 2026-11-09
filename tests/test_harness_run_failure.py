@@ -9,7 +9,7 @@ commit that starts a run -- a run started in the same commit, the queue's next r
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from chat_support import (
     assistant_message,
@@ -26,7 +26,10 @@ from session_support import context
 from task_support import deferred
 from tool_support import add_tool, tool
 
-from pi_durable import LiveDoc, MemoryStorage
+import pi_durable
+from pi_durable import LiveDoc, MemoryStorage, RunFailure, RunFailureReason
+from pi_durable.harness import live as live_module
+from pi_durable.ids import id_from_number
 
 
 async def live(harness: Any, conversation: Any) -> dict[str, Any]:
@@ -184,3 +187,53 @@ async def test_keeps_the_failure_while_a_run_continues_the_queue_in_the_same_com
             failure = (await live(harness, root))["runFailure"]
             assert failure["inputs"] == [first.id]
         await harness.close(context)
+
+
+def test_the_surface_run_failure_has_upstream_requiredness_and_the_whole_reason_set() -> None:
+    """Port-authored, not translated: ``RunFailure`` and ``RunFailureReason`` as the surface has them.
+
+    Upstream declares both in ``src/index.ts:51-52``, so a host reads why the newest run ended without
+    an answer through the package rather than through the module that defines it. The vendored
+    specification (``docs/upstream/spec-1.5.0.md:4644-4668``) requires ``taskId``, ``inputs`` and
+    ``reason`` and makes only ``detail`` and ``first`` optional, and lists the ten reasons a renderer
+    matches on. Both halves are asserted here: the reason set is compared as a whole so a reason cannot
+    be dropped, renamed or quietly added, and the required/optional split is enforced where Python can
+    actually see it — by mypy over the two ``TYPE_CHECKING`` negatives below, not by
+    ``__required_keys__``, which reads ``NotRequired`` as an ordinary string annotation under this
+    module's ``from __future__ import annotations`` and would report all five keys as required.
+    """
+
+    assert RunFailure is live_module.RunFailure
+    assert RunFailureReason is live_module.RunFailureReason
+    assert {"RunFailure", "RunFailureReason"} <= set(pi_durable.__all__)
+    assert set(RunFailure.__annotations__) == {"taskId", "inputs", "reason", "detail", "first"}
+    reasons = get_args(RunFailureReason)
+    assert set(reasons) == {
+        "model_error",
+        "no_model",
+        "aborted",
+        "reset",
+        "faulted",
+        "orphaned",
+        "interrupted",
+        "restart_limit",
+        "nothing_to_answer",
+        "turn_limit",
+    }
+    assert len(reasons) == 10, "the reason set is upstream's, not a superset of it"
+
+    # The whole documented shape compiles, including the two optional fields.
+    recorded: RunFailure = {
+        "taskId": id_from_number(7),
+        "inputs": [id_from_number(3)],
+        "reason": "turn_limit",
+        "detail": "3 turns",
+        "first": id_from_number(11),
+    }
+    assert recorded["reason"] == "turn_limit"
+
+
+if TYPE_CHECKING:
+    # The three required fields are required: a failure with no task is not a ``RunFailure``.
+    _no_task: RunFailure = {"inputs": [], "reason": "aborted"}  # type: ignore[typeddict-item]
+    _no_reason: RunFailure = {"taskId": id_from_number(1), "inputs": []}  # type: ignore[typeddict-item]
