@@ -74,6 +74,8 @@ baseline left alone. These are the rows this baseline adds or moves.
 | `harness-hook-reads` | `test_harness_hook_reads.py` (the hook half of the upstream file is deferred; see **Cases completed under this baseline**) |
 | `harness-view-run` | `test_harness_view_run.py` (all 13 cases; #47 corrected this row, which named three more files whose cases belong to their own upstream suites and cite this one nowhere) |
 | `harness-nested-tools` | `test_harness_nested_tools.py` (the agent-event half went with `test_harness_events.py`, deleted by #46) |
+| `harness-idle-scopes` | `test_harness_idle_scopes.py` (all 14 `it()` cases — 24 tests with the two `it.each` tables — plus the incremental idle state they measure; #49) |
+| `harness-context-range` | `test_harness_context_ranges.py` (the one case — a kept range whose scan ran off the line is not advanced — beside the `harness-context` kept-read cases it belongs with; #49) |
 | `session-observers` | `test_session_observers.py` |
 | `session-states` | `test_session_observers.py`, `test_session_document_retention.py`, `test_session_checkpoints_migrations.py` (upstream 1.5.0 deletes the state getters this suite tested; where each of its guarantees is proved now is itemised under **Remaining deviations**) |
 
@@ -144,6 +146,28 @@ baseline left alone. These are the rows this baseline adds or moves.
   `:360`, `:390`, `:596`, `:615`, `:662`, `:680`, `:839`, `:857`, `:885`, `:902`) are translated into
   its table, and an entry that named no upstream case at all is gone from that module's deferral block;
   the record-cache case (`:635`) stays the one exclusion it records there.
+
+## Cases deliberately left untranslated
+
+One place per suite, so an audit reads the reason with the suite it belongs to. A suite named here is
+not excused: it has an owner issue, and it leaves `PARITY.md` with a `planned` row that says so.
+
+- **`harness-tool-hooks` (18 cases) — #60.** Upstream `test/harness-tool-hooks.test.ts` is the suite
+  for `afterTool` running on every result a tool task writes, including the results the Harness
+  decides without executing the tool. It is deliberately not translated at this pass: #49 owns row
+  **8.4 Tool**, whose clause is the chain itself, and the chain is implemented — `harness/tool.py`
+  runs `afterTool` over an executed call's result (`final_result`, `:1034-1041`), over a result the
+  Harness wrote itself (`after_harness_result`, `:416-422`) and over an interruption result — with parts of it proven by existing cases
+  (replacements chained and the round observed through `afterTools` in `test_harness_tools.py`; a
+  nested call's hook in `test_harness_nested_tools.py`; `structuredOutput` kept through a replacement
+  in `test_harness_structured_output.py`; a hook `terminate` on a blocked call counting toward the
+  round in `test_harness_turn_limit.py`; `details()` still waiting when the call is aborted inside
+  `afterTool` in `test_harness_tools.py:994`). What the suite adds — `afterTool` on an `aborted`
+  result at all, on an abandoned nested call's result, on a `restart_limit` result, and the bounds a
+  replacement output takes — is not proven by any current case, which is exactly why row 8.4 stays
+  `planned` and row **12 API footguns** keeps its abort-handler bullet. #49 records the reason rather
+  than closing the row on an inference, the failure mode that put #49 back on the queue the first
+  time it closed.
 
 ## Exclusions this baseline takes
 

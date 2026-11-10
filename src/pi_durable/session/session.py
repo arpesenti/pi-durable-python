@@ -62,6 +62,7 @@ from ..types import (
     TaskQuery,
     TaskRecord,
 )
+from .conversation_tails import ConversationTails
 from .keys import ALL_KEYS, GatedStorage, document_key, incarnation_key
 from .observation import (
     ENDED,
@@ -304,6 +305,10 @@ class _WriterHost:
     def publishing(self, publish: Callable[[], None], context: Context) -> Awaitable[None] | None:
         return self._session._publishing(publish, context)  # noqa: SLF001
 
+    def stored(self, writes: Sequence[StorageWrite]) -> None:
+        # The read caches of what just became durable, applied right before it is published.
+        self._session._apply_stored_tails(writes)  # noqa: SLF001
+
     def failure(self) -> BaseException | None:
         return self._session._failure  # noqa: SLF001
 
@@ -370,6 +375,10 @@ class SessionImpl:
         persist_within_ms: int | float | Callable[[], int | float | None] | None = None,
     ) -> None:
         self._read_only = read_only
+        #: The newest entry and newest head marker of each recently used conversation, kept current from
+        #: this Session's commits. A read-only Session shows a Storage another process writes, so nothing
+        #: it reads stays current and none is kept.
+        self._tails: ConversationTails | None = None if read_only else ConversationTails()
         self._documents: dict[str, LoadedDocument] = {}
         # Cached documents with no observer attached, by address, oldest use first.
         self._idle_documents: dict[str, int | float] = {}
@@ -468,6 +477,80 @@ class SessionImpl:
         """The Session's guarded Storage, as the Harness components use it."""
 
         return cast(Storage, self._storage)
+
+    def known_latest_entry_id(self, conversation_id: ConversationId) -> EntryId | None:
+        """Internal: the newest entry ID of ``conversation_id`` as known from this Session's commits,
+        without reading; ``None`` when it is not known (and always for a read-only Session).
+
+        ``None`` and "the conversation has no entries" are not told apart here, and a caller need not:
+        both mean the range it holds cannot be shown to be current, so it is not advanced (upstream
+        ``session.ts:391-393``, whose ``undefined`` reaches the same check).
+        """
+
+        return None if self._tails is None else self._tails.peek(conversation_id)
+
+    async def latest_entry_id(
+        self, conversation_id: ConversationId, context: Context
+    ) -> EntryId | None:
+        """Internal, on the Session line: the newest entry ID visible from ``conversation_id``.
+
+        Known from the Session's own commits when it owns its Storage, so it costs no Storage read after
+        the first. Read after touching the conversation's appends, so no commit that appends to it is
+        unpublished and what Storage answers stays current.
+        """
+
+        async def read() -> EntryId | None:
+            page = await self._gated.scan_entries(
+                {"conversationId": conversation_id}, 1, None, context
+            )
+            return page["items"][0]["id"] if page["items"] else None
+
+        tails = self._tails
+        if tails is None:
+            return cast(EntryId | None, await self._gated._after_entries(conversation_id, read))
+        return cast(
+            EntryId | None,
+            await self._gated._after_entries(
+                conversation_id, lambda: tails.latest(conversation_id, read)
+            ),
+        )
+
+    async def latest_head_marker(
+        self,
+        conversation_id: ConversationId,
+        at_or_before: EntryId | None,
+        context: Context,
+    ) -> EntryWithHead | None:
+        """Internal, on the Session line: the newest visible head marker of ``conversation_id`` at or
+        before ``at_or_before``, any when ``None``; known from the Session's own commits as
+        :meth:`latest_entry_id` is.
+        """
+
+        async def read() -> EntryWithHead | None:
+            return cast(
+                EntryWithHead | None,
+                await self._gated.find_latest_head_marker(conversation_id, at_or_before, context),
+            )
+
+        tails = self._tails
+        if tails is None:
+            return await read()
+        return cast(
+            EntryWithHead | None,
+            await self._gated._after_entries(
+                conversation_id, lambda: tails.marker(conversation_id, at_or_before, read)
+            ),
+        )
+
+    def _apply_stored_tails(self, writes: Sequence[StorageWrite]) -> None:
+        """Keep the newest entry and head marker of every conversation a stored batch wrote.
+
+        Applied right before the batch is published, so a value kept here stays valid until the next
+        entry of that conversation, and a read of that conversation's newest entry costs no scan.
+        """
+
+        if self._tails is not None:
+            self._tails.apply(writes)
 
     def owns_transaction(self, tx: Any) -> bool:
         """Internal: whether ``tx`` is the transaction of one of this Session's commits.

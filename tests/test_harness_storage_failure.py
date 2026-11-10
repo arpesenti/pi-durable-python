@@ -530,6 +530,11 @@ async def test_does_not_fail_it_for_a_read_its_caller_cancelled() -> None:
             return await super().scan_entries(query, limit, cursor, read_context)
 
     opened = await started(CancelledRead())
+    # An entry to scan: the Session's cache answers the bounds of the context, not its entries
+    # (upstream ``harness-storage-failure.test.ts:420``).
+    await opened["root"].commit(
+        lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
+    )
     cancelling = with_abort_signal(controller.signal, context)
     assert await _capture(opened["root"].context(cancelling)) is cancelled
     assert await opened["root"].commit(

@@ -121,6 +121,10 @@ class WriterHost(Protocol):
 
     def publishing(self, publish: Callable[[], None], context: Context) -> Awaitable[None] | None: ...
 
+    def stored(self, writes: Sequence[StorageWrite]) -> None:
+        """Apply a stored batch to the Session's memory of what it committed, before publishing it."""
+        ...
+
     def failure(self) -> BaseException | None: ...
 
     def fail(self, error: BaseException, at: int, own: Sequence[int]) -> None: ...
@@ -369,6 +373,8 @@ class Writer:
             self._unregister(part)
             # A throw anywhere in it leaves memory behind what is stored: like an adoption's.
             try:
+                if part.spec.writes is not None:
+                    self._host.stored(part.spec.writes)
                 done.failure = part.spec.publish(seq)
             except Exception as error:
                 done.failure = PublishFailure("adoption", error)

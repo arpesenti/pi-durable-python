@@ -189,6 +189,14 @@ _Avoid_: sleep, scheduler tick
 run, and `at` for the earliest sleep not yet due. `on_wake` replaces the built-in timer for it.
 _Avoid_: heartbeat, poll
 
+**Kept context**:
+The context range the Harness keeps per conversation after a task read it, so a later read of that
+conversation scans only newer entries. Derived and never persisted: extended by the commit that
+appends to the conversation, and dropped once the conversation has been idle for
+`settings.context_retention_ms`, the oldest idle period first. A task change settles only the
+conversations above it, never every conversation.
+_Avoid_: context cache, cached view
+
 **Restart**:
 A cut-off of a running task by a crash, eviction, or reset, counted in `TaskRecord.restarts` at
 open. A close is not a restart; committing a new state clears the count. Reaching

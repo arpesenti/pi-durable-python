@@ -473,6 +473,12 @@ class Harness(SessionImpl):
 
         return self._tasks.index_sizes
 
+    @property
+    def scheduler_idle_state(self) -> dict[str, int]:
+        """Internal, for tests: the kept contexts' idle state and its disagreements with a full recompute."""
+
+        return self._tasks.idle_state
+
     async def inspect(self, context: Context) -> HarnessInspection:
         async def read(_line: Storage) -> HarnessInspection:
             scheduling, tasks = await self._tasks.inspect(

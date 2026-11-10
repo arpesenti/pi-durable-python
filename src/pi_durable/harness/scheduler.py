@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
 from ..context import (
     AbortController,
@@ -28,6 +28,7 @@ from ..session.transaction import Transaction
 from ..timers import Timers
 from ..types import (
     CommitOptions,
+    EntryRecord,
     NextTaskState,
     ObservedCommit,
     RunningTask,
@@ -37,7 +38,13 @@ from ..types import (
     TaskRecord,
 )
 from .agent import DEFAULT_RESTART_LIMIT, agent_hooks, last_extension
-from .context import read_context_from
+from .context import (
+    ContextRange,
+    advance_range,
+    demote_missed,
+    range_entry,
+    read_context_from,
+)
 from .types import (
     LISTENER,
     Agent,
@@ -70,6 +77,16 @@ LIVE_STATUSES = ("pending", "running", "waiting", "sleeping", "completing")
 
 BlockedReason = Literal["missing_task", "task_too_old", "migration_failed"]
 """Why a task cannot be reserved: no registered definition can take it."""
+
+
+class _KeptContext(TypedDict):
+    """One conversation's kept context range and the idle period that will drop it."""
+
+    range: ContextRange
+    #: The Harness time it was first seen idle, ``None`` while the conversation is busy.
+    idle_since: int | None
+    #: When that idle period ends: fixed when it started, so reading settings again cannot move it.
+    expires_at: int | None
 
 AnyTaskRecord = TaskRecord
 RunnableTaskRecord = TaskRecord
@@ -460,7 +477,24 @@ class TaskScheduler:
         self._conversation = conversation
         self._context = context
         self._live: dict[TaskId, AnyTaskRecord] = {}
-        self._contexts: dict[ConversationId, dict[str, Any]] = {}
+        # Context range last read through a task runtime, per conversation: a later read, by any of
+        # its tasks, scans only newer entries. ``idle_since`` is the Harness time it was first seen
+        # idle and ``expires_at`` when that idleness ends. Derived and never persisted; dropped at
+        # the first idle check after ``settings.context_retention_ms`` of idleness, and at close.
+        self._contexts: dict[ConversationId, _KeptContext] = {}
+        # The idle kept contexts by ``idle_since``, oldest first: the expiry order, so neither an
+        # expiry nor finding the next one scans ``_contexts``. Kept sorted also when the Harness
+        # clock goes back (see :meth:`_mark_idle`).
+        self._idle_order: dict[ConversationId, int] = {}
+        # At least the newest ``idle_since`` in ``_idle_order`` (drops do not lower it): an older one
+        # added means the clock went back.
+        self._idle_newest: float = float("-inf")
+        #: A chain load resolved what :meth:`_idle` treats as unknown for a live task whose chain is
+        #: not loaded, which can make a scope idle without a task change below it; the next idle
+        #: check then covers every scope.
+        self._unknowns_changed = False
+        #: Idle checks that covered every scope (``idle_state``, a test diagnostic).
+        self._full_idle_checks = 0
         self._expiry: dict[str, Any] | None = None
         self._invocations: dict[TaskId, _Invocation] = {}
         self._task_waiters: Waiters[TaskId, SettledTask] = Waiters()
@@ -850,10 +884,65 @@ class TaskScheduler:
 
     # ── Scheduling ─────────────────────────────────────────────────────────
 
+    def _advance_contexts(self, publication: ObservedCommit) -> None:
+        """Extend each kept context range with the entries a stored commit appended to its conversation.
+
+        Entries are published in ID order, so a later read of that conversation needs no Storage scan.
+        """
+
+        if not self._contexts:
+            return
+        appended: dict[ConversationId, list[Any]] = {}
+        for change in publication["changes"]:
+            if change["type"] != "entry":
+                continue
+            conversation_id = change["value"]["conversationId"]
+            if conversation_id not in self._contexts:
+                continue
+            appended.setdefault(conversation_id, []).append(change["value"])
+        for conversation_id, entries in appended.items():
+            kept = self._contexts[conversation_id]
+            # An idle range past its retention is dropped here too: entry-only commits do not run
+            # ``_settle_idle()``, and a host may decline the expiry timer. ``expires_at`` was fixed when
+            # it went idle, so no settings are read here.
+            if (
+                kept["idle_since"] is not None
+                and kept["expires_at"] is not None
+                and kept["expires_at"] <= self._now()
+            ):
+                self._drop_context(conversation_id)
+                continue
+            extended = advance_range(kept["range"], entries)
+            if extended is None:
+                self._drop_context(conversation_id)
+            else:
+                kept["range"] = extended
+
+    def _add_scopes_above(self, record: AnyTaskRecord, scopes: set[ConversationId]) -> bool:
+        """Add the conversations above ``record`` to ``scopes``: those whose idleness a change of it can
+        change. False when a node on the way up is not known; a conversation already in ``scopes`` has
+        everything above it there too.
+        """
+
+        for step in self._above(parent_of(record)):
+            if "unknown" in step:
+                return False
+            if "conversation" not in step:
+                continue
+            conversation = step["conversation"]
+            if conversation in scopes:
+                return True
+            scopes.add(conversation)
+        return True
+
     def _observe(self, publication: ObservedCommit, context: Context) -> None:
+        self._advance_contexts(publication)
         updated: list[AnyTaskRecord] = []
         failed: list[TaskId] = []
         changed = False
+        # The conversations whose idleness the commit's task changes can change; None when a chain is
+        # not known.
+        dirty: set[ConversationId] | None = set()
         for change in publication["changes"]:
             if change["type"] == "conversation" and change["value"]["id"] not in self._edges:
                 owner = change["value"].get("owner")
@@ -867,6 +956,11 @@ class TaskScheduler:
             if failed_outcome(record) and (previous is None or not failed_outcome(previous)):
                 failed.append(record["id"])
             self._track(previous, record)
+            # Idleness counts live tasks, so only a task that became live or ended can change it.
+            # Collected before ``_sweep()``, which may forget the chain of a task that ended.
+            liveness = previous is None or record["state"]["status"] == "terminal"
+            if liveness and dirty is not None and not self._add_scopes_above(record, dirty):
+                dirty = None
             if record["state"]["status"] == "terminal":
                 self._failed_migrations.pop(record["id"], None)
                 self._fail_fast_checks.discard(record["id"])
@@ -927,7 +1021,7 @@ class TaskScheduler:
         self._sweep()
         if not changed:
             return
-        self._settle_idle()
+        self._settle_idle(dirty)
         self._kick()
 
     def _context_retention_ms(self) -> int:
@@ -937,37 +1031,105 @@ class TaskScheduler:
             self._report(error, SETTINGS)
             return 0
 
-    def _settle_idle(self) -> None:
-        for conversation_id in self._idle_waiters.keys():
-            if self._idle(conversation_id):
-                self._idle_waiters.resolve(conversation_id, None)
-        now = self._now()
-        retention = self._context_retention_ms()
-        for conversation_id, kept in list(self._contexts.items()):
-            if kept["idle_since"] is not None and now - kept["idle_since"] >= retention:
-                del self._contexts[conversation_id]
-            elif not self._idle(conversation_id):
-                kept["idle_since"] = None
-            elif retention > 0:
-                if kept["idle_since"] is None:
-                    kept["idle_since"] = now
-            else:
-                del self._contexts[conversation_id]
-        self._schedule_expiry()
+    def _settle_idle(self, scopes: set[ConversationId] | None) -> None:
+        """After task changes below the conversations in ``scopes`` (every conversation when None).
 
-    def _schedule_expiry(self) -> None:
-        """Run ``_settle_idle()`` when the earliest idle context expires, on a background timer.
-
-        Where the host declines one, none is kept: task changes alone check expiry.
+        Resolve their idle waiters and the Harness-wide ones, drop the kept contexts whose idle period
+        passed the retention, then start or end the idle periods of the kept contexts in ``scopes``. A
+        task change can change the idleness only of the conversations above it, so no check visits every
+        conversation.
         """
 
+        all_scopes = scopes is None or self._unknowns_changed
+        self._unknowns_changed = False
+        if all_scopes:
+            self._full_idle_checks += 1
+        self._resolve_idle_waiters(None if all_scopes else scopes)
+        now = self._now()
         retention = self._context_retention_ms()
-        at: int | None = None
-        for kept in self._contexts.values():
-            if kept["idle_since"] is not None:
-                candidate = kept["idle_since"] + retention
-                if at is None or candidate < at:
-                    at = candidate
+        # Expired first: a context past its retention is dropped even when this commit makes it busy again.
+        self._expire_contexts(now, retention)
+        visited = list(self._contexts) if all_scopes else list(scopes or ())
+        for conversation_id in visited:
+            kept = self._contexts.get(conversation_id)
+            if kept is None:
+                continue
+            if not self._idle(conversation_id):
+                if kept["idle_since"] is None:
+                    continue
+                kept["idle_since"] = None
+                self._idle_order.pop(conversation_id, None)
+            elif retention <= 0:
+                self._drop_context(conversation_id)
+            elif kept["idle_since"] is None:
+                kept["idle_since"] = now
+                kept["expires_at"] = now + retention
+                self._mark_idle(conversation_id, now)
+        self._schedule_expiry()
+
+    def _resolve_idle_waiters(self, scopes: set[ConversationId] | None) -> None:
+        """Resolve the idle waiters of the conversations in ``scopes`` (all when None) and the
+        Harness-wide ones.
+        """
+
+        for conversation_id in self._idle_waiters.keys():
+            if conversation_id is not None and scopes is not None and conversation_id not in scopes:
+                continue
+            if self._idle(conversation_id):
+                self._idle_waiters.resolve(conversation_id, None)
+
+    def _expire_contexts(self, now: int, retention: int) -> None:
+        """Drop the kept contexts idle for at least ``retention``, oldest first, with the retention
+        setting of now; with no retention, every idle one, also those whose idle period a clock that went
+        back makes start after now.
+        """
+
+        for conversation_id, idle_since in list(self._idle_order.items()):
+            if retention > 0 and now - idle_since < retention:
+                return
+            self._drop_context(conversation_id)
+
+    def _mark_idle(self, conversation_id: ConversationId, idle_since: int) -> None:
+        """Start the idle period of a kept context in the expiry order.
+
+        An idle period older than the newest one kept, which a clock that went back starts, sorts the
+        order again, and the newest is taken from what is kept then.
+        """
+
+        self._idle_order.pop(conversation_id, None)
+        self._idle_order[conversation_id] = idle_since
+        if len(self._idle_order) == 1 or idle_since >= self._idle_newest:
+            self._idle_newest = idle_since
+            return
+        ordered = sorted(self._idle_order.items(), key=lambda item: item[1])
+        self._idle_order.clear()
+        for conversation, since in ordered:
+            self._idle_order[conversation] = since
+        self._idle_newest = ordered[-1][1]
+
+    def _drop_context(self, conversation_id: ConversationId) -> None:
+        """Forget a kept context, idle or not, and its place in the expiry order."""
+
+        self._contexts.pop(conversation_id, None)
+        self._idle_order.pop(conversation_id, None)
+
+    def _live_unloaded(self) -> bool:
+        """Whether a live task's chain is not loaded yet: one :meth:`_idle` counts as inside every scope
+        it may be in.
+        """
+
+        return any(id in self._live for id in self._unloaded)
+
+    def _schedule_expiry(self) -> None:
+        """Drop the expired contexts when the earliest idle context expires, on a background timer.
+
+        Where the host declines one, as the default does in Cloudflare Workers, none is kept: a pending
+        timer could keep a Durable Object from being evicted, and eviction frees the contexts. There,
+        task changes alone check expiry.
+        """
+
+        oldest = next(iter(self._idle_order.values()), None)
+        at = None if oldest is None else oldest + self._context_retention_ms()
         if self._expiry is not None and self._expiry["at"] == at:
             return
         if self._expiry is not None:
@@ -981,9 +1143,14 @@ class TaskScheduler:
             self._expiry = {"at": at, "disarm": disarm}
 
     def _expire(self) -> None:
+        """The earliest idle context's expiry, on the background timer: drop what passed the retention
+        and arm the next.
+        """
+
         self._expiry = None
         self._expiry_handle = None
-        self._settle_idle()
+        self._expire_contexts(self._now(), self._context_retention_ms())
+        self._schedule_expiry()
 
     def _schedule_reconcile(self) -> None:
         # A read-only reconcile could only fail: what it writes is refused, and its own commits
@@ -1022,7 +1189,15 @@ class TaskScheduler:
         if work:
             self._reconciling_work -= 1
         self._schedule_wake()
-        self._settle_idle()
+        # Its commit's task changes were settled at their publication; a waiter that asked for this
+        # pass checks again, and what its chain loads resolved can make any scope idle.
+        if self._unknowns_changed:
+            self._settle_idle(None)
+            return
+        self._resolve_idle_waiters(None)
+        # A pass checks expiry too, for hosts that decline the expiry timer.
+        self._expire_contexts(self._now(), self._context_retention_ms())
+        self._schedule_expiry()
 
     async def _marks(self, checks: Sequence[TaskId]) -> dict[TaskId, dict[str, Any]]:
         """The abort marks one reconcile pass stages, planned in a decision region.
@@ -1147,39 +1322,56 @@ class TaskScheduler:
 
     async def _load_chain(self, start: Up, overlay: dict[str, Any] | None = None) -> None:
         passed: list[TaskId] = []
+        installed = False
         at: Up | None = start
-        while at is not None:
-            if "task" in at:
-                id = at["task"]
-                node = self._live.get(id) or self._settled.get(id)
-                if node is None and overlay is not None and id in overlay["tasks"]:
-                    break
-                if node is not None and id not in self._unloaded:
-                    break
-                if node is None:
-                    record = await self._storage.task(id, self._context)
-                    if record is None:
-                        return
-                    node = node_of(record)
-                    if record["state"]["status"] == "terminal":
-                        self._settle(id, node)
-                        self._pin(id)
-                    self._schedule_reconcile()
-                passed.append(id)
-                at = parent_of(node)
-            else:
-                conversation = at["conversation"]
-                if overlay is not None and conversation in overlay["edges"]:
-                    edge = overlay["edges"][conversation]
-                elif conversation in self._edges:
-                    edge = self._edges[conversation]
+        try:
+            while at is not None:
+                if "task" in at:
+                    id = at["task"]
+                    node = self._live.get(id) or self._settled.get(id)
+                    if node is None and overlay is not None and id in overlay["tasks"]:
+                        break
+                    if node is not None and id not in self._unloaded:
+                        break
+                    if node is None:
+                        record = await self._storage.task(id, self._context)
+                        if record is None:
+                            return
+                        node = node_of(record)
+                        if record["state"]["status"] == "terminal":
+                            self._settle(id, node)
+                            self._pin(id)
+                            installed = True
+                        # A loaded node can reveal a cancelling owner: the next reconcile derives marks again.
+                        self._schedule_reconcile()
+                    passed.append(id)
+                    at = parent_of(node)
                 else:
-                    record = await self._storage.conversation(conversation, self._context)
-                    edge = record["owner"]["taskId"] if record is not None and "owner" in record else None
-                    self._set_edge(conversation, edge)
-                    self._pin(conversation_node(conversation))
-                    self._schedule_reconcile()
-                at = None if edge is None else {"task": edge}
+                    conversation = at["conversation"]
+                    if overlay is not None and conversation in overlay["edges"]:
+                        edge = overlay["edges"][conversation]
+                    elif conversation in self._edges:
+                        edge = self._edges[conversation]
+                    else:
+                        record = await self._storage.conversation(conversation, self._context)
+                        edge = (
+                            record["owner"]["taskId"] if record is not None and "owner" in record else None
+                        )
+                        self._set_edge(conversation, edge)
+                        self._pin(conversation_node(conversation))
+                        installed = True
+                        # A loaded node can reveal a cancelling owner: the next reconcile derives marks again.
+                        self._schedule_reconcile()
+                    at = None if edge is None else {"task": edge}
+        finally:
+            # ``_idle()`` counts a live task whose chain is not loaded as inside every scope it may be
+            # in: what this load resolved, also when it stopped early, can make such a scope idle without
+            # a task change below it.
+            if any(id in self._live for id in passed) or (installed and self._live_unloaded()):
+                self._unknowns_changed = True
+                # A waiter such a task held is checked again at the pass's end, also when this load was
+                # not a reconcile's.
+                self._schedule_reconcile()
         for id in passed:
             self._unloaded.discard(id)
 
@@ -1529,6 +1721,9 @@ class TaskScheduler:
         self._task_waiters.reject_all(error)
         self._idle_waiters.reject_all(error)
         self._contexts.clear()
+        self._idle_order.clear()
+        self._idle_newest = float("-inf")
+        self._unknowns_changed = False
         if self._expiry_handle is not None:
             self._expiry_handle.cancel()
             self._expiry_handle = None
@@ -1980,6 +2175,38 @@ class TaskScheduler:
             "unloaded": len(self._unloaded),
             "drop_queue": len(self._drop_queue),
             "pins": len(self._pins),
+        }
+
+    @property
+    def idle_state(self) -> dict[str, int]:
+        """The kept contexts' idle state, for tests (a diagnostic, computed on demand).
+
+        How many are kept and how many are idle, how many disagree with a full recompute (an idle
+        period without :meth:`_idle`, or :meth:`_idle` without one; an expiry order that differs from
+        the idle periods, or is not sorted), and how many idle checks covered every scope.
+        """
+
+        mismatches = 0
+        idle = 0
+        for conversation_id, kept in self._contexts.items():
+            idle_since = kept["idle_since"]
+            if idle_since is not None:
+                idle += 1
+            if (idle_since is not None) != self._idle(conversation_id):
+                mismatches += 1
+            if self._idle_order.get(conversation_id) != idle_since:
+                mismatches += 1
+        previous: float = float("-inf")
+        for conversation_id, idle_since in self._idle_order.items():
+            kept_since = self._contexts.get(conversation_id, {}).get("idle_since")
+            if idle_since < previous or kept_since != idle_since:
+                mismatches += 1
+            previous = idle_since
+        return {
+            "contexts": len(self._contexts),
+            "idleContexts": idle,
+            "idleMismatches": mismatches,
+            "fullIdleChecks": self._full_idle_checks,
         }
 
     async def inspect(self, snapshot: RegistrySnapshot) -> tuple[str, list[TaskInspection]]:
@@ -2723,10 +2950,14 @@ class _Runtime:
             token, id, context = args[0], args[1], args[2]
 
         async def read() -> Any:
-            found = await self._scheduler._session.read_on_line(
-                lambda line: line.entry(self._invocation.conversation_id, id, context)
-            )
-            entry = None if found is None else found["entry"]
+            # An entry of the conversation's kept context range is committed and visible: no Storage read.
+            kept = self._scheduler._contexts.get(self._invocation.conversation_id)
+            entry: EntryRecord | None = None if kept is None else range_entry(kept["range"], id)
+            if entry is None:
+                lookup = await self._scheduler._session.read_on_line(
+                    lambda line: line.entry(self._invocation.conversation_id, id, context)
+                )
+                entry = None if lookup is None else lookup["entry"]
             if token is None or entry is None or entry.get("kind") == token.kind:
                 return entry
             return None
@@ -2763,6 +2994,13 @@ class _Runtime:
                 at,
                 None if kept is None else kept["range"],
             )
+            # Checked again here, before the install below: a commit published since the read returned
+            # was not seen by ``_advance_contexts()``, so a range that missed it must not be advanced.
+            if context_range is not None:
+                context_range = demote_missed(
+                    context_range,
+                    self._scheduler._session.known_latest_entry_id(conversation_id),
+                )
             current = self._scheduler._contexts.get(conversation_id)
             if (
                 context_range is not None
@@ -2770,20 +3008,38 @@ class _Runtime:
                 and not self._invocation.ended
                 and (current is None or current["range"]["bounds"]["tail"] <= context_range["bounds"]["tail"])
             ):
+                # A read of another, idle conversation starts or continues its retention period.
                 if not self._scheduler._idle(conversation_id):
                     self._scheduler._contexts[conversation_id] = {
                         "range": context_range,
                         "idle_since": None,
+                        "expires_at": None,
                     }
+                    self._scheduler._idle_order.pop(conversation_id, None)
                 elif self._scheduler._context_retention_ms() > 0:
+                    # An idle period already started keeps its expiry and its place; a new one starts now.
+                    idle_since = (
+                        current["idle_since"]
+                        if current is not None and current["idle_since"] is not None
+                        else self._scheduler._now()
+                    )
+                    continues = (
+                        current is not None
+                        and current["idle_since"] is not None
+                        and current.get("expires_at") is not None
+                    )
+                    expires_at = (
+                        current["expires_at"]
+                        if continues and current is not None
+                        else idle_since + self._scheduler._context_retention_ms()
+                    )
                     self._scheduler._contexts[conversation_id] = {
                         "range": context_range,
-                        "idle_since": (
-                            current["idle_since"]
-                            if current is not None and current["idle_since"] is not None
-                            else self._scheduler._now()
-                        ),
+                        "idle_since": idle_since,
+                        "expires_at": expires_at,
                     }
+                    if current is None or current["idle_since"] is None:
+                        self._scheduler._mark_idle(conversation_id, idle_since)
                     self._scheduler._schedule_expiry()
             return view
 
