@@ -679,13 +679,31 @@ async def stream_response(
     attempt: int,
     context: Context,
 ) -> dict[str, Any]:
-    """Stream one request and return the terminal message, publishing throttled partials."""
+    """Stream one request and return the terminal message, publishing throttled partials.
 
+    The ``beforeProviderRequest`` chain runs over the payload as it is built, before the provider call,
+    and its replacement holds for this request only: the body is rebuilt from the committed messages on
+    every run of the request phase, and the chain runs each time (spec section 7.2). A request a close
+    resends is the same attempt, so the rebuilt body the chain sees is the committed one, not the
+    replacement an earlier send of the same attempt took.
+    """
+
+    payload: dict[str, Any] = {"messages": list(messages)}
+
+    async def before_provider_request(handler: Callable[..., Any]) -> None:
+        nonlocal payload
+        replaced = await call_hook(handler, {"model": model, "payload": payload}, runtime, context)
+        if replaced is not None:
+            value = replaced.get("payload") if isinstance(replaced, Mapping) else None
+            if value is not None:
+                payload = value
+
+    await runtime.hooks.each("beforeProviderRequest", before_provider_request)
     interval = int(runtime.settings.progress.get("partial_interval_ms", 100))
     flusher = _Flusher(runtime, interval, attempt, context)
     flusher.start()
     try:
-        stream = runtime.models.stream_simple(model, {"messages": list(messages)}, options)
+        stream = runtime.models.stream_simple(model, payload, options)
         async for event in stream:
             kind = event.get("type")
             if kind in ("done", "error"):

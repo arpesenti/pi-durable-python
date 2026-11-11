@@ -171,10 +171,40 @@ baseline left alone. These are the rows this baseline adds or moves.
 One place per suite, so an audit reads the reason with the suite it belongs to. A suite named here is
 not excused: it has an owner issue, and it leaves `PARITY.md` with a `planned` row that says so.
 
-None at this point. The one suite recorded here -- `harness-tool-hooks`, with its reason and its owner
+The one suite recorded here -- `harness-tool-hooks`, with its reason and its owner
 #60 -- is translated in full by #60 in `tests/test_harness_tool_hooks.py` (see **Cases completed under
 this baseline**); with it, rows 8.4 Tool and 12 API footguns of `PARITY.md` move to `tested` in that
-commit.
+commit. The entry below is an upstream case inside an already-translated suite, named and reasoned,
+not an untranslated suite.
+
+- **`beforeProviderRequest` in the upstream generation suite — #59.** The 1.5.0 addition (zero
+  occurrences in the 1.4.0 spec) is driven upstream by two cases in `test/harness-tools.test.ts` at
+  tag v1.5.0 (commit f9a2636): `:755` "chains beforeProviderRequest over every provider request
+  body" and `:795` "reports a throwing beforeProviderRequest hook and continues the chain". They are
+  not translated here, for a reason recorded rather than inferred: both drive the hook through
+  pi-ai's faux provider seam — each request body built by `options.onPayload` inside the faux
+  response step — while the port's provider seam is the `Models` protocol, whose payload is the
+  model context that seam receives (the port has no pi-ai to build the provider API's own body;
+  `PARITY.md` **Allowed deviations**, Model access), so the cases do not carry over one for one.
+  The hook's semantics were ported from the vendored specification (the composition table at
+  `spec-1.5.0.md:3351`, the `GenerationHooks` declaration at `:3394-3397`, the recovery prose at
+  `:4926-4927`) and the shipped v1.5.0 source (the `providerPayload` chain in `harness/generation.ts:668-676`,
+  wired through pi-ai's `onPayload`, with one `onPayload` per provider-body build). In their place,
+  each clause the two upstream cases and the vendored specification state is proven by the
+  port-authored cases named on `PARITY.md` row 7.2: the replacement reaching the provider after the
+  messages `beforeRequest` fixed and before the body is sent, for that request only
+  (`test_replaces_the_provider_payload_for_that_request_after_before_request`) — the `:755` clause of
+  the first body; extension order, each handler seeing the previous one's payload, a throw reported
+  and the chain continuing, and a decline leaving the payload alone
+  (`test_before_provider_request_hooks_chain_in_extension_order_and_a_throw_is_reported`) — the
+  `:755` composition and the `:795` throwing hook; the chain rerun on the rebuilt body when a close
+  resends the same attempt, with the first request's replacement not leaking into the second
+  (`test_a_close_resend_of_the_same_attempt_sees_the_rebuilt_provider_payload`) — the `:755` resend
+  body; plus the two clauses no upstream case pins: compaction requests not using the hook
+  (`test_compaction_requests_do_not_run_the_before_provider_request_hook`), and the exhaustive
+  hook-name set the port runs updated in one place, the `GenerationHooks`/`ToolHooks`/
+  `CompactionHooks` keys, with `hook()` refusing a name outside it for a built-in task
+  (`test_hook_rejects_a_handler_name_outside_the_builtin_tasks_hooks`).
 
 ## Exclusions this baseline takes
 

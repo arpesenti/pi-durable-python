@@ -573,6 +573,11 @@ class GenerationHooks(TypedDict, total=False):
     """Hooks of the built-in generation task."""
 
     beforeRequest: Callable[..., Any]
+    beforeProviderRequest: Callable[..., Any]
+    """``(request, api, context)`` where ``request`` is ``{"model", "payload"}`` and ``payload`` is
+    the body the provider is about to send: after it is built, before it is sent. A returned
+    ``{"payload"}`` replaces the body for that request only, and the chain runs again whenever the
+    body is rebuilt — a new attempt, and a close's resend of the same one."""
     afterResponse: Callable[..., Any]
     onYield: Callable[..., Any]
     afterTools: Callable[..., Any]

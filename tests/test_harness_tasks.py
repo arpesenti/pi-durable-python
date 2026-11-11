@@ -18,7 +18,7 @@ from task_support import (
     with_signal,
 )
 
-from pi_durable import MemoryStorage
+from pi_durable import CompactionTask, GenerationTask, MemoryStorage, ToolTask
 from pi_durable.context import AbortController
 from pi_durable.documents import define_doc
 from pi_durable.entries import define_entry
@@ -1553,3 +1553,28 @@ async def test_joins_a_reservation_that_settles_while_closing_without_starting_i
     written = [write for write in storage.commits[-1] if write["type"] == "task"]
     assert written[0]["value"]["id"] == id
     assert written[0]["value"]["state"]["status"] == "pending"
+
+
+def test_hook_rejects_a_handler_name_outside_the_builtin_tasks_hooks() -> None:
+    """A typo'd hook name is refused at registration, not silently never dispatched.
+
+    The set a built-in task's handlers may name is the one its hook TypedDict spells — the
+    ``GenerationHooks``, ``ToolHooks``, and ``CompactionHooks`` keys — and ``hook()`` refuses a
+    name outside it. A task of its own dispatches whatever names it asks, so its handlers keep
+    any name.
+    """
+
+    with pytest.raises(TypeError, match="beforeProvdierRequest"):
+        hook(GenerationTask, {"beforeProvdierRequest": lambda: None})
+    # One built-in task's hooks are not another's.
+    with pytest.raises(TypeError, match="beforeCompact"):
+        hook(GenerationTask, {"beforeCompact": lambda: None})
+    with pytest.raises(TypeError, match="beforeProviderRequest"):
+        hook(ToolTask, {"beforeProviderRequest": lambda: None})
+    with pytest.raises(TypeError, match="afterTool"):
+        hook(CompactionTask, {"afterTool": lambda: None})
+    # The ported name is in the generation's set, and the sets stay the registered names.
+    hook(GenerationTask, {"beforeProviderRequest": lambda: None})
+    hook(ToolTask, {"beforeTool": lambda: None})
+    hook(CompactionTask, {"beforeCompact": lambda: None})
+    hook(one_step("test.hooks-free", lambda *_args: None), {"ping": lambda: None})

@@ -5,15 +5,29 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .live import COMPACTION_TASK_KIND, GENERATION_TASK_NAME, TOOL_TASK_KIND
 from .types import (
     AnyTask,
+    CompactionHooks,
     Extension,
+    GenerationHooks,
     HookRegistration,
     PromptSection,
     RunEndTask,
+    ToolHooks,
     ToolRegistration,
     Wrap,
 )
+
+#: The hook names the port's built-in tasks dispatch, by the task name dispatch matches. Each set is the
+#: other's hook TypedDict's keys — the one place the exhaustive set is updated — and the ``hooks.each`` sites
+#: in ``harness/generation.py``, ``harness/tool.py``, and ``harness/compaction.py`` spell names from it;
+#: ``hook()`` refuses a name outside it.
+_BUILTIN_TASK_HOOKS = {
+    GENERATION_TASK_NAME: frozenset(GenerationHooks.__annotations__),
+    TOOL_TASK_KIND: frozenset(ToolHooks.__annotations__),
+    COMPACTION_TASK_KIND: frozenset(CompactionHooks.__annotations__),
+}
 
 
 def _values(value: Mapping[str, Any] | None, kwargs: Mapping[str, Any]) -> dict[str, Any]:
@@ -92,9 +106,20 @@ def section(
 
 
 def hook(task: AnyTask, handlers: Mapping[str, Any]) -> HookRegistration:
-    """Hook handlers for tasks named like ``task``."""
+    """Hook handlers for tasks named like ``task``.
 
-    return HookRegistration(task=task.definition.name, handlers=dict(handlers))
+    A built-in task's hooks are the ones its task's hook map spells, so a name outside that set — a
+    typo — is refused here rather than silently never dispatched. A task of its own dispatches
+    whatever names it asks and keeps them.
+    """
+
+    name = task.definition.name
+    allowed = _BUILTIN_TASK_HOOKS.get(name)
+    if allowed is not None:
+        for handler_name in handlers:
+            if handler_name not in allowed:
+                raise TypeError(f"Task {name} has no hook named {handler_name!r}")
+    return HookRegistration(task=name, handlers=dict(handlers))
 
 
 def run_end_task(task: AnyTask, input: Any) -> RunEndTask:

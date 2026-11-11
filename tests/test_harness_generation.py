@@ -21,6 +21,7 @@ from chat_support import (
     slow_message,
     text_of,
     unanswered,
+    unanswered_reached,
     usage,
 )
 from harness_support import add_section
@@ -968,6 +969,212 @@ async def test_runs_before_request_and_after_response_hooks_for_every_attempt() 
         [{"role": "user", "content": "rewritten", "timestamp": 1}],
     ]
     assert responses == ["stop", "stop"]
+    await harness.close(context)
+
+
+async def test_replaces_the_provider_payload_for_that_request_after_before_request() -> None:
+    """``beforeProviderRequest`` sees the body as built, from the messages ``beforeRequest`` fixed.
+
+    It is the provider's body that is replaced: the replacement reaches the provider for that
+    request only, and the conversation keeps the committed messages. The two chains are distinct —
+    by the time ``beforeProviderRequest`` runs the messages ``beforeRequest`` replaced are already
+    fixed into the body, and its own replacement feeds back into neither the messages nor the
+    conversation.
+    """
+
+    setup = chat_setup()
+    setup.faux.set_responses([assistant_message("ok")])
+    seen: list[dict[str, Any]] = []
+
+    def before_request(request: Any, _api: Any, _context: Any) -> Any:
+        return {"messages": [{"role": "user", "content": "rewritten", "timestamp": 1}]}
+
+    def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
+        seen.append(dict(request))
+        payload = request["payload"]
+        return {
+            "payload": {
+                **payload,
+                "messages": [
+                    *payload["messages"],
+                    {"role": "user", "content": "for-the-provider", "timestamp": 2},
+                ],
+            }
+        }
+
+    setup.registry.install(
+        define_extension(
+            {
+                "name": "hooks",
+                "hooks": [
+                    hook(
+                        GenerationTask,
+                        {
+                            "beforeRequest": before_request,
+                            "beforeProviderRequest": before_provider_request,
+                        },
+                    )
+                ],
+            }
+        )
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "one"}, context)).wait(context)
+    # After the body was built: one request, shaped ``{model, payload}``, whose payload holds the
+    # messages ``beforeRequest`` fixed, not the committed "one".
+    assert len(seen) == 1
+    assert set(seen[0]) == {"model", "payload"}
+    assert seen[0]["model"] is setup.faux.models[0]
+    assert [message["content"] for message in seen[0]["payload"]["messages"]] == ["rewritten"]
+    # Before it was sent: the provider received the replacement.
+    sent = setup.faux.requests[0][0]
+    assert [message["content"] for message in sent["messages"]] == ["rewritten", "for-the-provider"]
+    # For that request only: the conversation kept the committed message, and the answer follows it.
+    entries = await all_entries(root)
+    assert [entry["kind"] for entry in entries] == ["pi.user", "pi.assistant"]
+    assert entries[0]["model"][0]["content"] == "one"
+    assert text_of(entries[1]["model"][0]) == "ok"
+    await harness.close(context)
+
+
+async def test_before_provider_request_hooks_chain_in_extension_order_and_a_throw_is_reported() -> None:
+    """The composition the table says: a replacement chain, an ordinary throw reported, the run on.
+
+    Each handler sees the previous one's payload; a handler that throws is reported and the chain
+    continues; a handler that declines leaves the payload alone, and the provider gets it as the
+    chain left it.
+    """
+
+    setup = chat_setup()
+    setup.faux.set_responses([assistant_message("ok")])
+    last_seen: list[dict[str, Any]] = []
+
+    def first(request: Any, _api: Any, _context: Any) -> Any:
+        assert [message["content"] for message in request["payload"]["messages"]] == ["hi"]
+        return {"payload": {"messages": [{"role": "user", "content": "first", "timestamp": 1}]}}
+
+    def boom(_request: Any, _api: Any, _context: Any) -> Any:
+        raise RuntimeError("boom")
+
+    def last(request: Any, _api: Any, _context: Any) -> Any:
+        last_seen.append(request["payload"])
+
+    for name, handler in (("first", first), ("boom", boom), ("last", last)):
+        setup.registry.install(
+            define_extension(
+                {"name": name, "hooks": [hook(GenerationTask, {"beforeProviderRequest": handler})]}
+            )
+        )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "hi"}, context)).wait(context)
+    # Extension order, a replacement chain: ``last`` ran after the throw and saw ``first``'s
+    # replacement, not the body ``first`` was handed.
+    assert len(last_seen) == 1
+    assert [message["content"] for message in last_seen[0]["messages"]] == ["first"]
+    # The throw was reported and the run continued; ``last`` declined, so the provider got the
+    # payload the chain left it.
+    assert setup.faux.requests[0][0] == last_seen[0]
+    assert any(str(error) == "boom" for error in setup.reports)
+    assert [message["content"] for message in setup.faux.requests[0][0]["messages"]] == ["first"]
+    await harness.close(context)
+
+
+async def test_a_close_resend_of_the_same_attempt_sees_the_rebuilt_provider_payload() -> None:
+    """The chain runs again whenever the body is rebuilt, and a replacement does not leak into it.
+
+    A close hands the in-flight attempt back uncharged, so the next host resends it as the same
+    attempt. The body is rebuilt from the committed messages, and the chain runs over the rebuilt
+    body: the first request's replacement is not what the second request sees.
+    """
+
+    setup = chat_setup()
+    hanging = unanswered_reached()
+    setup.faux.set_responses([hanging["step"], assistant_message("the answer")])
+    seen: list[list[str]] = []
+
+    def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
+        seen.append([message["content"] for message in request["payload"]["messages"]])
+        return {
+            "payload": {
+                **request["payload"],
+                "messages": [{"role": "user", "content": "replaced", "timestamp": 1}],
+            }
+        }
+
+    setup.registry.install(
+        define_extension(
+            {
+                "name": "hooks",
+                "hooks": [hook(GenerationTask, {"beforeProviderRequest": before_provider_request})],
+            }
+        )
+    )
+    storage = ControlledStorage()
+    opened = await open_chat(storage, setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    id = (await root.submit({"type": "input", "content": "hi"}, context)).id
+    await hanging["reached"].promise
+    task_id = (await live(harness, root))["run"]["taskId"]
+    record = await harness.get_task(task_id, context)
+    assert record["state"]["status"] == "running"
+    assert record["state"]["checkpoint"]["phase"] == "request"
+    assert record["state"]["checkpoint"]["attempt"] == 1
+    assert len(seen) == 1
+    await harness.close(context)
+
+    reopened = await open_chat(storage.reopen(), setup)
+    record = await reopened["harness"].get_task(task_id, context)
+    # A close is not a crash: the same attempt, uncharged, is sent again.
+    assert "restarts" not in record
+    assert record["state"]["status"] == "pending"
+    assert record["state"]["checkpoint"]["phase"] == "request"
+    assert record["state"]["checkpoint"]["attempt"] == 1
+    reopened["harness"].resume()
+    assert (await (await reopened["harness"].submission(id, context)).wait(context))["status"] == "done"
+    # The second request over the same attempt saw the rebuilt body — the committed messages, not
+    # the first request's replacement — and was replaced again.
+    assert seen == [["hi"], ["hi"]]
+    sent = [request[0]["messages"][0]["content"] for request in setup.faux.requests]
+    assert sent == ["replaced", "replaced"]
+    await reopened["harness"].close(context)
+
+
+async def test_compaction_requests_do_not_run_the_before_provider_request_hook() -> None:
+    """It is the generation's payload: a compaction's provider request runs without it."""
+
+    setup = chat_setup()
+    # Little recent context is kept, so the summary request is not declined for having nothing to cut.
+    setup.settings["compaction"] = {"enabled": False, "keep_recent_tokens": 10}
+    setup.faux.set_responses([assistant_message("a1"), assistant_message("a2"), assistant_message("summary")])
+    seen: list[Any] = []
+
+    def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
+        seen.append(request)
+
+    setup.registry.install(
+        define_extension(
+            {
+                "name": "hooks",
+                "hooks": [hook(GenerationTask, {"beforeProviderRequest": before_provider_request})],
+            }
+        )
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "u1 " * 200}, context)).wait(context)
+    await (await root.submit({"type": "input", "content": "u2 " * 200}, context)).wait(context)
+    assert len(seen) == 2
+    compaction = await root.compact(None, context)
+    await harness.wait_for_task(compaction, context)
+    # The summary's request reached the provider without the hook.
+    assert len(seen) == 2
+    assert len(setup.faux.requests) == 3
     await harness.close(context)
 
 
