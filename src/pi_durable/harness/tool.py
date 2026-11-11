@@ -188,16 +188,16 @@ async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     tool = None if _is_unoffered(input) else await resolve_tool(runtime, input, call["name"], context)
     if tool is None:
         message = f"Tool {call['name']} is not available"
-        await settle(runtime, input, call, COMPLETED, harness_error("tool_unavailable", message), context)
+        await reject(runtime, input, call, None, harness_error("tool_unavailable", message), context)
         return
     prepared = prepare(tool, call.get("arguments") or {})
     if isinstance(prepared, str):
-        await settle(runtime, input, call, COMPLETED, invalid(prepared), context)
+        await reject(runtime, input, call, tool, invalid(prepared), context)
         return
     args = prepared
     checked = validate(tool, call, args)
     if isinstance(checked, str):
-        await settle(runtime, input, call, COMPLETED, invalid(checked), context)
+        await reject(runtime, input, call, tool, invalid(checked), context)
         return
     args = checked
     block: str | None = None
@@ -221,11 +221,11 @@ async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     await runtime.hooks.each("beforeTool", before_tool)
     if block is not None:
         blocked = f"Tool call blocked: {block}"
-        await settle(runtime, input, call, COMPLETED, harness_error("blocked", blocked), context)
+        await reject(runtime, input, call, tool, harness_error("blocked", blocked), context)
         return
     validated = validate(tool, call, args)
     if isinstance(validated, str):
-        await settle(runtime, input, call, COMPLETED, invalid(validated), context)
+        await reject(runtime, input, call, tool, invalid(validated), context)
         return
     # Strict JSON: repair may set optional properties to None, which the slot and checkpoint cannot hold.
     final = cast(dict[str, JsonValue], copy_json(validated))
@@ -393,6 +393,25 @@ async def settle_from_slot(
             {**result, "diagnostics": [*(result.get("diagnostics") or []), truncation]},
         )
     await settle(runtime, input, call, ending, settled, context)
+
+
+async def reject(
+    runtime: Any,
+    input: ToolTaskInput,
+    call: ToolHookCall,
+    tool: ToolRegistration | None,
+    result: ToolExecutionResult,
+    context: Context,
+) -> None:
+    """Settle a result the Harness decided in the ``call`` phase, without running the tool: the tool
+    did not resolve, the arguments are invalid, or ``beforeTool`` blocked the call.
+
+    The ``afterTool`` chain applies as to an executed call's result (`#11043`), and the result takes
+    the tool's bounds, or the defaults when it never resolved.
+    """
+
+    settled = await after_harness_result(runtime, input, call, tool, result, None, context)
+    await settle(runtime, input, call, COMPLETED, settled, context)
 
 
 async def after_harness_result(

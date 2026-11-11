@@ -147,27 +147,34 @@ baseline left alone. These are the rows this baseline adds or moves.
   its table, and an entry that named no upstream case at all is gone from that module's deferral block;
   the record-cache case (`:635`) stays the one exclusion it records there.
 
+- **`harness-tool-hooks` and the `afterTool` chain over every result the task writes (#60).** All 18
+  cases of `test/harness-tool-hooks.test.ts` are translated case for case into
+  `tests/test_harness_tool_hooks.py`, each named for its upstream line: `:137`, `:200`, `:240`, `:260`,
+  `:313`, `:372`, `:413`, `:443`, `:466`, `:508`, `:541`, `:585`, `:633`, `:657`, `:675`, `:704`, `:726`
+  and `:784`. The translation exposed the one gap the earlier partial proofs left: `harness/tool.py`
+  settled the `call` phase's results -- the tool did not resolve, the arguments are invalid, or
+  `beforeTool` blocked the call -- without the `afterTool` chain, so no case could see a hook run on
+  an unavailable, invalid, or blocked result. The port now carries upstream's `reject` beside
+  `settle_from_slot`, which runs the chain and the bounds (the tool's, or the defaults when the tool
+  never resolved) over those results before settling; the nine cases that rest on it were red without
+  it, and the abort-result and restart-cutoff cases were shown red with the chain's call removed
+  (`:413` fails on its `seen` list, `:585` reaches none of its assertions past the signal only the
+  pinned hook resolves). The cases that prove row **12 API footguns**' abort-handler bullet are `:413`
+  (the chain on an `aborted` result, not the aborted results of calls that never started), `:443`
+  (a throwing hook reported, the result settled as built), and `:466` (the last attempt before the
+  restart limit without the hooks), beside the `restart_limit` result's own hooks at `:585`. No case
+  in the file is port-side: the 18 are upstream's, and the siblings that already prove parts of the
+  chain -- named in the module docstring, as this file's other entries do -- are not counted twice.
+
 ## Cases deliberately left untranslated
 
 One place per suite, so an audit reads the reason with the suite it belongs to. A suite named here is
 not excused: it has an owner issue, and it leaves `PARITY.md` with a `planned` row that says so.
 
-- **`harness-tool-hooks` (18 cases) — #60.** Upstream `test/harness-tool-hooks.test.ts` is the suite
-  for `afterTool` running on every result a tool task writes, including the results the Harness
-  decides without executing the tool. It is deliberately not translated at this pass: #49 owns row
-  **8.4 Tool**, whose clause is the chain itself, and the chain is implemented — `harness/tool.py`
-  runs `afterTool` over an executed call's result (`final_result`, `:1034-1041`), over a result the
-  Harness wrote itself (`after_harness_result`, `:416-422`) and over an interruption result — with parts of it proven by existing cases
-  (replacements chained and the round observed through `afterTools` in `test_harness_tools.py`; a
-  nested call's hook in `test_harness_nested_tools.py`; `structuredOutput` kept through a replacement
-  in `test_harness_structured_output.py`; a hook `terminate` on a blocked call counting toward the
-  round in `test_harness_turn_limit.py`; `details()` still waiting when the call is aborted inside
-  `afterTool` in `test_harness_tools.py:994`). What the suite adds — `afterTool` on an `aborted`
-  result at all, on an abandoned nested call's result, on a `restart_limit` result, and the bounds a
-  replacement output takes — is not proven by any current case, which is exactly why row 8.4 stays
-  `planned` and row **12 API footguns** keeps its abort-handler bullet. #49 records the reason rather
-  than closing the row on an inference, the failure mode that put #49 back on the queue the first
-  time it closed.
+None at this point. The one suite recorded here -- `harness-tool-hooks`, with its reason and its owner
+#60 -- is translated in full by #60 in `tests/test_harness_tool_hooks.py` (see **Cases completed under
+this baseline**); with it, rows 8.4 Tool and 12 API footguns of `PARITY.md` move to `tested` in that
+commit.
 
 ## Exclusions this baseline takes
 
