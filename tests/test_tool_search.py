@@ -7,10 +7,13 @@ through the tool: camel-case boundaries, stop words, naive plural stems. The ran
 ``test/search.test.ts``'s ``rankDocuments`` cases one for one — every non-Unicode assertion of them
 — over the same fixtures and the same expected orders: term relevance and the limit, the namespace
 field, a name match above mentions in descriptions, the whole-local-name bonus, exact-name-first,
-and coverage above score. The eight Unicode cases wait on the word segmenter the port does not have,
-and the two port cases besides the translated ones pin what no upstream case isolates: length
-normalization with ties in document order, and exact-name-first against a competitor that outscores
-the named tool.
+and coverage above score. The eight Unicode cases left untranslated — the ``rankDocuments``
+``it.each`` "matches Unicode queries against %s" of ``test/search.test.ts``, one case per row:
+``:65`` 搜索仓库问题, ``:66`` 文書を検索, ``:67`` 문서 검색, ``:68`` ค้นหาเอกสาร, ``:69`` Поиск документов,
+``:70`` البحث عن الملفات, ``:71`` फ़ाइल खोजें, ``:72`` Rechercher un café — wait on
+the word segmenter the port does not have, and the two port cases besides the translated ones pin
+what no upstream case isolates: length normalization with ties in document order, and exact-name-first
+against a competitor that outscores the named tool.
 """
 
 from __future__ import annotations

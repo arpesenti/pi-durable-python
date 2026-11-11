@@ -27,6 +27,7 @@ from chat_support import (
 from harness_support import add_section
 from session_support import ControlledStorage, context, document_changes, observe_commits
 from task_support import eventually
+from tool_support import add_hooks
 
 from pi_durable import (
     AssistantEntry,
@@ -1002,21 +1003,10 @@ async def test_replaces_the_provider_payload_for_that_request_after_before_reque
             }
         }
 
-    setup.registry.install(
-        define_extension(
-            {
-                "name": "hooks",
-                "hooks": [
-                    hook(
-                        GenerationTask,
-                        {
-                            "beforeRequest": before_request,
-                            "beforeProviderRequest": before_provider_request,
-                        },
-                    )
-                ],
-            }
-        )
+    add_hooks(
+        setup.registry,
+        GenerationTask,
+        {"beforeRequest": before_request, "beforeProviderRequest": before_provider_request},
     )
     opened = await open_chat(MemoryStorage(), setup)
     harness, root = opened["harness"], opened["root"]
@@ -1105,14 +1095,7 @@ async def test_a_close_resend_of_the_same_attempt_sees_the_rebuilt_provider_payl
             }
         }
 
-    setup.registry.install(
-        define_extension(
-            {
-                "name": "hooks",
-                "hooks": [hook(GenerationTask, {"beforeProviderRequest": before_provider_request})],
-            }
-        )
-    )
+    add_hooks(setup.registry, GenerationTask, {"beforeProviderRequest": before_provider_request})
     storage = ControlledStorage()
     opened = await open_chat(storage, setup)
     harness, root = opened["harness"], opened["root"]
@@ -1156,14 +1139,7 @@ async def test_compaction_requests_do_not_run_the_before_provider_request_hook()
     def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
         seen.append(request)
 
-    setup.registry.install(
-        define_extension(
-            {
-                "name": "hooks",
-                "hooks": [hook(GenerationTask, {"beforeProviderRequest": before_provider_request})],
-            }
-        )
-    )
+    add_hooks(setup.registry, GenerationTask, {"beforeProviderRequest": before_provider_request})
     opened = await open_chat(MemoryStorage(), setup)
     harness, root = opened["harness"], opened["root"]
     harness.resume()

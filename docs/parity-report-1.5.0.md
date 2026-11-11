@@ -115,7 +115,7 @@ baseline left alone. These are the rows this baseline adds or moves.
 | `harness-tool-hooks` | `test_harness_tool_hooks.py` (all 18 `it()` cases; see **Cases completed under this baseline**) |
 | `harness-turn-limit` | `test_harness_turn_limit.py` (all eleven `it()` cases) |
 | `harness-view-run` | `test_harness_view_run.py` (all 13 cases; #47 corrected this row, which named three more files whose cases belong to their own upstream suites and cite this one nowhere) |
-| `search` | `test_tool_search.py` (the `rankDocuments` cases one for one over the port's BM25 ranker, beside the six `tool-search` deferred-loading cases; the eight Unicode cases are left untranslated, named in the module docstring) |
+| `search` | `test_tool_search.py` (the `rankDocuments` cases one for one over the port's BM25 ranker, beside the six `tool-search` deferred-loading cases; the eight Unicode cases left untranslated are the `rankDocuments` `it.each` "matches Unicode queries against %s" of `test/search.test.ts`, one case per row -- `:65` 搜索仓库问题, `:66` 文書を検索, `:67` 문서 검색, `:68` ค้นหาเอกสาร, `:69` Поиск документов, `:70` البحث عن الملفات, `:71` फ़ाइल खोजें, `:72` Rechercher un café -- each named with its line in the module docstring) |
 | `session-adoption` | `test_session_adoption.py` (all 13 `it()` cases, translated by this audit; its dispatch-attachment case pins the fix under **What this audit found and fixed**) |
 | `session-conversation-tails` | `test_session_conversation_tails.py` (all five `it()` cases, translated by this audit) |
 | `session-deferred-commits` | `tests/test_session_deferred_commits.py` (all 25 `it()` cases; see **Cases completed under this baseline**) |
@@ -578,6 +578,18 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `test_session_document_retention.py::test_keeps_no_value_of_a_document_retired_for_good_while_an_observer_is_attached`.
   Where an object *can* be weakly held — the host's own observer — the upstream collection case is
   translated directly: `test_keeps_no_detached_observer_alive`.
+- **The `beforeProviderRequest` chain declines a returned `payload` of `None` (#59).** Upstream's
+  replacement chain takes the replacement on any defined result -- `harness/generation.ts:677-678`
+  at tag v1.5.0, `if (replaced !== undefined) current = replaced.payload` inside `providerPayload`
+  (`:668-681`) -- so a handler that returns a mapping whose `payload` is `undefined` (the Python
+  spelling, `None`) replaces the body with it. The port's `stream_response` replaces only when the
+  returned mapping carries a non-`None` `payload` (`harness/generation.py`'s
+  `before_provider_request` closure, `:693-699`), so the same handler declines here and the body is
+  sent as built. No spec clause pins the return value -- the composition table at
+  `spec-1.5.0.md:3351` defines only the replacement chain, with a handler that returns nothing
+  leaving the payload alone, and the `GenerationHooks` declaration at `:3394-3398` types the
+  result's `payload` as `unknown` -- and no upstream case drives it, so the port keeps its stricter
+  rule; the audit records the edge here rather than change the behaviour.
 
 ## What moved here from the 1.4.0 record
 
@@ -624,12 +636,13 @@ one to name.
   pre-fix order and it fails there -- the observer receives the commit it attached for -- and passes
   on the post-fix order. The port's host dispatch reads the set at delivery, as upstream's does,
   so an observer a preceding advance detached takes nothing of the commit it was attached for.
-- **Stale upstream citations.** Four docstring lines in `tests/test_harness_run_failure.py` (`:34`,
-  `:63`, `:101`, `:145`) cited `scheduler.ts:38/:64/:100/:139` where the upstream v1.5.0 file holds
-  the cited clauses at `:34/:63/:101/:145`, and one line in `tests/test_harness_blocked.py` cited
-  `scheduler.ts:136` where the clause is at `:137`. The cited text is identical on both sides; the
-  lines were off by the shift the v1.5.0 file took over v1.4.0, and each was corrected to the line
-  the vendored file holds the clause at.
+- **Stale upstream citations.** Four docstring lines in `tests/test_harness_run_failure.py` cited
+  the lines the clauses held at v1.4.0 -- `test/harness-run-failure.test.ts:34/:63/:101/:145` --
+  where the vendored v1.5.0 file holds the cited `it()` clauses at `:38/:64/:100/:139`, and one
+  line in `tests/test_harness_blocked.py` cited `test/harness-blocked.test.ts:136` where the
+  v1.5.0 file holds the clause at `:137`. The cited text is identical on both sides; the lines
+  were off by the shift the v1.5.0 file took over v1.4.0, and each was corrected to the line the
+  vendored file holds the clause at.
 - **Stale module claims.** Three module docstrings stated a deferral or a seam that the merged
   tickets had already resolved: `tests/test_harness_continue.py` claimed its host-died case's crash
   charge "cannot run as-is" when #38 had landed the crash charge on the port's `kill()` seam —
@@ -661,6 +674,26 @@ one to name.
   corrected the ADR sentence and deleted the `PARITY.md` row, and the deletion is recorded under
   **What this baseline changes in the 1.4.0 record**.
 
+## Post-sign-off corrections
+
+The two-axis review of this close-out (standards and spec, each against the tree and the vendored
+upstream) found the record out of step in four places after the sign-off above. Each correction is
+in the commit that follows the sign-off, and none of the four changes code behaviour:
+
+- the **Stale upstream citations** bullet of **What this audit found and fixed** is rewritten with
+  the old and new positions in the order the diff holds them and the suite files it corrected --
+  `test/harness-run-failure.test.ts` and `test/harness-blocked.test.ts` -- in place of the
+  `scheduler.ts` the bullet named.
+- the `search` row of the suites table and `tests/test_tool_search.py`'s module docstring now name
+  the eight Unicode cases left untranslated, each with its upstream line.
+- the **Gates** free-threaded note now records the disposition the #52 ruling gives the legs --
+  #53's release verification, not this sync's green column, an approved exception to the umbrella
+  Definition of done -- rather than leaving them an open question.
+- **Remaining deviations under this baseline** now records the `beforeProviderRequest` payload
+  edge the spec review found -- a handler's `{"payload": None}` replaces the body upstream and
+  declines in the port, pinned by no spec clause and no upstream case -- with the port's behaviour
+  left as-is.
+
 ## Gates
 
 Run at this commit, after the fixes above:
@@ -677,3 +710,6 @@ Run at this commit, after the fixes above:
   `test_system_order_cache_e2e.py`), skipped by design.
 - The free-threaded legs, 3.14t and 3.15t, are **not installed in this environment**: the gate is
   reported on the installed legs only, and no free-threaded pass is claimed by this sign-off.
+  Their disposition is the ruling recorded on #52: the legs belong to #53's release verification,
+  not to this sync's green column -- an approved exception to the umbrella Definition of done, not
+  an open defect.
