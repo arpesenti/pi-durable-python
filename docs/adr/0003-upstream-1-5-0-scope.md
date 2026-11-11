@@ -60,8 +60,10 @@ Four things stay out of scope.
   client identity (`HarnessOptions.identity`, `DEFAULT_HARNESS_IDENTITY`), the IndexedDB backend and
   the Cloudflare Workers suites (`test-workers/*`), and Code Mode with `codemode-checkpoints` stay
   excluded, unchanged, for the reasons recorded there; Windows and WSL stay out with ADR 0001. 1.5.0
-  touches none of them: the `tool_search` ranking fix is ported as behaviour, and Code Mode's own
-  fixes are not.
+  touches none of them in substance: the `tool_search` ranking fix is ported as behaviour, and Code
+  Mode's own fixes are not; the one move is a deletion — the Cloudflare Workers suites themselves,
+  `test-workers/*`, which the 1.5.0 tree no longer holds — and the exclusion they recorded stands on
+  the backend.
 
 ## Consequences
 

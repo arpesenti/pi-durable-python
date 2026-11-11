@@ -224,7 +224,7 @@ async def test_keeps_the_hosts_wake_active_until_opens_recovery_pass_has_landed(
 
 
 async def test_faults_an_extension_task_cut_off_restart_limit_times_instead_of_running_it_again() -> None:
-    """Upstream ``harness-blocked.test.ts`` :136: nothing is parked, the task ends ``faulted``.
+    """Upstream ``harness-blocked.test.ts`` :137: nothing is parked, the task ends ``faulted``.
 
     A task of a kind that does not end itself at the limit — any extension's kind — is ended
     ``faulted`` by the reservation that would have run it again, with one ``task_faulted`` report.

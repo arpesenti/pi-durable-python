@@ -5,12 +5,15 @@ Upstream ``test/harness-continue.test.ts`` holds 13 cases: 12 are translated her
 Excluded, telemetry-only (ADR 0002 keeps telemetry out of the port):
 "starts a root trace linked to its caller, as an input does".
 
-One translation is narrower than upstream by the port's own gap: "answers a run interrupted by a host
-that died while the model answered" leaves the cut-off attempt on the record with ``restarts`` set,
-because this port's Session layer does not yet charge a re-adopted attempt the way upstream does when
-its host dies. The rule under test - the generation's own, that an in-flight attempt the host stopped
-is a failed attempt under ``settings.retry`` and ends the run ``interrupted`` - is asserted as upstream
-asserts it.
+One translation is narrower than upstream in its crash premise, named so rather than silently:
+"answers a run interrupted by a host that died while the model answered" simulates the crash's count
+by writing ``restarts`` on the reopened record, because its host death is a clean ``close()`` -- and
+a close unwinds the in-flight task back to ``pending`` uncounted, "a close is not a crash", the way
+upstream's close does -- where upstream's ``kill()`` leaves the task ``running`` for open to charge.
+The charge a crash leaves behind is what ``test_harness_restart_failure.py`` proves on the ``kill()``
+seam (open counts a task found ``running``, ``scheduler.py:635``). The rule under test - the
+generation's own, that an in-flight attempt the host stopped is a failed attempt under
+``settings.retry`` and ends the run ``interrupted`` - is asserted as upstream asserts it.
 """
 
 from __future__ import annotations
@@ -184,11 +187,10 @@ async def generation_id(harness: Any, conversation_id: Any) -> Any:
 
 
 async def test_answers_a_run_interrupted_by_a_host_that_died_while_the_model_answered() -> None:
-    # The port charges a re-adopted attempt only for a task it finds ``running`` at open
-    # (``scheduler.py:539``), and a close that unwinds the in-flight stream parks it ``pending`` with
-    # no count. The record is therefore left as the dead host left it -- ``restarts`` set, the way the
-    # recovery suite leaves what an earlier version stored -- and the generation's own rule, that an
-    # in-flight attempt is a failed attempt under the retry policy, is asserted as upstream asserts it.
+    # A close is not a crash: it unwinds the in-flight task back to ``pending`` with no count. The
+    # charge a crash would have left -- open counts a task found ``running`` (``scheduler.py:635``)
+    # -- is written here on the record instead, and the generation's own rule, that an in-flight
+    # attempt is a failed attempt under the retry policy, is asserted as upstream asserts it.
     storage = ControlledStorage()
     setup = chat_setup()
     setup.settings["progress"] = {"partial_interval_ms": 0}

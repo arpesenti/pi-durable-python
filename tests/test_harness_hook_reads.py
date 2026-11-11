@@ -10,10 +10,12 @@ in its own implementation and states it in ``TaskRuntime.commit``'s docstring (`
 inside the callback read only through ``tx``, because the other runtime reads queue on the line the
 callback holds), so the second case below asserts the discipline instead of inferring it from the call.
 
-Deferred to #36 and #48, which own ``HookApi.entry()``/``entries()`` (``PARITY.md`` §7.2):
-"reads raw history and single entries from a hook" (:17-48). Every assertion of that case runs
-through a hook ``api`` the port does not carry; the task runtime read it shares with this file's
-first case is proven here, and the hook half moves when those tickets land it.
+The other case, "reads raw history and single entries from a hook" (:17-48), was deferred to
+#36 and #48, which own ``HookApi.entry()``/``entries()`` (``PARITY.md`` §7.2); both have landed,
+and the audit #52 translates it here as ``test_reads_raw_history_and_single_entries_from_a_hook``.
+Where it differs from upstream: the "another kind" read passes a second entry definition
+(``OtherEntry``) in place of upstream's ``GenerationTask as never`` -- a task definition standing in
+for a token of another kind -- because the port's ``entry()`` takes an entry definition's ``kind``.
 """
 
 from __future__ import annotations
@@ -25,7 +27,15 @@ from chat_support import all_entries, assistant_message, chat_setup, faux_text, 
 from session_support import ControlledStorage, context, flush
 from task_support import aborted_with, completed, deferred, eventually
 
-from pi_durable import define_extension, define_task
+from pi_durable import (
+    GenerationTask,
+    MemoryStorage,
+    UserEntry,
+    define_entry,
+    define_extension,
+    define_task,
+    hook,
+)
 
 
 async def _abort(_task: Any, runtime: Any, ctx: Any) -> None:
@@ -149,4 +159,39 @@ async def test_a_task_entries_read_waits_for_the_commit_holding_the_line() -> No
     # What it settled with is the committed history, the admitted note among it, newest first as an
     # unordered scan asks for.
     assert history["kinds"] == ["note", "pi.assistant", "pi.user"]
+    await harness.close(context)
+
+
+async def test_reads_raw_history_and_single_entries_from_a_hook() -> None:
+    """Upstream ``test/harness-hook-reads.test.ts:17-48``: the hook asks the api for the history and a
+    single entry."""
+
+    setup = chat_setup()
+    seen: list[dict[str, Any]] = []
+    other: Any = define_entry("test.other")
+
+    async def on_yield(_answer: Any, api: Any, ctx: Any) -> None:
+        page = await api.entries({"order": "ascending"}, 10, None, ctx)
+        first = page["items"][0]
+        user = await api.entry(UserEntry, first["id"], ctx)
+        seen.append(
+            {
+                "kinds": [entry["kind"] for entry in page["items"]],
+                **({} if user is None else {"user": user["kind"]}),
+            }
+        )
+        # Another kind: None.
+        assert await api.entry(other, first["id"], ctx) is None
+
+    setup.registry.install(
+        define_extension(
+            {"name": "reader", "hooks": [hook(GenerationTask, {"onYield": on_yield})]}
+        )
+    )
+    setup.faux.set_responses([assistant_message("done")])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
+    # The answer is not committed yet when ``onYield`` asks.
+    assert seen == [{"kinds": ["pi.user"], "user": "pi.user"}]
     await harness.close(context)

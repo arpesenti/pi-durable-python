@@ -10,11 +10,15 @@ follows the Session into the next one (decision "Slice 8 S1", spec §9.1).
 Two upstream cases are deliberately not translated here, each named with where its guarantee lives
 instead:
 
-- ``:105`` "advances when memory adopts a held commit, before anything is stored" — a deferred commit
-  is held in memory before Storage sees it, which is **#47**'s work: the persistence mark on the
-  commit, the persist-within deadline, and the foreground timer that arms it do not exist yet. The
-  commit observer is fed from the durability receipt, so it is ready for that case; #47 carries these
-  three sub-clauses.
+- ``:105`` "advances when memory adopts a held commit, before anything is stored" -- a deferred
+  commit is held in memory before Storage sees it, which is **#47**'s work: the persistence mark on
+  the commit, the persist-within deadline, and the foreground timer that arm it. #47 landed:
+  ``tests/test_session_deferred_commits.py::test_show_every_held_commit_to_watches_and_the_sessions_own_observers_once``
+  proves the same guarantee from the deferred-commits suite -- every held commit shown once to the
+  watches and the Session's own observers, nothing stored -- and
+  ``test_give_observe_commits_exactly_what_was_stored_and_nothing_for_a_held_commit`` proves the
+  host's commit observer sees the held commit only once Storage stored it. This file keeps no copy
+  of the case: the seam it would drive (a deferred commit inside this suite) belongs to that suite.
 - ``:309`` "keeps no value of a document retired for good, while still attached" — its claim is a
   garbage-collection claim, and CPython cannot take a weak reference to the plain ``dict`` a document
   value is. The Session's own cache sizes are the port's measure of the same guarantee: see

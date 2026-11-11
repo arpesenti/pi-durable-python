@@ -1523,8 +1523,12 @@ class SessionImpl:
         ]
         changes: list[CommitChange] = [*tables, *documents.observed]
         observed: ObservedCommit = {"kind": "stored", "seq": seq, "changes": changes}
+        # The dispatch is taken only when an observer is attached at the publication (spec §9.1):
+        # one an own observer attaches during it gets the commit only when one was already attached,
+        # so this is read before the own followers run, and the dispatch reads the set at delivery.
+        host_attached = bool(self._commit_observers)
         failure = self._advance_followers(documents.observed, writes, observed, context)
-        if self._commit_observers:
+        if host_attached:
             # One publication for both audiences, unless the commit also stored held changes: those
             # belong to the host's observer alone, because memory was shown them when each deferred
             # commit was adopted.

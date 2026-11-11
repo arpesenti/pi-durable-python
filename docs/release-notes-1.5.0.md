@@ -99,3 +99,38 @@ The bundled backends need no work from their users: `MemoryStorage`, `SqliteStor
 `JsonlStorage` implement the one call, and the storage conformance suite in `pi_durable.testing`
 holds each of them — fresh and across reopen — to the group stored in order, the receipts and the
 refusal.
+
+### State getters and the commit subscription are gone
+
+`Session.document_state()`, the conversation's `view_state()`, the task graph's `state()` read, and
+`Session.subscribe_commits()` — and the `DocumentState` type — are removed. Reading committed state
+is observation: `Session.observe_doc()` mirrors one document's address, the conversation's windowed
+view is attached with a window over `Conversation.watch()`, the task graph is watched with
+`TaskGraph.watch()`, and `Session.observe_commits()` publishes every stored commit to the host. A
+state getter's "the value as of now" is what an observer's initial value and first calls give
+instead, and what a one-shot read wants is `Session.snapshot()`, which reads the stored shape and
+migrates through the token. `tests/test_session_observers.py` names where each deleted getter's
+guarantees are proved now.
+
+### The agent event adapter is gone
+
+The `watch_events()` stream and its types — `AgentEventStream`, `AgentEvent`, `MessageChange`,
+`SnapshotEvent`, `ToolEventCall` — are removed. What a host could observe through it — the run's
+life, the tool calls and their results, the streamed partials — is committed state, read where it
+lives: `pi.live` out of the conversation view, the entry window, the task graph, and
+`on_report`/`inspect()` for the diagnostics.
+
+### A cut-off task ends instead of parking
+
+`Harness.retry_task()` is removed, with the `task_parked` report and the `restart_limit` blocked
+reason. A task cut off `settings.restart_limit` times in a row ends, each kind visibly: a built-in
+kind ends itself, a run ends `restart_limit`, and the scheduler faults a task of any other kind,
+reported `task_faulted` with reason `restart_limit`. `task_interrupted` and `task_faulted`
+carry the crash-loop signal that `task_parked` used to.
+
+### Reports are one tagged object
+
+`on_report(error, info)` with a two-argument `ReportType` is `on_report(report)`: one `Report`
+carrying the `ReportInfo` fields tagged by a `kind` from `storage_failed` to `listener_error`
+beside the `error` itself. `ReportType` is gone from the public surface. A handler that branched
+on the `info` argument now branches on `report["kind"]`.

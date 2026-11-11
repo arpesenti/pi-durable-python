@@ -90,6 +90,18 @@ class ConversationTails:
 
         return self._latest.get(conversation_id)
 
+    @property
+    def size(self) -> int:
+        """How many conversations have their newest entry kept, for tests that bound memory."""
+
+        return len(self._latest)
+
+    @property
+    def markers(self) -> int:
+        """How many conversations have their newest head marker kept, for tests that bound memory."""
+
+        return len(self._markers)
+
     def apply(self, writes: Sequence[StorageWrite]) -> None:
         """At a commit's publication: apply a durable batch."""
 

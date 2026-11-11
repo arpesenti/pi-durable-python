@@ -24,25 +24,47 @@ neither is the record of what remains untranslated — this file is.
 
 ## Status of this audit
 
-Not signed off. The v1.5.0 audit is [#52](https://github.com/arpesenti/pi-durable-python/issues/52),
-and it is the ticket that turns the claims below into a signed-off result: the in-scope suite count
-for this baseline, the per-suite translation table, and the pass condition every `tested` row in
-`PARITY.md` rests on. Until then every completion claim here is what the porting ticket observed at
-its own commit, not an audit finding, and a claim that a case is deliberately left out is read here
-as a claim awaiting that sign-off.
+**Signed off at this commit.** This audit is [#52](https://github.com/arpesenti/pi-durable-python/issues/52), and
+it re-derived every claim from the tree at the commit it closes rather than from ticket receipts: the
+matrix was read row by row against the vendored upstream at tag `v1.5.0`, each suite's cases counted
+against its upstream file, every term the sync added or amended in `GLOSSARY.md` checked against the
+seam and the suite that proves it, the release-notes breaking set assembled from the public-surface
+diff of the `v1.4.0` tag, and the gates re-run after the fixes this audit makes (**What this audit
+found and fixed** below).
 
-The v1.4.0 record's Result — all 61 in-scope suites translated — is that baseline's number. This
-baseline deletes one of them upstream (`harness-events`) and adds the suites named below, so the
-v1.5.0 count is #52's to state, not this file's to guess.
+**Result.** Every in-scope suite at this baseline has a Python translation, every case of every
+translated suite is named in its module docstring or below, and every upstream case deliberately left
+untranslated is named with its reason under **Cases deliberately left untranslated** and **Exclusions**.
+`PARITY.md` carries no `planned` or `code` row; every `excluded` row carries its reason; the port-
+additions section names the v1.5.0 baseline. The `planned` rows the re-baseline left behind are
+closed here: 3.3, 3.6, 3.7, 5.6 and 10.1 move to `tested` on the suites named on each row, and the
+`registryReader` value is excluded by name under ADR 0003's Chord boundary, its three upstream cases
+named below.
+
+**The in-scope suite count for this baseline is 83.** Upstream v1.5.0 holds 99 `test/*.test.ts`
+suites. The v1.4.0 record's 61 in-scope suites minus the two upstream deleted at this baseline
+(`harness-events` with the agent event stream, `session-states` with the state getters) leave 59;
+the 30 suites v1.5.0 adds split into 24 in-scope and 6 excluded, named under **Exclusions this
+baseline takes** and **Cases deliberately left untranslated**. The 16 excluded suites of this
+baseline are the 10 the v1.4.0 record excluded that upstream still holds at this baseline (Code Mode
+×4, telemetry ×2, pi-ai identity, the image implementation, the Cloudflare and browser backends),
+beside the 6 new ones; the v1.4.0 record's 12 lost the two `test-workers` suites to the deletion
+above. The pass condition every `tested` row rests on: `ruff check src tests`, `mypy`, and
+`pytest` on the verified version set, clean at this commit — re-run after the audit's fixes, with
+the counts under **Gates** below.
+
+The free-threaded legs of the verified set, 3.14t and 3.15t, are **not installed in the environment
+this audit ran in**, so this sign-off states the gate results on the installed legs only and claims no
+free-threaded pass.
 
 `PARITY.md` names these as the suites this baseline adds, and each is a real upstream
 `test/*.test.ts` at tag `v1.5.0`: `harness-group-commit`, `session-group-commit`,
 `session-deferred-commits`, `harness-deferred-progress`, `harness-observers`, `session-observers`,
 `conversation-transcript`, `harness-run-failure`, `harness-turn-limit`, `harness-after-run`,
 `harness-continue`, `harness-submit-in-commit`, `harness-idle-scopes`, and `harness-restart-failure`.
-This file already carries the rows for `harness-observers`, `session-observers`,
-`conversation-transcript`, and `harness-view-run`; the rest are #52's table to fill in, suite by
-suite, with the case it deliberately leaves untranslated named and reasoned here when it does.
+The table below carries a row for every in-scope suite this baseline adds, translated by the porting
+tickets or by this audit, with the case it deliberately leaves untranslated named and reasoned under
+**Cases deliberately left untranslated** when it does.
 
 ## What this baseline changes in the 1.4.0 record
 
@@ -62,6 +84,11 @@ moved the ground under it, recorded here rather than by editing that file.
   event stream. At this baseline it is `on_report`, `inspect()`, the task graph, and the view.
 - **Section 9.4 is the task graph view.** The 1.4.0 record's references to 9.4 as the agent event
   section and 9.5 as the task graph are re-keyed here: 1.5.0 numbers the task graph view 9.4.
+- **The `test-workers/*` suites are gone upstream.** The v1.4.0 record excludes them with the
+  browser and Cloudflare backends (ADR 0002); the v1.5.0 tree no longer holds the directory, so the
+  exclusion they recorded now stands on the backend alone. This audit deleted the `PARITY.md` row
+  that still named them and corrected the ADR 0003 sentence that said 1.5.0 "touches none" of the
+  ADR 0002 exclusions (it deleted one of them).
 
 ## The suites this baseline adds or remaps
 
@@ -70,13 +97,30 @@ baseline left alone. These are the rows this baseline adds or moves.
 
 | Upstream suite | Python translation |
 | --- | --- |
-| `harness-observers` | `test_harness_observers.py` |
-| `harness-hook-reads` | `test_harness_hook_reads.py` (the hook half of the upstream file is deferred; see **Cases completed under this baseline**) |
-| `harness-view-run` | `test_harness_view_run.py` (all 13 cases; #47 corrected this row, which named three more files whose cases belong to their own upstream suites and cite this one nowhere) |
-| `harness-nested-tools` | `test_harness_nested_tools.py` (the agent-event half went with `test_harness_events.py`, deleted by #46) |
-| `harness-idle-scopes` | `test_harness_idle_scopes.py` (all 14 `it()` cases — 24 tests with the two `it.each` tables — plus the incremental idle state they measure; #49) |
+| `conversation-transcript` | `test_conversation_transcript.py` (all 16 `it()` cases; see **Cases completed under this baseline**) |
+| `harness-after-run` | `test_harness_after_run.py` (all 29 `it()` cases as 30 tests: one case carries two runs; the module docstring names the split) |
 | `harness-context-range` | `test_harness_context_ranges.py` (the one case — a kept range whose scan ran off the line is not advanced — beside the `harness-context` kept-read cases it belongs with; #49) |
-| `session-observers` | `test_session_observers.py` |
+| `harness-continue` | `test_harness_continue.py` (12 of the 13 `it()` cases; the one excluded is telemetry-only, named in the module docstring, and the one narrower translation is named there too) |
+| `harness-deferred-progress` | `test_harness_deferred_progress.py` (all 11 `it()` cases, plus the three port-side cases; see **Cases completed under this baseline**) |
+| `harness-group-commit` | `test_harness_group_commit.py` (16 of the 17 `it()` cases; the record-cache case `:646` is excluded, named in the module docstring and under **Exclusions this baseline takes**) |
+| `harness-hook-reads` | `test_harness_hook_reads.py` (both `it()` cases; the hook case this audit translated is named under **Cases completed under this baseline**) |
+| `harness-idle-scopes` | `test_harness_idle_scopes.py` (all 14 `it()` cases — 24 tests with the two `it.each` tables — plus the incremental idle state they measure; #49) |
+| `harness-json` | the module itself, `harness/json.ts` → `harness/util.py`'s `assign_json`, proved where the port commits partials (see the `harness/partial-changes.ts` entry under **Remaining deviations**); the suite's one case is left untranslated, named under **Cases deliberately left untranslated** |
+| `harness-nested-tools` | `test_harness_nested_tools.py` (the agent-event half went with `test_harness_events.py`, deleted by #46) |
+| `harness-observers` | `test_harness_observers.py` (all fifteen upstream cases, named under **Remaining deviations**) |
+| `harness-read-only` | `test_harness_read_only.py` (all four `it()` cases) |
+| `harness-restart-failure` | `test_harness_restart_failure.py` (all 18 `it()` cases, plus one port-authored case named under **Remaining deviations**) |
+| `harness-run-failure` | `test_harness_run_failure.py` (all five `it()` cases) |
+| `harness-submit-in-commit` | `test_harness_submit_in_commit.py` (19 of the 23 `it()` cases; the four excluded are telemetry-only, each named in the module docstring) |
+| `harness-tool-hooks` | `test_harness_tool_hooks.py` (all 18 `it()` cases; see **Cases completed under this baseline**) |
+| `harness-turn-limit` | `test_harness_turn_limit.py` (all eleven `it()` cases) |
+| `harness-view-run` | `test_harness_view_run.py` (all 13 cases; #47 corrected this row, which named three more files whose cases belong to their own upstream suites and cite this one nowhere) |
+| `search` | `test_tool_search.py` (the `rankDocuments` cases one for one over the port's BM25 ranker, beside the six `tool-search` deferred-loading cases; the eight Unicode cases are left untranslated, named in the module docstring) |
+| `session-adoption` | `test_session_adoption.py` (all 13 `it()` cases, translated by this audit; its dispatch-attachment case pins the fix under **What this audit found and fixed**) |
+| `session-conversation-tails` | `test_session_conversation_tails.py` (all five `it()` cases, translated by this audit) |
+| `session-deferred-commits` | `tests/test_session_deferred_commits.py` (all 25 `it()` cases; see **Cases completed under this baseline**) |
+| `session-group-commit` | `test_session_group_commit.py` (30 of the 31 `it()` cases; the read-cache case `:635` is excluded on the ground named in the module docstring and under **Exclusions this baseline takes**, and the file's extra test functions are the parameterized value-rejection and order variants its docstring names) |
+| `session-observers` | `test_session_observers.py` (the two upstream cases left untranslated are named in the module docstring, each with where its guarantee lives) |
 | `session-states` | `test_session_observers.py`, `test_session_document_retention.py`, `test_session_checkpoints_migrations.py` (upstream 1.5.0 deletes the state getters this suite tested; where each of its guarantees is proved now is itemised under **Remaining deviations**) |
 
 ## Cases completed under this baseline
@@ -111,10 +155,13 @@ baseline left alone. These are the rows this baseline adds or moves.
   the Session line, where upstream leaves it to `readOnLine` in its own implementation
   (`src/harness/scheduler.ts:2828-2834`) and to `TaskRuntime.commit`'s docstring — a commit whose
   storage call is held has admitted its entry and stored nothing of it, the read is still pending
-  behind that commit, and it settles afterwards with that entry in the history it returns. The file's
-  other upstream case, "reads raw history and single entries from a hook" (`:17-48`), is deferred to
-  #36 and #48, which own `HookApi.entry()`/`entries()`: every assertion of it runs through a hook
-  `api` the port does not carry, and the module docstring names it.
+  behind that commit, and it settles afterwards with that entry in the history it returns.
+  The file's other upstream case, "reads raw history and single entries from a hook" (`:17-48`),
+  deferred to #36 and #48 while they owned the `entry()`/`entries()` seams, was translated by this
+  audit, `test_reads_raw_history_and_single_entries_from_a_hook`: the hook's `on_yield` asks the api
+  for the conversation's entries and one entry by its token, and the port's `entry()` takes the
+  entry's definition kind, so the "another kind" read goes through a `test.other` entry definition
+  registered beside the task's.
 
 - **#47, the deferred-commit mechanism and `session-deferred-commits`.** The Session now holds a
   deferred commit's changes in memory and stores them at the next trigger: a commit that reads or
@@ -166,16 +213,49 @@ baseline left alone. These are the rows this baseline adds or moves.
   in the file is port-side: the 18 are upstream's, and the siblings that already prove parts of the
   chain -- named in the module docstring, as this file's other entries do -- are not counted twice.
 
+- **The suites and cases this audit translated.** The re-baseline left two upstream suites of this
+  baseline with no translation, no deferral named, and no `PARITY.md` row: `session-adoption` and
+  `session-conversation-tails`. Both are now translated case for case, in the upstream order, with
+  the upstream line in each docstring:
+  - `tests/test_session_adoption.py` carries all 13 cases of `test/session-adoption.test.ts` over
+    the port's seams: the upstream `FaultyStorage` records `adopt` and its own resolution in
+    `order` over the port's controlled storage, `observe_stored_commits` is the port's
+    `followCommits`, and `observe_commits` is the host's. The two audiences and the dispatch rule
+    each case pins are the spec §9.1/§10.1 text: the receipt taken inside the commit, the adoption
+    once Storage resolved, the Session failing without discarding when Storage rejects after
+    adopting, the discard before adoption, the Session's own adoption error that never reaches
+    Storage, Storage resolving without adopting, the own observers at resolve and the host
+    listeners after, the host listeners registered when the dispatch runs and none for a commit
+    published without one, the own observer's throw failing the Session after the hosts got the
+    commit, a stored-but-rejected commit published before the failure, exactly what the host is
+    handed when held changes are stored, the held store published to the host once Storage
+    resolved, the JSONL commit published once the storage reclaimed its sidecar, and the held
+    store Storage rejects after adopting. Its second-half dispatch case pins the fix under
+    **What this audit found and fixed**.
+  - `tests/test_session_conversation_tails.py` carries all five cases of
+    `test/session-conversation-tails.test.ts`: read-once-then-follow, a new root known empty and a
+    fork known only once read or written, a cutoff answered from the newest marker only at or after
+    it, the bounded keep of newest entries (4096) and markers (256) by least-recent use, and the
+    markers kept frozen. The upstream class's `size`/`markers` bounds are what the case asserts
+    through, and this audit added them to `session/conversation_tails.py`, which lacked them.
+  - The clause `PARITY.md` row 5.6 owed a case for -- `on_wake` runs off the line -- is
+    `tests/test_harness_sleep.py::test_settles_a_commit_that_changes_the_wake_while_the_host_is_inside_on_wake`,
+    port-side and named as such in its docstring, because upstream's `harness-sleep` suite has no
+    case of its own for the clause and both sides' callbacks are synchronous.
+  - The observer halves of the two window cases of `test/harness-view.test.ts` (above, under
+    **Remaining deviations**) and the hook case of `test/harness-hook-reads.test.ts` (above).
+
 ## Cases deliberately left untranslated
 
-One place per suite, so an audit reads the reason with the suite it belongs to. A suite named here is
-not excused: it has an owner issue, and it leaves `PARITY.md` with a `planned` row that says so.
+One place per suite, so an audit reads the reason with the suite it belongs to. An entry here is
+named and reasoned, not inferred: every case is an upstream case, and the entry says what stands in
+its place in the port -- the seam that carries the guarantee, or the exclusion that removes the
+component it measured.
 
-The one suite recorded here -- `harness-tool-hooks`, with its reason and its owner
+The suite recorded before this audit -- `harness-tool-hooks`, with its reason and its owner
 #60 -- is translated in full by #60 in `tests/test_harness_tool_hooks.py` (see **Cases completed under
-this baseline**); with it, rows 8.4 Tool and 12 API footguns of `PARITY.md` move to `tested` in that
-commit. The entry below is an upstream case inside an already-translated suite, named and reasoned,
-not an untranslated suite.
+this baseline**); with it, rows 8.4 Tool and 12 API footguns of `PARITY.md` moved to `tested` in that
+commit. The entries below are the rest at this baseline, named case by case.
 
 - **`beforeProviderRequest` in the upstream generation suite — #59.** The 1.5.0 addition (zero
   occurrences in the 1.4.0 spec) is driven upstream by two cases in `test/harness-tools.test.ts` at
@@ -206,6 +286,54 @@ not an untranslated suite.
   `CompactionHooks` keys, with `hook()` refusing a name outside it for a built-in task
   (`test_hook_rejects_a_handler_name_outside_the_builtin_tasks_hooks`).
 
+- **`harness-json` — the one case of `test/harness-json.test.ts`.** The case
+  "does not merge a new `__proto__` member into `Object.prototype"` guards a JavaScript
+  prototype-pollution class: assigning a `__proto__` key that the target lacked used to be able to
+  merge into `Object.prototype` itself. Python dicts have no such merge: a new `"__proto__"` key is
+  an ordinary own key of the target and nothing of the shared type changes, so the bug the case
+  pins cannot be represented in this port's execution model, and the case is left untranslated
+  rather than translated into a test of Python semantics it does not have. The adjacent guarantee —
+  `__proto__`-like keys are taken as ordinary own keys, verbatim — is pinned in
+  `test_json.py::test_accepts_null_prototype_like_keys_verbatim`, and the behaviour the case exists
+  to protect, `assign_json` writing the partial, is asserted where the port commits partials
+  (`test_harness_view_run.py`, `test_harness_live_deltas.py`, `test_harness_deferred_progress.py`).
+
+- **`harness-partial-changes` — all seven cases of `test/harness-partial-changes.test.ts`.** The
+  suite tests `PartialChanges`, the upstream module that collects, from the response's events, what
+  grew in the partial since the last partial commit and commits exactly that. The port has no such
+  module by design: it commits the copied partial and lets the draft layer diff it
+  (the `harness/partial-changes.ts` entry under **Remaining deviations**), so the component the
+  suite measures does not exist here and none of its seven cases is translated: "commits tool-call
+  arguments equal to the final parse, at every piece size and commit rhythm", "handles a number
+  ending and a string starting in one piece, and escapes split across pieces", "appends growing
+  argument and text strings instead of reassigning them", "applies the changes of a failed commit in
+  the next one", "re-applies a failed commit's changes even when it would have added the call",
+  "falls back to the snapshot when the committed message lost a call whose changes were committed",
+  and "commits the final arguments after the call ends, and drops text appends when a block ends".
+  The observable guarantees those cases exist for — what a watch is handed, what Storage stores,
+  what a reopened host recovers — are asserted case for case by the three suites named in that
+  entry.
+
+- **`session-cached-storage` — all seven cases of `test/session-cached-storage.test.ts`.** The suite
+  measures the read-side record cache (`CachedStorage` in upstream's `session-support.ts`): a read
+  kept only when no commit overlapped it, the bounded keep of ended tasks, a batch applied at its
+  publication and not its receipt, the versions kept only for in-flight reads, the written record
+  itself kept frozen and un-copied. This port carries no read-side record cache — the ground
+  `PARITY.md` and the module docstrings name for the two excluded record-cache cases of
+  `harness-group-commit` (`:646`) and `session-group-commit` (`:635`) — so the component the suite
+  measures does not exist here and none of its seven cases is translated. The port's storage is
+  asserted instead on what it stores: the group-commit suites, the adoption suite's receipt cases,
+  and the storage conformance suite in `pi_durable.testing`.
+
+- **`harness-registry-reader` — all three cases of `test/harness-registry-reader.test.ts`**
+  (`:76`, `:100`, `:174`). The `registryReader` value adapts upstream's Chord v2 registry value;
+  the port's harness reads the `registry` option through the ported `RegistryReader` type, and the
+  value it wraps is the host's own. The three cases drive real Chord hosts — `host.registry()` over
+  a composed value, a task that runs once a contribution brings its missing definition, and a
+  follower of a contributed Harness failing when that Harness's Session closes — and no host to
+  attach to exists here. Excluded under ADR 0003's Chord boundary, the same one drawn for
+  `./storage/store`; the reason a reader of the matrix needs is on `PARITY.md`'s `excluded` row.
+
 ## Exclusions this baseline takes
 
 The 1.4.0 exclusions ([ADR 0002](./adr/0002-upstream-1-4-0-scope.md)) stay in force and stay listed in
@@ -231,6 +359,22 @@ the 1.4.0 record. On top of them:
   on `PARITY.md`'s `excluded` row, and
   `test_types.py::test_the_public_types_exclude_the_native_watch_call_by_name` pins it beside the
   three watch re-exports of that same upstream line the port does carry.
+
+- **`registryReader`.** The v1.5.0 value of `harness/registry-reader.ts`, excluded by name under the
+  same Chord boundary [ADR 0003](./adr/0003-upstream-1-5-0-scope.md) draws for `./storage/store`:
+  the value adapts upstream's Chord v2 registry value, and this port reads the harness's `registry`
+  option through the ported `RegistryReader` type instead. Its three upstream cases are named under
+  **Cases deliberately left untranslated**.
+- **`codemode-imports`.** The fifth Code Mode file upstream added at v1.5.0 beside the four the
+  v1.4.0 record excludes, under the same [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) exclusion.
+- **`store-storage` and `store-storage-commit`.** The suites of the attached-host storage subpath
+  ADR 0003 excludes: the component they drive is Chord's store, and this port's storage is the
+  `Storage` protocol with its bundled backends.
+- **`session-cached-storage` and `harness-partial-changes`.** The suites of components this port does
+  not carry: the read-side record cache (the ground named for the two excluded record-cache cases of
+  the group-commit suites) and the `PartialChanges` module (the `harness/partial-changes.ts` entry
+  under **Remaining deviations**). All seven cases of each are named under **Cases deliberately left
+  untranslated**, with what stands in their place in the port.
 
 - **The record-cache case of `harness-group-commit`.** `test/harness-group-commit.test.ts:646` — "reads
   no task record from Storage for more live and awaited tasks than the record cache's count" — is
@@ -322,20 +466,21 @@ These are deliberate and are also recorded under **Allowed deviations** in `PARI
   `test_harness_view.py::test_lets_a_long_lived_watch_drop_the_entries_that_left_its_window`
   asserts the same retention property from the watch's own value: the published window no longer
   holds the first entry and its `before` names it, which is what would otherwise pin the object.
-- **The observer half of two window cases has no owner.** Upstream `test/harness-view.test.ts`
+- **The observer half of two window cases is translated.** Upstream `test/harness-view.test.ts`
   proves one window per attached consumer with both `watchConversation` and `observeConversation`:
   the case "gives each observer its own window over one mount" attaches its narrow consumer as an
   observer, and "rejects window bounds that are not integers or put `max` below `min`" asserts one
   `observeConversation(id, recorder, context, { max: 0 })` rejection. `ConversationViews.attach`
-  already takes one window per attached consumer — watches are the consumers that exist today — so
-  `test_harness_view.py` translates both through `watch(context, window)` alone, and #44 (`Observers
-  attach on the line`) adds the observer assertions under the same names.
-  - **#55 corrects the last sentence.** #44 merged in `c5cfa8a` without those two assertions:
-    `tests/test_harness_observers.py` holds neither case, and the only window-bound and
-    own-window cases in the tree are the watch halves in `tests/test_harness_view.py:653` and
-    `tests/test_harness_view.py:676`. `ConversationViews.observe` does take a window
-    (`src/pi_durable/harness/view.py:169`), so nothing blocks translating them; no open ticket holds
-    them, and naming their owner is #52's.
+  already takes one window per attached consumer, and this audit translated the observer halves
+  under the same names in `test_harness_view.py`: `test_gives_each_consumer_its_own_window_over_one_mount`
+  now attaches its narrow consumer through `harness.observe_conversation` with a window beside the
+  watch's, sharing the mount's documents, and
+  `test_rejects_window_bounds_that_are_not_integers_or_put_max_below_min` asserts the
+  `observe_conversation` rejection beside the watch's.
+  - **#55 corrected the last sentence of the moved text.** #44 merged in `c5cfa8a` without those two
+    assertions, and no ticket after owned them; #52 (this audit) translated them, named above.
+    `ConversationViews.observe` takes a window (`src/pi_durable/harness/view.py:169`), so nothing
+    blocked the translation.
 - **#49 ends a cut-off task instead of parking it.** Upstream v1.5.0 has no parked task: a task cut
   off `settings.restart_limit` times in a row ends, each kind visibly (spec §5.4). What landed for it:
   `test_harness_blocked.py::test_faults_an_extension_task_cut_off_restart_limit_times_instead_of_running_it_again`
@@ -454,3 +599,81 @@ itself stale, each verified against the tree or the vendored upstream file:
 Every case name this file cites was checked to exist in the file that cites it, and `EXCLUDED_WATCH_CASES`
 and the port's `view_state` getter were checked to be gone. Nothing here is a claim this ticket could
 not read off the tree.
+
+## What this audit found and fixed
+
+The audit re-derived the record from the tree and found the record and the code each out of step in
+seven places. Each fix below is in this commit, and the case that pins one is named where there is
+one to name.
+
+- **A dispatch taken for an observer attached during its own publication.**
+  `Session._publish` ran the commit's own followers -- its watches, its document observers, and its
+  internal commit listeners -- before it checked whether the host was attached, so an `observe_commits`
+  observer attached by one of this commit's own followers (a hook, an `on_wake`, an observer callback
+  reacting to the commit) would have received the very commit it attached for: the check saw the
+  attachment the callback had just made. The spec §9.1 text is that the dispatch is taken only when
+  an observer is attached **at the publication**, and upstream takes the decision before the own
+  listeners run -- `session.ts`'s `#publish` asks `#commitListeners.size > 0` (line 1366) ahead of its
+  own-listeners loop (line 1376), and reads the set at delivery (line 1403). This audit read the set
+  before the own followers run in `src/pi_durable/session/session.py`'s `_publish` --
+  `host_attached = bool(self._commit_observers)` ahead of `_advance_followers`, the dispatch behind
+  it -- and the case that proves it is the translated upstream one, the "none for a commit published
+  without one" half of `test_calls_the_host_listeners_registered_when_its_dispatch_runs`
+  (`tests/test_session_adoption.py`, upstream `:153`): its own listener attaches the host observer
+  during the publication, and the commit must not reach it. This audit ran that half against the
+  pre-fix order and it fails there -- the observer receives the commit it attached for -- and passes
+  on the post-fix order. The port's host dispatch reads the set at delivery, as upstream's does,
+  so an observer a preceding advance detached takes nothing of the commit it was attached for.
+- **Stale upstream citations.** Four docstring lines in `tests/test_harness_run_failure.py` (`:34`,
+  `:63`, `:101`, `:145`) cited `scheduler.ts:38/:64/:100/:139` where the upstream v1.5.0 file holds
+  the cited clauses at `:34/:63/:101/:145`, and one line in `tests/test_harness_blocked.py` cited
+  `scheduler.ts:136` where the clause is at `:137`. The cited text is identical on both sides; the
+  lines were off by the shift the v1.5.0 file took over v1.4.0, and each was corrected to the line
+  the vendored file holds the clause at.
+- **Stale module claims.** Three module docstrings stated a deferral or a seam that the merged
+  tickets had already resolved: `tests/test_harness_continue.py` claimed its host-died case's crash
+  charge "cannot run as-is" when #38 had landed the crash charge on the port's `kill()` seam —
+  the case is now named as a narrower translation, with the crash charge's real seam
+  (`test_harness_restart_failure.py` over `kill()`); `tests/test_harness_view.py` claimed its two
+  observer-side cases stayed for #44 — #52 translated them (above); `tests/test_session_observers.py`
+  claimed its deferred-commit case waited on #47 — #47 landed, and the case is
+  `test_session_deferred_commits.py::test_show_every_held_commit_to_watches_and_the_sessions_own_observers_once`
+  beside `test_give_observe_commits_exactly_what_was_stored_and_nothing_for_a_held_commit`.
+- **A stale public-surface sentence.** The `src/pi_durable/__init__.py` module docstring still named
+  the agent event stream, which #46 deleted with `test_harness_events.py`; the sentence now names
+  the three watch and observer families it hands out.
+- **A port class that lacked the upstream class's bounds.** `ConversationTails` carried the
+  upstream `session-conversation-tails.ts` class's behaviour but not its `size` and `markers`
+  properties, which the translated cases assert through. Added in
+  `src/pi_durable/session/conversation_tails.py`, both reading the live state — the frozen-marker
+  case asserts `size` grows while `markers` is pinned, and a property that answered from a snapshot
+  would not prove the pin.
+- **The record-cache suites and the un-owned suites.** `session-cached-storage`,
+  `harness-partial-changes`, and `harness-registry-reader` reached this baseline with no
+  translation, no named deferral, and no `PARITY.md` row; `session-adoption` and
+  `session-conversation-tails` the same. The two are translated (above); the three are excluded and
+  their cases named, each with what stands in its place in the port (**Exclusions this baseline
+  takes**, **Cases deliberately left untranslated**).
+- **A baseline claim the tree no longer held.** ADR 0003 says 1.5.0 "touches none" of the ADR 0002
+  exclusions, and `PARITY.md` still carried the `test-workers/*` exclusion row; the v1.5.0 tree no
+  longer holds the `test-workers` directory, so 1.5.0 touched one of the excluded things — by
+  deleting it. The exclusion itself stands on the backend (ADR 0003 now says so); this audit
+  corrected the ADR sentence and deleted the `PARITY.md` row, and the deletion is recorded under
+  **What this baseline changes in the 1.4.0 record**.
+
+## Gates
+
+Run at this commit, after the fixes above:
+
+- `ruff check src tests` — clean.
+- `mypy` — clean: `Success: no issues found in 201 source files`, the project config on
+  `--python-version 3.14 --warn-unused-ignores`, so every `# type: ignore` in the tree is one
+  mypy fires on.
+- `PYTHONPATH=src pytest -q -o addopts=""` — **1748 passed, 2 skipped** on the interpreter this
+  audit ran on (3.15, the newest of the verified set): the 1728 the re-baseline closed with, plus the
+  20 cases this audit translated and added (13 adoption, 5 conversation-tails, the hook case of
+  `harness-hook-reads`, the `on_wake` case of `harness-sleep`). The two skips are the live-credential
+  cases the v1.4.0 record names (`test_provider_session_cache_e2e.py`, the live half of
+  `test_system_order_cache_e2e.py`), skipped by design.
+- The free-threaded legs, 3.14t and 3.15t, are **not installed in this environment**: the gate is
+  reported on the installed legs only, and no free-threaded pass is claimed by this sign-off.

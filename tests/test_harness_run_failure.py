@@ -37,7 +37,7 @@ async def live(harness: Any, conversation: Any) -> dict[str, Any]:
 
 
 async def test_records_a_model_error_with_its_text_and_a_later_run_clears_it() -> None:
-    """Upstream ``harness-run-failure.test.ts`` :34."""
+    """Upstream ``harness-run-failure.test.ts`` :38."""
 
     setup = chat_setup()
     setup.faux.set_responses(
@@ -66,7 +66,7 @@ async def test_records_a_model_error_with_its_text_and_a_later_run_clears_it() -
 
 
 async def test_records_a_missing_model_with_which_one() -> None:
-    """Upstream ``harness-run-failure.test.ts`` :63."""
+    """Upstream ``harness-run-failure.test.ts`` :64."""
 
     setup = chat_setup()
     opened = await open_chat(MemoryStorage(), setup)
@@ -109,7 +109,7 @@ async def test_records_an_abort() -> None:
 
 
 async def test_records_a_reset_that_cut_the_run_before_an_answer() -> None:
-    """Upstream ``harness-run-failure.test.ts`` :101."""
+    """Upstream ``harness-run-failure.test.ts`` :100."""
 
     setup = chat_setup()
     gate = deferred()
@@ -156,7 +156,7 @@ async def test_records_a_reset_that_cut_the_run_before_an_answer() -> None:
 
 
 async def test_keeps_the_failure_while_a_run_continues_the_queue_in_the_same_commit() -> None:
-    """Upstream ``harness-run-failure.test.ts`` :145."""
+    """Upstream ``harness-run-failure.test.ts`` :139."""
 
     for policy in ("continue", "keep"):
         setup = chat_setup()

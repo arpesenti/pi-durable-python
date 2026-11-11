@@ -3,9 +3,11 @@
 Covers the conversation view mount: hydration of the newest window and the built-in documents, one
 frame per touching commit, structural sharing, head markers kept in place, forks, retirement,
 overflow, one window per attached consumer, close, cancellation, listener isolation, and unrelated
-commits. Upstream's one ``observeConversation`` case is #44-dependent by name: the synchronous
-observer seam does not exist until #44 lands, so its watch-and-state halves are translated here and
-the observer half is recorded in the audit report.
+commits. Upstream's two cases that attach the narrow consumer as an observer --
+"gives each observer its own window over one mount" and the ``observeConversation`` rejection in
+"rejects window bounds that are not integers or put `max` below `min`" -- are translated in full on
+the observer seam #44 landed (``Harness.observe_conversation`` with a window); what the audit report
+names as not translated is what has no port seam at all, not these.
 """
 
 from __future__ import annotations
@@ -666,8 +668,11 @@ async def test_rejects_window_bounds_that_are_not_integers_or_put_max_below_min(
     with pytest.raises(ValueError, match="Window from"):
         await root.watch(context, {"from": float("nan")})
     # Upstream also refuses `harness.observeConversation(id, observer, context, { max: 0 })`:
-    # #44 owns that seam, and `resolve_window` runs on the same path both take.
+    # the same `resolve_window` runs on the same path both take, on the observer seam #44 landed.
     # `max` may equal `min`.
+    mirror = Mirror()
+    with pytest.raises(ValueError, match="Window max"):
+        await harness.observe_conversation(root.id, mirror, context, {"max": 0})
     watch = await root.watch(context, {"min": 3, "max": 3})
     await watch.stop()
     await harness.close(context)
@@ -677,26 +682,28 @@ async def test_gives_each_consumer_its_own_window_over_one_mount() -> None:
     """Translated from upstream "gives each observer its own window over one mount".
 
     Upstream attaches the narrow consumer with ``harness.observeConversation(id, observer, context,
-    window)``; that observer seam is #44's to add, so this translates the half that exists today:
-    two watches of one mount, each with its own window and the same document values.
+    window)`` and the wide one with a watch; #44 landed the observer seam, so both halves run:
+    the narrow window is the observer's own over the one mount, and the wide window the watch's own.
     """
 
     opened = await open_chat(MemoryStorage(), chat_setup())
     harness, root = opened["harness"], opened["root"]
     written = await notes(root, 6)
-    narrow = await record(root, {"min": 2, "max": 3})
+    mirror = Mirror()
+    observation = await harness.observe_conversation(root.id, mirror, context, {"min": 2, "max": 3})
     wide = await record(root, {"min": 5})
-    assert ids(narrow["initial"]["entries"]) == ids(written[4:])
+    assert ids(observation.value["entries"]) == ids(written[4:])
     assert ids(wide["initial"]["entries"]) == ids(written[1:])
     next_entry = (await notes(root, 1))[0]
     await drained()
-    assert len(narrow["frames"]) == 1
+    assert len(mirror.calls) == 1
     assert len(wide["frames"]) == 1
-    assert ids(narrow["frames"][0]["value"]["entries"]) == ids([*written[4:], next_entry])
+    assert ids(mirror.calls[0]["value"]["entries"]) == ids([*written[4:], next_entry])
     assert ids(wide["frames"][0]["value"]["entries"]) == ids([*written[1:], next_entry])
     # Two windows, one mount: the entries differ, the documents are the same object.
-    assert narrow["frames"][0]["value"]["docs"] is wide["frames"][0]["value"]["docs"]
-    await narrow["stop"]()
+    assert mirror.calls[0]["value"]["docs"] is wide["frames"][0]["value"]["docs"]
+    assert mirror.ends == []
+    observation.detach()
     await wide["stop"]()
     await harness.close(context)
 
