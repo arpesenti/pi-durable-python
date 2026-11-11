@@ -177,25 +177,47 @@ class WatchTarget(dict[str, Any]):
     """A file or directory to watch."""
 
 
-class WatchPaths(dict[str, Any]):
+# 1.5.0 tags what ``FileSystem.watch()`` reports by ``kind`` and renames the union to ``FileChange``
+# (upstream ``src/env/index.ts:127``); before it, the three shapes carried no tag and were told
+# apart by which keys they had, under the name ``WatchChange``. The port emits and reads only the
+# ``kind`` spelling: #37 deleted the untagged shapes, and leaves ``WatchChange`` free for what a
+# watch listener is handed. The ledger of what this release retags, and of the unions it leaves
+# alone, is at the top of ``types.py``.
+
+
+class FileChangePaths(dict[str, Any]):
+    kind: Literal["paths"]
     paths: list[str]
 
 
-class WatchOverflow(dict[str, Any]):
-    overflow: Literal[True]
+class FileChangeOverflow(dict[str, Any]):
+    kind: Literal["overflow"]
 
 
-class WatchError(dict[str, Any]):
+class FileChangeFailed(dict[str, Any]):
+    kind: Literal["failed"]
     error: FileError
 
 
-WatchChange: TypeAlias = WatchPaths | WatchOverflow | WatchError
+FileChange: TypeAlias = FileChangePaths | FileChangeOverflow | FileChangeFailed
+"""What changed below a watched path, tagged by ``kind`` (upstream ``src/env/index.ts:127``).
+
+The three shapes are told apart by that tag alone: 1.4.0 told them apart by which keys they carried,
+and #37 deleted those untagged shapes.
+"""
 
 
 class FileWatcher(Protocol):
     mode: Literal["native", "polling"]
 
-    async def close(self, context: Context) -> None: ...
+    async def stop(self, context: Context) -> None:
+        """Stop watching; no change call starts after this resolves. Idempotent.
+
+        1.5.0 stops a watcher rather than closing it (upstream ``src/env/index.ts:140``), so the
+        word ``close`` stays what readers and directory readers do to a handle.
+        """
+
+        ...
 
 
 class DirPage(dict[str, Any]):
@@ -333,7 +355,7 @@ class FileSystem(Protocol):
     async def watch(
         self,
         targets: Sequence[WatchTarget],
-        on_change: Callable[[WatchChange], None],
+        on_change: Callable[[FileChange], None],
         context: Context,
     ) -> Result[FileWatcher, FileError]: ...
 
@@ -370,6 +392,10 @@ __all__ = [
     "ExecutionEnv",
     "ExecutionError",
     "ExecutionErrorCode",
+    "FileChange",
+    "FileChangeFailed",
+    "FileChangeOverflow",
+    "FileChangePaths",
     "FileError",
     "FileErrorCode",
     "FileInfo",
@@ -393,10 +419,6 @@ __all__ = [
     "StreamDecoder",
     "TextLine",
     "TextLineReader",
-    "WatchChange",
-    "WatchError",
-    "WatchOverflow",
-    "WatchPaths",
     "WatchTarget",
     "err",
     "get_or_throw",

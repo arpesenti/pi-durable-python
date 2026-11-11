@@ -193,6 +193,16 @@ def test_living_docs_link_the_vendored_specification(path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "path", LIVING_DOCS, ids=[str(path.relative_to(ROOT)) for path in LIVING_DOCS]
+)
+def test_every_living_doc_links_the_current_vendored_specification(path: Path) -> None:
+    version = vendored_version()
+    assert f"spec-{version}.md" in read(path), (
+        f"{path.name} does not link spec-{version}.md, the specification this baseline vendors"
+    )
+
+
 def test_readme_links_the_usage_docs() -> None:
     text = read(README)
     assert USAGE.is_file(), "docs/usage.md is missing"

@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 import pytest
-from session_support import ControlledStorage, context, document_changes
+from session_support import ControlledStorage, context, document_changes, observe_commits
 from submission_support import (
     all_entries,
     fail,
@@ -20,6 +20,7 @@ from submission_support import (
 )
 
 from pi_durable import InboxDoc, LiveDoc, MemoryStorage, ResetEntry
+from pi_durable.types import CommitReceipt, Seq
 
 
 @pytest.fixture(autouse=True)
@@ -259,7 +260,7 @@ async def test_commits_inbox_changes_as_positional_operations_without_retained_v
             if change["record"]["kind"] == "pi.inbox" and change["ops"]:
                 ops.append(list(change["ops"]))
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     input = await root.submit({"type": "input", "content": "a"}, context)
     task_id = await wait_busy(harness, root)
     w1 = await root.submit({"type": "write", "entry": queued_note("w")}, context)
@@ -297,21 +298,29 @@ async def test_writes_the_inbox_as_a_complete_base_exactly_when_it_becomes_empty
     inbox_id: dict[str, int] = {}
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, call_context: Any) -> Any:
-            for write in writes:
-                if (
-                    write["type"] == "document.change"
-                    and inbox_id.get("id") == write["id"]
-                ):
-                    content = write["content"]
-                    written.append(
-                        (
+        async def commit_batches(
+            self, batches: Any, receive: CommitReceipt, call_context: Any
+        ) -> Any:
+            seen: dict[int, tuple[str, bool]] = {}
+            for index, writes in enumerate(batches):
+                for write in writes:
+                    if (
+                        write["type"] == "document.change"
+                        and inbox_id.get("id") == write["id"]
+                    ):
+                        content = write["content"]
+                        seen[index] = (
                             content["kind"],
                             content["kind"] == "base"
                             and len(content["value"]["items"]) == 0,
                         )
-                    )
-            return await super().commit(writes, call_context)
+
+            def recorded(index: int, seq: Seq) -> None:
+                receive(index, seq)
+                if index in seen:
+                    written.append(seen[index])
+
+            return await super().commit_batches(batches, recorded, call_context)
 
     opened = await open_submissions(RecordingStorage())
     harness, root = opened["harness"], opened["root"]
@@ -320,7 +329,7 @@ async def test_writes_the_inbox_as_a_complete_base_exactly_when_it_becomes_empty
             if change["record"]["kind"] == "pi.inbox":
                 inbox_id["id"] = change["record"]["id"]
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     input = await root.submit({"type": "input", "content": "a"}, context)
     await wait_busy(harness, root)
     await root.submit({"type": "input", "content": "f1"}, context)
@@ -413,7 +422,9 @@ async def test_a_display_only_write_queued_behind_a_reset_runs_no_boundary() -> 
         context,
     )
     assert (await note.status(context))["status"] == "queued"
-    assert await live(harness, root) == {}
+    # A display-only write starts no run: idleness is the run member alone. (The failed run's
+    # ``runFailure`` stays, as spec section 8.2 requires.)
+    assert "run" not in await live(harness, root)
     assert len(await all_entries(root)) == before
     items = await inbox(harness, root)
     assert [item["mode"] for item in items] == ["followUp", "write", "write"]
@@ -477,7 +488,9 @@ async def test_a_display_only_write_after_a_failed_run_neither_restarts_work_nor
         context,
     )
     assert (await note.status(context))["status"] == "done"
-    assert await live(harness, root) == {}
+    # It neither restarts the failed work nor places the inbox: no run was started. The failed run's
+    # ``runFailure`` stays, as spec section 8.2 requires.
+    assert "run" not in await live(harness, root)
     assert [(item["id"], item["mode"]) for item in await inbox(harness, root)] == [
         (follow_up.id, "followUp")
     ]

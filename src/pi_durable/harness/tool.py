@@ -28,14 +28,18 @@ from ..ids import ConversationId, EntryId, TaskId
 from ..json import JsonValue, copy_json
 from ..session.transaction import Transaction
 from ..tasks import define_task
-from ..types import EntryDraft, MessageRecord, TaskRecord
+from ..types import CommitOptions, EntryDraft, MessageRecord, TaskRecord
 from .agent import DEFAULT_PROGRESS_POLICY, tool_extension
 from .live import (
+    PROGRESS_COMMIT,
     TOOL_TASK_KIND,
     LiveDoc,
     clear_progress,
+    cut_off_count,
+    cut_off_too_often,
     finish_slot,
     remove_nested_slots,
+    salvageable,
     tool_slot,
 )
 from .output import (
@@ -74,6 +78,8 @@ class ModelToolTaskInput(TypedDict):
     kind: Literal["model"]
     assistant: EntryId
     callId: str
+    unoffered: NotRequired[Literal[True]]
+    """The request did not offer this tool: the call settles ``tool_unavailable`` unresolved."""
 
 
 class NestedToolTaskInput(TypedDict):
@@ -156,10 +162,15 @@ ToolTaskResult: TypeAlias = ModelToolTaskResult | NestedToolTaskResult
 
 
 class Ending(TypedDict, total=False):
-    """How a tool task ends; the result entry is appended either way."""
+    """How a tool task ends; the result entry is appended either way.
+
+    ``reason`` is the ``detail.reason`` of a failed outcome: ``restart_limit`` when the call was cut
+    off the limit, absent when the tool itself threw.
+    """
 
     status: Literal["completed", "aborted", "failed"]
     message: str
+    reason: str
 
 
 COMPLETED: Ending = {"status": "completed"}
@@ -170,23 +181,23 @@ Content = list[JsonValue]
 async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     input = cast(ToolTaskInput, task["input"])
     call = await read_call(runtime, input, context)
-    tool = await resolve_tool(runtime, input, call["name"], context)
+    if cut_off_too_often(task, runtime):
+        await end_cut_off(runtime, task, call, context)
+        return
+    # An unoffered call never resolves its name, so it cannot run even when the agent has the tool.
+    tool = None if _is_unoffered(input) else await resolve_tool(runtime, input, call["name"], context)
     if tool is None:
         message = f"Tool {call['name']} is not available"
-        await settle(
-            runtime, input, call, COMPLETED, lambda _slot: harness_error("tool_unavailable", message), context
-        )
+        await reject(runtime, input, call, None, harness_error("tool_unavailable", message), context)
         return
     prepared = prepare(tool, call.get("arguments") or {})
     if isinstance(prepared, str):
-        error = invalid(prepared)
-        await settle(runtime, input, call, COMPLETED, lambda _slot: error, context)
+        await reject(runtime, input, call, tool, invalid(prepared), context)
         return
     args = prepared
     checked = validate(tool, call, args)
     if isinstance(checked, str):
-        error = invalid(checked)
-        await settle(runtime, input, call, COMPLETED, lambda _slot: error, context)
+        await reject(runtime, input, call, tool, invalid(checked), context)
         return
     args = checked
     block: str | None = None
@@ -210,31 +221,31 @@ async def _call_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     await runtime.hooks.each("beforeTool", before_tool)
     if block is not None:
         blocked = f"Tool call blocked: {block}"
-        await settle(
-            runtime, input, call, COMPLETED, lambda _slot: harness_error("blocked", blocked), context
-        )
+        await reject(runtime, input, call, tool, harness_error("blocked", blocked), context)
         return
     validated = validate(tool, call, args)
     if isinstance(validated, str):
-        error = invalid(validated)
-        await settle(runtime, input, call, COMPLETED, lambda _slot: error, context)
+        await reject(runtime, input, call, tool, invalid(validated), context)
         return
     # Strict JSON: repair may set optional properties to None, which the slot and checkpoint cannot hold.
     final = cast(dict[str, JsonValue], copy_json(validated))
 
-    async def intent(tx: Transaction) -> dict[str, Any]:
-        live = await tx.doc(LiveDoc, runtime.conversation_id)
-        slot = tool_slot(live, runtime.task_id)
+    async def shown(tx: Transaction) -> None:
+        slot = tool_slot(await tx.doc(LiveDoc, runtime.conversation_id), runtime.task_id)
         if slot is not None:
             slot["status"] = "running"
-        # A nested slot shows the arguments the call runs with, which repair, hooks, and coercion may
-        # have changed. Compared with the input, which the slot got at admission: reading the draft
-        # would track every leaf.
-        changed = input["kind"] == "nested" and not json_equal(
-            cast(Any, input["call"]).get("arguments") or {}, final
-        )
-        if changed and slot is not None and "parentTaskId" in slot:
-            slot["arguments"] = final
+            # A nested slot shows the arguments the call runs with, which repair, hooks, and coercion may
+            # have changed. Assigned whole: an equal value records no change, and a rerun corrects what an
+            # earlier attempt showed.
+            if "parentTaskId" in slot:
+                slot["arguments"] = final
+
+    # The slot's status and arguments are presentation, stored like progress (`PROGRESS_COMMIT`); the
+    # intent is durable before the tool runs, so parallel calls of one round share no immediate write to
+    # `pi.live` (`tool.ts:181-196`).
+    await runtime.commit(shown, context, PROGRESS_COMMIT)
+
+    async def intent(_tx: Transaction) -> dict[str, Any]:
         return {
             "status": "running",
             "checkpoint": {
@@ -254,6 +265,10 @@ async def _execute_phase(task: TaskRecord, runtime: Any, context: Context) -> No
     args = checkpoint["arguments"]
     replay = checkpoint["replay"]
     call = await read_call(runtime, input, context)
+    # Also before an interruption result: its ``afterTool`` hooks may be what cut the task off.
+    if cut_off_too_often(task, runtime):
+        await end_cut_off(runtime, task, call, context)
+        return
     tool = await resolve_tool(runtime, input, call["name"], context)
     if replay == "safe" and tool is not None and tool.replay == "safe":
         # The rerun reports from scratch; clear what the interrupted attempt published.
@@ -268,15 +283,10 @@ async def _execute_phase(task: TaskRecord, runtime: Any, context: Context) -> No
         return
     message = f"Tool {call['name']} was interrupted and may have partially run"
     # ``failed`` records cancellation intent, so the call's owned conversations, left unsupervised,
-    # are aborted.
+    # are aborted. Not cut off too often (checked above), so the hooks run.
     ending: Ending = {"status": "failed", "message": message}
-    await settle(
-        runtime,
-        input,
-        call,
-        ending,
-        lambda slot: from_slot(slot, "interrupted", message),
-        context,
+    await settle_from_slot(
+        runtime, input, call, {"tool": tool}, ending, "interrupted", message, context
     )
 
 
@@ -284,8 +294,11 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     input = cast(ToolTaskInput, task["input"])
     call = await read_call(runtime, input, context)
     # Abandoned after a restart (``TaskOptions.abandonOnRestart``): say whether the call may have run.
+    # An unoffered call could not run in any case, and its result says so.
     checkpoint = task["state"].get("checkpoint") or {}
-    if task.get("abortReason") != "restart":
+    if _is_unoffered(input):
+        code, message = "tool_unavailable", f"Tool {call['name']} is not available"
+    elif task.get("abortReason") != "restart":
         code, message = "aborted", f"Tool {call['name']} was aborted"
     elif checkpoint.get("phase") == "execute":
         code = "interrupted"
@@ -294,21 +307,178 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
         code = "abandoned"
         message = f"Tool {call['name']} was not started: its caller ended with a restart"
     ending: Ending = {"status": "aborted"}
-    await settle(
-        runtime,
-        input,
-        call,
-        ending,
-        lambda slot: from_slot(slot, code, message),
-        context,
+    # The scheduler runs an abort handler only while its restarts are below the limit, and faults the
+    # task without a result when the last attempt is cut off. That attempt skips the hooks, which may
+    # be what cuts it off.
+    hooks = (
+        {"tool": await tool_for_limits(runtime, input, call["name"], context)}
+        if int(task.get("restarts") or 0) < runtime.settings.restart_limit - 1
+        else None
+    )
+    await settle_from_slot(runtime, input, call, hooks, ending, code, message, context)
+
+
+async def end_cut_off(
+    runtime: Any, task: TaskRecord, call: ToolHookCall, context: Context
+) -> None:
+    """End a call cut off ``settings.restart_limit`` times in a row with an error result (spec §5.4).
+
+    The result is built from the slot like an interrupted call's, so the model reads the durable
+    partial and a ``restart_limit`` diagnostic instead of a rerun, and the task fails with that detail
+    -- ``failed``, like an interruption, so the work the call owned is aborted.
+    """
+
+    input = cast(ToolTaskInput, task["input"])
+    message = f"Tool {call['name']} was interrupted {cut_off_count(task)}; it is not run again"
+    ending: Ending = {"status": "failed", "message": message, "reason": "restart_limit"}
+    # Past the limit the hooks may be what keeps cutting the task off (`salvageable`).
+    hooks = (
+        {"tool": await tool_for_limits(runtime, input, call["name"], context)}
+        if salvageable(task, runtime)
+        else None
+    )
+    await settle_from_slot(
+        runtime, input, call, hooks, ending, "restart_limit", message, context
     )
 
 
-def _migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
-    """Version 1 had only model-issued calls."""
+async def tool_for_limits(
+    runtime: Any, input: ToolTaskInput, name: str, context: Context
+) -> ToolRegistration | None:
+    """The called tool, to ask the hooks of a result the Harness writes at the limit.
 
+    An unoffered call could not have run its tool in any case, and a resolution that throws is no
+    reason to lose the result the call is owed: it settles without the tool.
+    """
+
+    if _is_unoffered(input):
+        return None
+    try:
+        return await resolve_tool(runtime, input, name, context)
+    except BaseException as error:
+        if not is_failure(error):
+            raise
+        return None
+
+
+async def settle_from_slot(
+    runtime: Any,
+    input: ToolTaskInput,
+    call: ToolHookCall,
+    hooks: Mapping[str, ToolRegistration | None] | None,
+    ending: Ending,
+    code: str,
+    message: str,
+    context: Context,
+) -> None:
+    """Settle a result the Harness decided, built from the slot the call published into.
+
+    The slot's durable partial output becomes the result's content, as an interrupted call's does. With
+    ``hooks`` the ``afterTool`` chain runs over the result, as over an executed call's; without them the
+    result stands, plus the diagnostic for whatever its running output dropped.
+    """
+
+    live = await runtime.snapshot(LiveDoc, runtime.conversation_id, context)
+    slot = tool_slot(live, runtime.task_id) if live is not None else None
+    result, truncation = from_slot(slot, code, message)
+    if hooks is not None:
+        settled = await after_harness_result(
+            runtime, input, call, hooks["tool"], result, truncation, context
+        )
+    elif truncation is None:
+        settled = result
+    else:
+        settled = cast(
+            ToolExecutionResult,
+            {**result, "diagnostics": [*(result.get("diagnostics") or []), truncation]},
+        )
+    await settle(runtime, input, call, ending, settled, context)
+
+
+async def reject(
+    runtime: Any,
+    input: ToolTaskInput,
+    call: ToolHookCall,
+    tool: ToolRegistration | None,
+    result: ToolExecutionResult,
+    context: Context,
+) -> None:
+    """Settle a result the Harness decided in the ``call`` phase, without running the tool: the tool
+    did not resolve, the arguments are invalid, or ``beforeTool`` blocked the call.
+
+    The ``afterTool`` chain applies as to an executed call's result (`#11043`), and the result takes
+    the tool's bounds, or the defaults when it never resolved.
+    """
+
+    settled = await after_harness_result(runtime, input, call, tool, result, None, context)
+    await settle(runtime, input, call, COMPLETED, settled, context)
+
+
+async def after_harness_result(
+    runtime: Any,
+    input: ToolTaskInput,
+    call: ToolHookCall,
+    tool: ToolRegistration | None,
+    result: ToolExecutionResult,
+    truncation: ToolDiagnostic | None,
+    context: Context,
+) -> ToolExecutionResult:
+    """The ``afterTool`` chain over a result the Harness wrote itself.
+
+    :func:`final_result` without the running output it assembles: the hooks may replace the result, the
+    diagnostic for the bytes the slot dropped applies only while they kept the output it was built
+    from, and the bounded output is what the model reads.
+    """
+
+    final = result
+
+    async def after_tool(handler: Callable[..., Any]) -> None:
+        nonlocal final
+        replaced = await call_hook(handler, call, final, runtime, context)
+        if isinstance(replaced, Mapping):
+            final = cast(ToolExecutionResult, dict(replaced))
+
+    await runtime.hooks.each("afterTool", after_tool)
+    harness: list[ToolDiagnostic] = []
+    if truncation is not None and final.get("output") is result.get("output"):
+        harness.append(truncation)
+    limits = output_limits(tool)
+    bounded = bound_content(list(final.get("output") or []), limits)
+    if bounded.dropped_bytes > 0:
+        harness.append(truncated(bounded, limits.retain))
+    rest: dict[str, Any] = {key: value for key, value in final.items() if key != "structuredOutput"}
+    if (
+        input["kind"] == "nested"
+        and final.get("isError") is not True
+        and (tool is None or tool.structured_output_schema is None)
+    ):
+        rest["structuredOutput"] = output_value(bounded.content)
+    return cast(
+        ToolExecutionResult,
+        {
+            **rest,
+            "output": bounded.content,
+            "diagnostics": [*(rest.get("diagnostics") or []), *harness],
+        },
+    )
+
+
+def _is_unoffered(input: ToolTaskInput) -> bool:
+    """Whether ``input`` is a model-issued call to a tool its request did not offer."""
+
+    return input["kind"] == "model" and input.get("unoffered") is True
+
+
+def _migrate(input: Any, checkpoint: Any, version: int) -> dict[str, Any]:
+    """Carry a stored ``pi.tool`` input forward to version 3.
+
+    Version 1 had only model-issued calls, without ``kind``; version 3 added ``unoffered``, which a
+    version 2 input never carries, so it stays as it is.
+    """
+
+    carried = {"kind": "model", **cast(Mapping[str, Any], input)} if version == 1 else input
     return {
-        "input": {"kind": "model", **cast(Mapping[str, Any], input)},
+        "input": carried,
         "checkpoint": checkpoint,
     }
 
@@ -316,7 +486,7 @@ def _migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
 ToolTask = define_task(
     {
         "name": TOOL_TASK_KIND,
-        "version": 2,
+        "version": 3,
         "initial": lambda _input: {"phase": "call"},
         "migrate": _migrate,
         "phases": {"call": _call_phase, "execute": _execute_phase},
@@ -484,7 +654,7 @@ async def run(
     pending = await progress.stop()
     try:
         settled = await final_result(runtime, input, call, tool, result, reported, context)
-        await settle(runtime, input, call, ending, lambda _slot: settled, context, duration_ms)
+        await settle(runtime, input, call, ending, settled, context, duration_ms)
     except BaseException as error:
         for waiter in pending:
             _reject(waiter, error)
@@ -494,16 +664,21 @@ async def run(
             waiter.set_result(None)
 
 
-def output_limits(tool: ToolRegistration) -> OutputLimits:
-    """A tool's output limits, over the defaults 50 KiB, 2,000 lines, and head retention."""
+def output_limits(tool: ToolRegistration | None) -> OutputLimits:
+    """A tool's output limits, over the defaults 50 KiB, 2,000 lines, and head retention.
 
-    raw = dict(tool.output_limits or {})
+    A call whose tool never resolved, or whose hooks the cutoff skipped, has no registration to read
+    them from, and gets the defaults.
+    """
+
+    raw = dict(tool.output_limits or {}) if tool is not None else {}
     max_bytes = raw.get("max_bytes", raw.get("maxBytes"))
     max_lines = raw.get("max_lines", raw.get("maxLines"))
     retain = raw.get("retain")
     retain = "head" if retain is None else retain
     if retain not in ("head", "tail"):
-        raise TypeError(f"Tool {tool.name} output_limits.retain must be 'head' or 'tail'")
+        name = tool.name if tool is not None else ""
+        raise TypeError(f"Tool {name} output_limits.retain must be 'head' or 'tail'")
     return OutputLimits(
         max_bytes=DEFAULT_MAX_BYTES if max_bytes is None else int(max_bytes),
         max_lines=DEFAULT_MAX_LINES if max_lines is None else int(max_lines),
@@ -603,7 +778,9 @@ class ToolExecutionApiImpl:
 
         return wait()
 
-    async def commit(self, change: Callable[..., Any], context: Context) -> Any:
+    async def commit(
+        self, change: Callable[..., Any], context: Context, options: CommitOptions | None = None
+    ) -> Any:
         box: dict[str, Any] = {}
 
         async def apply(tx: Transaction) -> None:
@@ -612,7 +789,7 @@ class ToolExecutionApiImpl:
                 result = await cast(Awaitable[Any], result)
             box["value"] = result
 
-        await self._runtime.commit(apply, context)
+        await self._runtime.commit(apply, context, options)
         return box.get("value")
 
     async def memo(self, name: str, *args: Any) -> JsonValue | None:
@@ -794,7 +971,9 @@ def publish_progress(
                         for diagnostic in added:
                             slot["diagnostics"].append(diagnostic)
 
-            await runtime.commit(flush, context)
+            # Running output is presentation: deferred, so watches see it at once and Storage gets it with
+            # the next commit that reads pi.live, or at the deadline (`tool.ts:640-655`).
+            await runtime.commit(flush, context, PROGRESS_COMMIT)
             written["text"] = snapshot.text
             written["details"] = details
             written["diagnostics"] = diagnostics
@@ -902,7 +1081,7 @@ async def final_result(
             except BaseException:
                 # Only names the extension: a failed resolution leaves the report without the name.
                 extension = None
-            runtime.report(ValueError(broken), {"type": "extension", **optional_extension(extension)})
+            runtime.report(ValueError(broken), {"kind": "extension", **optional_extension(extension)})
     # Programs get the tool's own value: without a schema, its output. The model reads only ``output``,
     # so model-issued calls skip both.
     if input["kind"] == "nested" and tool.structured_output_schema is None:
@@ -932,7 +1111,7 @@ async def settle(
     input: ToolTaskInput,
     call: ToolHookCall,
     ending: Ending,
-    build: Callable[[Any], ToolExecutionResult],
+    result: ToolExecutionResult,
     context: Context,
     duration_ms: int | None = None,
 ) -> None:
@@ -941,7 +1120,7 @@ async def settle(
     A model-issued call appends its result entry; a nested call writes its result to its caller's
     ``NestedCallDoc``, records its usage, and ends with a small receipt. Nested calls this task left
     running are aborted first, so they report into their slots before the slots below it leave
-    ``pi.live``. ``build`` receives the slot so interruption and abort report the durable partial.
+    ``pi.live``.
     """
 
     # Every live nested call the task owns, also those an earlier attempt made and this one never
@@ -963,7 +1142,6 @@ async def settle(
         conversation_id = runtime.conversation_id
         live = await tx.doc(LiveDoc, conversation_id)
         slot = tool_slot(live, runtime.task_id)
-        result = build(slot)
         settled: ToolTaskResult
         if input["kind"] == "nested":
             nested = nested_result(runtime.task_id, result, duration_ms)
@@ -1009,7 +1187,9 @@ async def settle(
         if ending.get("status") == "aborted":
             return {"status": "terminal", "outcome": {"status": "aborted", "result": settled}}
         if ending.get("status") == "failed":
-            error = {"message": ending.get("message", "")}
+            error: dict[str, Any] = {"message": ending.get("message", "")}
+            if ending.get("reason") is not None:
+                error["detail"] = {"reason": ending["reason"]}
             return {
                 "status": "terminal",
                 "outcome": {"status": "failed", "error": error, "result": settled},
@@ -1259,23 +1439,19 @@ def render_diagnostics(diagnostics: Sequence[ToolDiagnostic]) -> str:
     return f"<harness>\n{lines}\n</harness>"
 
 
-def from_slot(slot: Any, code: str, message: str) -> ToolExecutionResult:
-    """An error result from the slot's durable partial output, details, and diagnostics."""
+def from_slot(
+    slot: Any, code: str, message: str
+) -> tuple[ToolExecutionResult, ToolDiagnostic | None]:
+    """An error result from the slot's durable partial output, details, and diagnostics.
+
+    The second value is the diagnostic for the bytes the running output dropped: the ``afterTool``
+    chain may replace the output the result was built from, and then that diagnostic no longer applies.
+    """
 
     slot_diagnostics = (slot.get("diagnostics") if slot is not None else None) or ()
     diagnostics = [
         cast(ToolDiagnostic, copy_json(_plain(item))) for item in slot_diagnostics
     ]
-    dropped_bytes = int((slot.get("droppedBytes") if slot is not None else 0) or 0)
-    if dropped_bytes > 0:
-        diagnostics.append(
-            truncated(
-                {
-                    "dropped_bytes": dropped_bytes,
-                    "dropped_lines": int((slot.get("droppedLines") if slot is not None else 0) or 0),
-                }
-            )
-        )
     diagnostics.append(tool_diagnostic(code, message))
     output = slot.get("output") if slot is not None else None
     result: ToolExecutionResult = {
@@ -1285,7 +1461,15 @@ def from_slot(slot: Any, code: str, message: str) -> ToolExecutionResult:
     }
     if slot is not None and "details" in slot:
         result["details"] = copy_json(_plain(slot.get("details")))
-    return result
+    dropped_bytes = int((slot.get("droppedBytes") if slot is not None else 0) or 0)
+    if dropped_bytes == 0:
+        return result, None
+    return result, truncated(
+        {
+            "dropped_bytes": dropped_bytes,
+            "dropped_lines": int((slot.get("droppedLines") if slot is not None else 0) or 0),
+        }
+    )
 
 
 def _plain(value: Any) -> Any:

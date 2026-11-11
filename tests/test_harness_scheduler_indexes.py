@@ -133,21 +133,22 @@ async def test_takes_a_cascades_reason_from_the_nearest_cancelling_owner() -> No
 
     # Record every mark of the leaf, in commit order.
     reasons: list[Any] = []
-    commit = storage.commit
+    commit_batches = storage.commit_batches
 
-    async def recording_commit(writes: Any, commit_context: Any) -> Any:
-        for write in writes:
-            value = write.get("value")
-            if (
-                write["type"] == "task"
-                and value is not None
-                and value["id"] == ids["leaf"]
-                and value.get("abortRequested")
-            ):
-                reasons.append(value.get("abortReason"))
-        return await commit(writes, commit_context)
+    async def recording_commit(batches: Any, receive: Any, commit_context: Any) -> Any:
+        for writes in batches:
+            for write in writes:
+                value = write.get("value")
+                if (
+                    write["type"] == "task"
+                    and value is not None
+                    and value["id"] == ids["leaf"]
+                    and value.get("abortRequested")
+                ):
+                    reasons.append(value.get("abortReason"))
+        return await commit_batches(batches, receive, commit_context)
 
-    storage.commit = recording_commit  # type: ignore[method-assign, assignment]
+    storage.commit_batches = recording_commit  # type: ignore[method-assign]
     opened = await open_tasks(storage.reopen(), [Hold])
     opened["harness"].resume()
     for id in (ids["leaf"], ids["middle"], ids["top"]):
@@ -161,21 +162,22 @@ async def test_finalizes_a_chain_of_held_owners_in_the_commit_that_frees_the_las
     # The commit, by count, that wrote each terminal record.
     ended_in: dict[TaskId, int] = {}
     commits = [0]
-    commit = storage.commit
+    commit_batches = storage.commit_batches
 
-    async def recording_commit(writes: Any, commit_context: Any) -> Any:
+    async def recording_commit(batches: Any, receive: Any, commit_context: Any) -> Any:
         commits[0] += 1
-        for write in writes:
-            value = write.get("value")
-            if (
-                write["type"] == "task"
-                and value is not None
-                and value["state"]["status"] == "terminal"
-            ):
-                ended_in[value["id"]] = commits[0]
-        return await commit(writes, commit_context)
+        for writes in batches:
+            for write in writes:
+                value = write.get("value")
+                if (
+                    write["type"] == "task"
+                    and value is not None
+                    and value["state"]["status"] == "terminal"
+                ):
+                    ended_in[value["id"]] = commits[0]
+        return await commit_batches(batches, receive, commit_context)
 
-    storage.commit = recording_commit  # type: ignore[method-assign, assignment]
+    storage.commit_batches = recording_commit  # type: ignore[method-assign]
     opened = await open_tasks(storage, [Hold])
     harness = opened["harness"]
     root = await harness.root(context)

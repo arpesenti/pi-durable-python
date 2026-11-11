@@ -11,12 +11,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal, cast
 
 from ..context import Context
-from ..errors import ConversationBusy
-from ..ids import ConversationId, SubmissionId
+from ..errors import ConversationBusy, ConversationIdle, ReadAfterWrite
+from ..ids import ConversationId, EntryId, SubmissionId
 from ..json import JsonValue, copy_json
-from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
-from ..types import EntryDraft, SubmissionCreate, SubmissionRecord
+from ..types import EntryDraft, Storage, SubmissionCreate, SubmissionRecord
 from .inbox import (
     InboxDoc,
     QueueModes,
@@ -35,7 +34,8 @@ from .util import Waiters, closed_error, resolved
 
 AbortResult = Literal["aborted", "already_placed", "settled"]
 
-StartRun = Callable[[Transaction, ConversationId, DocumentDraft, list[SubmissionId]], Awaitable[None]]
+StartRun = Callable[..., Awaitable[None]]
+"""``start_run(tx, conversation_id, live, inputs, first)``: create the run a boundary starts."""
 
 
 def _type(draft: Mapping[str, Any]) -> Any:
@@ -55,6 +55,10 @@ def _when_busy(draft: Mapping[str, Any]) -> str | None:
     return draft.get("when_busy", draft.get("whenBusy"))
 
 
+def _when_idle(draft: Mapping[str, Any]) -> str | None:
+    return draft.get("when_idle", draft.get("whenIdle"))
+
+
 def is_settled(record: SubmissionRecord) -> bool:
     """Whether a submission reached ``done`` or ``unanswered``."""
 
@@ -67,9 +71,16 @@ def check_input_entry(entry: InputEntry) -> None:
     kind = entry.get("kind")
     if not isinstance(kind, str) or not kind or kind.startswith("pi."):
         raise TypeError(
-            "An input entry's kind must be a non-empty string not starting with \"pi.\", "
-            f"got {kind!r}"
+            f'An input entry\'s kind must be a non-empty string not starting with "pi.", got {kind!r}'
         )
+
+
+def _failure_first(failure: Mapping[str, Any] | None, first: EntryId | None) -> EntryId | None:
+    """The first entry a continue's run begins at: the failed run's, else what the boundary placed."""
+
+    if failure is not None and failure.get("first") is not None:
+        return cast(EntryId, failure["first"])
+    return first
 
 
 def _clean_entry(entry: Mapping[str, Any]) -> dict[str, JsonValue]:
@@ -96,7 +107,7 @@ class Submissions:
         self._start_run = start_run
         self._waiters: Waiters[SubmissionId, SettledSubmissionRecord] = Waiters()
         self._closed = False
-        session.observe_commits(self._observe)
+        session.observe_stored_commits(self._observe)
         session.subscribe_close(self._close)
 
     async def submit(
@@ -118,10 +129,32 @@ class Submissions:
         id = await self._session.commit_with(admit, context)
         return SubmissionHandle(cast(SubmissionId, id), self)
 
-    async def _record(self, id: SubmissionId, context: Context) -> SubmissionRecord | None:
-        return await self._session.read_on_line(
-            lambda: self._session.storage.submission(id, context)
+    async def admit(self, tx: Transaction, conversation_id: ConversationId, draft: Any) -> SubmissionId:
+        """Admit a submission inside the caller's commit ``tx``, with the rules of ``submit()``.
+
+        The admission is stored or lost with that commit. It must come before the commit's first
+        table write, another admission's included.
+        """
+
+        if not self._session.owns_transaction(tx):
+            raise ValueError("The transaction belongs to another Session")
+        # Enforced on every path: admission reads tables only on some paths (request IDs, an idle
+        # boundary, a steer's trace).
+        if tx.has_table_write:
+            raise ReadAfterWrite("submit(tx, draft)")
+        # Inputs and continues start runs, so the admission asks for the progress one needs.
+        self._resume()
+        return await admit_submission(
+            tx,
+            conversation_id,
+            cast(Mapping[str, Any], draft),
+            self._now(),
+            self._queue_modes(),
+            self._start_run,
         )
+
+    async def _record(self, id: SubmissionId, context: Context) -> SubmissionRecord | None:
+        return await self._session.read_on_line(lambda line: line.submission(id, context))
 
     async def get(self, id: SubmissionId, context: Context) -> Submission | None:
         record = await self._record(id, context)
@@ -136,8 +169,8 @@ class Submissions:
     async def wait(self, id: SubmissionId, context: Context) -> SettledSubmissionRecord:
         self._resume()
 
-        async def find() -> dict[str, Any]:
-            record = await self._session.storage.submission(id, context)
+        async def find(line: Storage) -> dict[str, Any]:
+            record = await line.submission(id, context)
             if record is None:
                 raise ValueError(f"Submission {id} does not exist")
             if is_settled(record):
@@ -212,8 +245,10 @@ async def admit_submission(
     """Admit one submission inside a commit (spec section 6)."""
 
     kind = _type(draft)
-    if kind not in ("input", "write"):
-        raise TypeError(f"Submission draft type must be 'input' or 'write', got {kind!r}")
+    if kind not in ("input", "write", "continue"):
+        raise TypeError(
+            f"Submission draft type must be 'input', 'write', or 'continue', got {kind!r}"
+        )
     entry = draft.get("entry")
     if kind == "input" and entry is not None:
         if not isinstance(entry, Mapping):
@@ -244,6 +279,38 @@ async def admit_submission(
     when_busy = _when_busy(draft)
     if busy and kind == "input" and when_busy == "reject":
         raise ConversationBusy(conversation_id)
+    if not busy and kind == "input" and _when_idle(draft) == "reject":
+        raise ConversationIdle(conversation_id)
+    if kind == "continue":
+        # Never queued: whether a run can continue depends on how the current one ends, so this is
+        # refused before any write.
+        if busy:
+            raise ConversationBusy(conversation_id)
+        opened = await prepare_boundary(tx, conversation_id, queue_modes)
+        record = await tx.create_submission(
+            cast(
+                SubmissionCreate,
+                {
+                    "conversationId": conversation_id,
+                    **request,
+                    "type": "continue",
+                    "status": "placed",
+                },
+            )
+        )
+        id = record["id"]
+        # Items an earlier failed run left queued (`afterFailedRun: "keep"`) are placed first and join
+        # the run, so the context it starts holds everything the conversation had left to say.
+        placed = await apply_boundary(tx, opened, "final", now)
+        # Its history starts with the failed run's, so ``afterRun`` hooks see what that run did.
+        await start_run(
+            tx,
+            conversation_id,
+            live,
+            [*placed.users, id],
+            _failure_first(live.get("runFailure"), placed.first),
+        )
+        return id
 
     boundary = None if busy else await prepare_boundary(tx, conversation_id, queue_modes)
     if boundary is None or len(boundary.inbox["items"]) > 0:
@@ -278,7 +345,7 @@ async def admit_submission(
             return id
         placed = await apply_boundary(tx, boundary, "final", now)
         if placed.users:
-            await start_run(tx, conversation_id, live, placed.users)
+            await start_run(tx, conversation_id, live, placed.users, placed.first)
         return id
 
     entry = cast(Mapping[str, Any], entry) if entry is not None else None
@@ -319,7 +386,7 @@ async def admit_submission(
             },
         )
     )
-    await start_run(tx, conversation_id, live, [record["id"]])
+    await start_run(tx, conversation_id, live, [record["id"]], placed_entry["id"])
     return record["id"]
 
 

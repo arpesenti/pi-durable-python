@@ -28,6 +28,8 @@ from ...ids import (
 )
 from ...json import JsonObject
 from ...types import (
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
@@ -83,6 +85,59 @@ class _AddressParts:
     owner_id: int
     family: int
     key_value: str
+
+
+@dataclass(slots=True)
+class _CheckCalls:
+    """Whether a database call of one batch's checks failed: then the failure is an unknown outcome."""
+
+    failed: bool = False
+
+
+class _CheckedExecutor:
+    """A transaction handle that records that a database call of a batch's checks failed.
+
+    The checks read through this handle, so a batch Durable's own rules refuse is told apart from a
+    driver or I/O failure of a check, which rejects the whole call instead of ending the group.
+    """
+
+    __slots__ = ("_executor", "_calls")
+
+    def __init__(self, executor: SqliteExecutor, calls: _CheckCalls) -> None:
+        self._executor = executor
+        self._calls = calls
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._watch(lambda: self._executor.exec(sql))
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._watch(lambda: self._executor.run(sql, *params))
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._watch(lambda: self._executor.run_counted(sql, *params))
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._watch(lambda: self._executor.get(sql, *params))
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._watch(lambda: self._executor.all(sql, *params))
+
+    def _watch(self, start: Callable[[], Awaitable[T]]) -> Awaitable[T]:
+        """Start the call at once, so the order the driver sees is the order the checks called."""
+
+        try:
+            pending = start()
+        except BaseException:
+            self._calls.failed = True
+            raise
+        return self._settled(pending)
+
+    async def _settled(self, call: Awaitable[T]) -> T:
+        try:
+            return await call
+        except BaseException:
+            self._calls.failed = True
+            raise
 
 
 @dataclass(slots=True)
@@ -195,6 +250,9 @@ def _write_id(write: StorageWrite) -> int | None:
 class SqliteStorage:
     """Portable SQLite implementation of the storage contract."""
 
+    # No ``publishing`` member at all (see ``PublishingStorage``): one SQL transaction is one commit
+    # and nothing is batched around it, so the Session publishes directly (ADR 0003).
+
     def __init__(
         self,
         database: SqliteDatabase,
@@ -236,34 +294,87 @@ class SqliteStorage:
 
     # ── Commits ─────────────────────────────────────────────────────────────
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        """Commit ``batches`` in one SQL transaction, each with its own sequence.
+
+        No savepoints, which Durable Objects do not allow: every batch is checked before it writes
+        anything, so the first batch refused leaves the ones before it stored and writes nothing of
+        its own. A database call that fails during a check is not a refusal -- it rejects the call
+        and the transaction rolls the stored prefix back with it.
+        """
+
         self._assert_open()
-        document_actions = self._prepare_document_actions(writes)
-        candidate_next_id = self._candidate_next_id(writes)
-        metadata_table = self._schema.tables["durableMetadata"]
+        seqs: list[Seq] = []
+        refused: list[BaseException] = []
+        candidate_next_id = self._next_id
+        calls = _CheckCalls()
 
-        async def run_transaction(transaction: SqliteExecutor) -> Seq:
-            metadata = await transaction.get(
-                f"SELECT next_id, next_seq FROM {metadata_table} WHERE singleton = 1"
-            )
-            if metadata is None:
-                raise RuntimeError("Durable SQLite metadata is missing")
-            committed_seq = seq_from_number(metadata["next_seq"])
-            await self._check_global_ids(transaction, writes)
-            await self._check_document_actions(transaction, document_actions)
-            for write in writes:
-                await self._apply_table_write(transaction, write, committed_seq)
-            await self._apply_document_actions(transaction, document_actions, committed_seq)
-            await transaction.run(
-                f"UPDATE {metadata_table} SET next_id = ?, next_seq = ? WHERE singleton = 1",
-                str(max(int(metadata["next_id"]), candidate_next_id)),
-                committed_seq + 1,
-            )
-            return committed_seq
+        async def run_transaction(transaction: SqliteExecutor) -> None:
+            nonlocal candidate_next_id
+            metadata = await self._read_metadata(transaction)
+            next_seq = int(metadata["next_seq"])
+            checked = _CheckedExecutor(transaction, calls)
+            for writes in batches:
+                calls.failed = False
+                try:
+                    # A copy resolves against what the transaction already holds, and Durable's own
+                    # rules must pass before the batch writes anything.
+                    document_actions = await self._checked_batch(checked, writes)
+                except Exception as error:
+                    if calls.failed:
+                        raise
+                    refused.append(error)
+                    break
+                seq = seq_from_number(next_seq)
+                next_seq += 1
+                await self._apply_batch(transaction, writes, document_actions, seq)
+                seqs.append(seq)
+                candidate_next_id = max(candidate_next_id, self._candidate_next_id(writes))
+            if seqs:
+                await self._write_metadata(
+                    transaction, max(int(metadata["next_id"]), candidate_next_id), next_seq
+                )
 
-        seq = await self._db.transaction(run_transaction)
+        await self._db.transaction(run_transaction)
         self._next_id = max(self._next_id, candidate_next_id)
-        return seq
+        # ``COMMIT`` returned: the stored batches are durable.
+        for index, seq in enumerate(seqs):
+            receive(index, seq)
+        if refused:
+            return {"stored": len(seqs), "refused": refused[0]}
+        return {"stored": len(seqs)}
+
+    async def _read_metadata(self, executor: SqliteExecutor) -> dict[str, Any]:
+        metadata = await executor.get(
+            f"SELECT next_id, next_seq FROM {self._schema.tables['durableMetadata']} "
+            "WHERE singleton = 1"
+        )
+        if metadata is None:
+            raise RuntimeError("Durable SQLite metadata is missing")
+        return metadata
+
+    async def _write_metadata(
+        self, executor: SqliteExecutor, next_id: int, next_seq: int
+    ) -> None:
+        """Record the allocation the call is storing; the row count is the only witness it happened.
+
+        A commit whose ``next_seq`` write changed no row would store records under a sequence the
+        database hands out again, so the counted run's answer is checked rather than ignored.
+        """
+
+        changed = await executor.run_counted(
+            f"UPDATE {self._schema.tables['durableMetadata']} SET next_id = ?, next_seq = ? "
+            "WHERE singleton = 1",
+            str(next_id),
+            next_seq,
+        )
+        if changed != 1:
+            raise RuntimeError("Durable SQLite metadata row did not change")
 
     async def mint_id(self) -> int:
         self._assert_open()
@@ -788,6 +899,37 @@ class SqliteStorage:
         }
 
     # ── Commit validation and application ───────────────────────────────────
+
+    async def _checked_batch(
+        self, executor: SqliteExecutor, writes: Sequence[StorageWrite]
+    ) -> dict[DocumentId, _DocumentAction]:
+        """Durable's own checks of one batch, before it writes anything."""
+
+        document_actions = self._prepare_document_actions(writes)
+        await self._check_batch(executor, writes, document_actions)
+        return document_actions
+
+    async def _check_batch(
+        self,
+        executor: SqliteExecutor,
+        writes: Sequence[StorageWrite],
+        document_actions: dict[DocumentId, _DocumentAction],
+    ) -> None:
+        """Durable's own checks of one batch, before it writes anything."""
+
+        await self._check_global_ids(executor, writes)
+        await self._check_document_actions(executor, document_actions)
+
+    async def _apply_batch(
+        self,
+        executor: SqliteExecutor,
+        writes: Sequence[StorageWrite],
+        document_actions: dict[DocumentId, _DocumentAction],
+        seq: Seq,
+    ) -> None:
+        for write in writes:
+            await self._apply_table_write(executor, write, seq)
+        await self._apply_document_actions(executor, document_actions, seq)
 
     def _candidate_next_id(self, writes: Sequence[StorageWrite]) -> int:
         next_id = self._next_id

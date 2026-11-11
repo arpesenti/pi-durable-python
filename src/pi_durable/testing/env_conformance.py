@@ -18,12 +18,12 @@ from ..context import (
 )
 from ..env import (
     ExecutionEnv,
+    FileChange,
     FileInfo,
     ListFilesOptions,
     Result,
     ShellExecOptions,
     ShellOutputInfo,
-    WatchChange,
     WatchTarget,
     get_or_throw,
 )
@@ -81,10 +81,13 @@ async def _listed(
     return [f"{letters[entry['kind']]} {entry['path']}" for entry in listing["entries"]], listing["truncated"]
 
 
-def _covers(change: WatchChange, path: str) -> bool:
-    if "overflow" in change:
+def _covers(change: FileChange, path: str) -> bool:
+    """Whether one reported change covers ``path`` — read through its ``kind`` tag (upstream
+    ``src/env/index.ts:127``), so a change the backend reported untagged fails the case."""
+
+    if change["kind"] == "overflow":
         return True
-    if "paths" not in change:
+    if change["kind"] != "paths":
         return False
     return any(
         path == reported or path.startswith(reported + "/") or path.startswith(reported + "\\")
@@ -97,14 +100,14 @@ async def _watching(
     targets: Sequence[WatchTarget],
     run: Callable[
         [
-            list[WatchChange],
+            list[FileChange],
             Callable[[str, Callable[[], Awaitable[None]]], Awaitable[None]],
             Callable[[str], Awaitable[str]],
         ],
         Awaitable[None],
     ],
 ) -> None:
-    changes: list[WatchChange] = []
+    changes: list[FileChange] = []
     watcher = get_or_throw(await env.watch(targets, changes.append, context))
 
     async def absolute(path: str) -> str:
@@ -123,7 +126,7 @@ async def _watching(
     try:
         await run(changes, expect_change, absolute)
     finally:
-        await watcher.close(context)
+        await watcher.stop(context)
 
 
 async def _exec_collect(
@@ -224,8 +227,8 @@ def create_env_conformance(options: EnvConformanceOptions) -> list[EnvConformanc
             lambda env: _watch_replaced_directory(env, assert_),
         ),
         _watch_case(
-            "watch stops reporting once closed",
-            lambda env: _watch_closed(env, assert_),
+            "watch stops reporting once stopped",
+            lambda env: _watch_stopped(env, assert_),
         ),
         create_case(
             "argv exec passes arguments to the program without shell parsing",
@@ -601,12 +604,14 @@ async def _watch_replaced_directory(env: ExecutionEnv, assert_: EnvConformanceAs
     await _watching(env, _watch_targets({"path": "skills", "recursive": True}), run)
 
 
-async def _watch_closed(env: ExecutionEnv, assert_: EnvConformanceAssertions) -> None:
-    changes: list[WatchChange] = []
+async def _watch_stopped(env: ExecutionEnv, assert_: EnvConformanceAssertions) -> None:
+    """A watcher is stopped, not closed: ``stop()`` is idempotent and no change follows it."""
+
+    changes: list[FileChange] = []
     watcher = get_or_throw(await env.watch(_watch_targets({"path": "file.txt"}), changes.append, context))
     assert_.ok(watcher.mode in ("native", "polling"), "watcher reports its mode")
-    await watcher.close(context)
-    await watcher.close(context)
+    await watcher.stop(context)
+    await watcher.stop(context)
     get_or_throw(await env.write_file("file.txt", "x", context))
     await asyncio.sleep(0.3)
     assert_.deep_equal(changes, [])

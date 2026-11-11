@@ -1,4 +1,4 @@
-"""Task graph view: every live task, its waits, and the conversations it owns (spec §9.5).
+"""Task graph view: every live task, its waits, and the conversations it owns (spec §9.4).
 
 The graph is to the Session's tasks what the conversation view is to one conversation: a
 structural mount built on the Session line by its first observer, advanced only from committed
@@ -18,14 +18,20 @@ from ..context import BACKGROUND_CONTEXT, Context, without_abort_signal
 from ..delta import Op
 from ..ids import ConversationId, TaskId
 from ..json import JsonValue
-from ..session.observation import CommittedState, CommittedWatch
+from ..session.observation import (
+    AttachedObservation,
+    CommittedWatch,
+    GuardedObserver,
+)
 from ..session.session import SessionImpl, contained
 from ..types import (
-    CommitPublication,
     JoinPolicy,
+    ObservedCommit,
+    Observer,
     Storage,
     TaskOutcome,
     TaskRecord,
+    watch_value_call,
 )
 from .scheduler import BlockedReason, blocked_subject, json_equal
 from .util import cancellation_error, closed_error, scan_all
@@ -96,7 +102,7 @@ class TaskGraph(TypedDict):
 
 
 TaskGraphWatch: TypeAlias = CommittedWatch
-"""A serialized exact-frame watch of the task graph."""
+"""A serialized coalesced watch of the task graph."""
 
 
 @dataclass(slots=True)
@@ -125,7 +131,7 @@ class TaskGraphView:
         )
         self._mount: GraphMount | None = None
         self._closed = False
-        session.observe_commits(self._on_publication)
+        session.observe_stored_commits(self._on_publication)
         if subscribe_blocked is not None:
             subscribe_blocked(self._refresh_blocked)
         session.subscribe_close(self._on_close)
@@ -133,18 +139,33 @@ class TaskGraphView:
     def report(self, error: BaseException) -> None:
         self._session.report(error)
 
-    async def state(self, context: Context) -> CommittedState:
-        """A disposable read-only state of the graph."""
+    async def observe(self, observer: Observer, context: Context) -> AttachedObservation:
+        """A synchronous observer of the graph, attached atomically on the Session line.
 
-        return await self._attach(_state_observer, context)
+        It mirrors what a watch of the mount is handed — including a blocked-reason change derived
+        outside any commit — unfolded, in line order (spec §9.4).
+        """
+
+        attached: list[TaskGraph] = []
+
+        def create(
+            current: TaskGraph,
+            release: Callable[[], None],
+            view: TaskGraphView,
+        ) -> GuardedObserver:
+            attached.append(current)
+            return GuardedObserver(observer, release, view.report)
+
+        guarded = await self._attach(create, context)
+        return AttachedObservation(attached[0], guarded)
 
     async def watch(self, context: Context) -> CommittedWatch:
-        """A serialized exact-frame watch of the graph; cancelling ``context`` stops it."""
+        """A serialized coalesced watch of the graph; aborting ``context`` ends it ``aborted``."""
 
         observer = await self._attach(_watch_observer, context)
         signal = context.abort_signal
         if signal is not None and signal.aborted:
-            observer.cancel()
+            observer.abort_acquisition()
             raise cancellation_error(signal)
         if signal is not None:
             observer.observe_cancellation(signal)
@@ -155,11 +176,11 @@ class TaskGraphView:
         create: Callable[[TaskGraph, Callable[[], None], TaskGraphView], Any],
         context: Context,
     ) -> Any:
-        async def job() -> Any:
+        async def job(line: Storage) -> Any:
             self._session.assert_usable()
             mount = self._mount
             if mount is None:
-                value, records = await self._build(context)
+                value, records = await self._build(line, context)
                 mount = GraphMount(value=value, records=records)
             detached = False
 
@@ -193,7 +214,7 @@ class TaskGraphView:
         if self._mount is None or self._closed:
             return
 
-        async def job() -> None:
+        async def job(_line: Storage) -> None:
             mount = self._mount
             if mount is None:
                 return
@@ -234,17 +255,21 @@ class TaskGraphView:
                 tasks[key] = cast(TaskGraphNode, {**current, "blocked": op[2]})
         mount.value = {"tasks": tasks}
         frame_context = without_abort_signal(BACKGROUND_CONTEXT)
+        call = watch_value_call(mount.value, ops)
         for observer in list(mount.observers):
-            advance = getattr(observer, "advance_frame", None) or observer.advance
-            contained(partial(advance, mount.value, ops, frame_context), self.report)
+            contained(partial(observer.advance, call, frame_context), self.report)
 
-    async def _build(self, context: Context) -> tuple[TaskGraph, dict[str, dict[str, Any]]]:
+    async def _build(
+        self, storage: Storage, context: Context
+    ) -> tuple[TaskGraph, dict[str, dict[str, Any]]]:
+        """Hydrate the task graph, on the line: every read waits for what the line admitted before it."""
+
         records: list[TaskRecord] = []
         for status in LIVE_STATUSES:
             records.extend(
                 await scan_all(
                     partial(
-                        self._storage.scan_tasks,
+                        storage.scan_tasks,
                         {"status": status},
                         SCAN_PAGE_SIZE,
                         context=context,
@@ -257,7 +282,7 @@ class TaskGraphView:
         for record in records:
             owned = await scan_all(
                 partial(
-                    self._storage.scan_conversations,
+                    storage.scan_conversations,
                     {"ownerTaskId": record["id"]},
                     SCAN_PAGE_SIZE,
                     context=context,
@@ -271,7 +296,7 @@ class TaskGraphView:
             live[str(record["id"])] = subject
         return {"tasks": tasks}, live
 
-    def _on_publication(self, publication: CommitPublication, context: Context) -> None:
+    def _on_publication(self, publication: ObservedCommit, context: Context) -> None:
         if self._mount is not None:
             advance_graph(self._mount, publication, context, self.report, self._blocked)
 
@@ -285,12 +310,6 @@ class TaskGraphView:
         self._mount = None
 
 
-def _state_observer(
-    value: TaskGraph, release: Callable[[], None], view: TaskGraphView
-) -> CommittedState:
-    return CommittedState(value, release, view.report)
-
-
 def _watch_observer(
     value: TaskGraph, release: Callable[[], None], view: TaskGraphView
 ) -> CommittedWatch:
@@ -299,7 +318,7 @@ def _watch_observer(
 
 def advance_graph(
     mount: GraphMount,
-    publication: CommitPublication,
+    publication: ObservedCommit,
     context: Context,
     report: Callable[[BaseException], None],
     blocked: Callable[[dict[str, Any]], BlockedReason | None],
@@ -371,9 +390,9 @@ def advance_graph(
             tasks[path[1]] = {**current, "conversations": op[2]}
     mount.value = {"tasks": tasks}
     frame_context = without_abort_signal(context)
+    call = watch_value_call(mount.value, ops)
     for observer in list(mount.observers):
-        advance = getattr(observer, "advance_frame", None) or observer.advance
-        contained(partial(advance, mount.value, ops, frame_context), report)
+        contained(partial(observer.advance, call, frame_context), report)
 
 
 def _node_of(

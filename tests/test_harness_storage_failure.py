@@ -5,7 +5,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from session_support import ControlledStorage, context, flush
+from session_support import (
+    ControlledStorage,
+    context,
+    flush,
+    observe_commits_as_host,
+)
 from task_support import aborted, deferred, eventually, open_tasks
 
 from pi_durable import LiveDoc, MemoryStorage
@@ -14,6 +19,7 @@ from pi_durable.errors import SessionFailed, StorageRequestError
 from pi_durable.harness.define import define_extension
 from pi_durable.harness.harness import Harness, safe_now
 from pi_durable.harness.registry import create_registry
+from pi_durable.harness.types import Report, ReportInfo
 from pi_durable.ids import TaskId
 from pi_durable.session.session import contained
 from pi_durable.tasks import define_task
@@ -107,7 +113,7 @@ async def test_fails_it_from_a_read_off_the_session_line_as_a_context_read_makes
     storage.failing.add("scanRange")
     error = await _capture(opened["root"].context(context))
     assert error is storage.error
-    assert await opened["harness"].closed == {"reason": "failed", "error": storage.error}
+    assert await opened["harness"].closed == {"kind": "failed", "error": storage.error}
     assert opened["reports"] == [storage.error]
     await opened["harness"].close(context)
 
@@ -138,7 +144,7 @@ async def test_ends_storage_calls_underway_with_session_failed_and_closes_once_t
     read_error = await _capture(reading)
     assert isinstance(read_error, SessionFailed)
     assert read_error.cause is storage.error
-    assert await opened["harness"].closed == {"reason": "failed", "error": storage.error}
+    assert await opened["harness"].closed == {"kind": "failed", "error": storage.error}
     await opened["harness"].close(context)
 
 
@@ -179,7 +185,7 @@ async def test_closes_the_backend_only_after_a_paged_read_underway_which_cannot_
     assert "is closed" in str(error)
     await closing
     assert pages == ["first", "close"]
-    assert await opened["harness"].closed == {"reason": "closed"}
+    assert await opened["harness"].closed == {"kind": "closed"}
 
 
 async def test_fails_it_when_storage_cannot_close_and_an_earlier_failure_stays_the_cause() -> None:
@@ -193,7 +199,7 @@ async def test_fails_it_when_storage_cannot_close_and_an_earlier_failure_stays_t
     healthy = await started(FailingClose())
     error = await _capture(healthy["harness"].close(context))
     assert error is close_error
-    assert await healthy["harness"].closed == {"reason": "failed", "error": close_error}
+    assert await healthy["harness"].closed == {"kind": "failed", "error": close_error}
     assert healthy["reports"] == [close_error]
 
     storage = FailingClose()
@@ -206,8 +212,47 @@ async def test_fails_it_when_storage_cannot_close_and_an_earlier_failure_stays_t
         )
     )
     assert commit_error is failure
-    assert await failed["harness"].closed == {"reason": "failed", "error": failure}
+    assert await failed["harness"].closed == {"kind": "failed", "error": failure}
     assert failed["reports"] == [failure]
+
+
+class RefusingStorage(ControlledStorage):
+    """Reports a resolved refusal for a commit, as a storage's own checks do for a batch."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refusal: BaseException | None = None
+
+    async def commit_batches(self, batches: Any, receive: Any, commit_context: Any) -> Any:
+        if self.refusal is not None:
+            return {"stored": 0, "refused": self.refusal}
+        return await super().commit_batches(batches, receive, commit_context)
+
+
+async def test_fails_the_session_when_the_storage_refuses_the_batch_a_commit_writes() -> None:
+    """A resolved refusal is not a stored commit: it fails the Session and stores nothing."""
+
+    storage = RefusingStorage()
+    opened = await started(storage)
+    await opened["root"].commit(
+        lambda tx: tx.append_entry(opened["root"].id, {"kind": "kept"}), context
+    )
+    refusal = ValueError("a batch this storage refuses")
+    storage.refusal = refusal
+    error = await _capture(
+        opened["root"].commit(
+            lambda tx: tx.append_entry(opened["root"].id, {"kind": "refused"}), context
+        )
+    )
+    assert error is refusal
+    assert await opened["harness"].closed == {"kind": "failed", "error": refusal}
+    assert opened["reports"] == [refusal]
+    stored = await storage.reopen().scan_entries(
+        {"conversationId": opened["root"].id}, 10, None, context
+    )
+    kinds = [item["kind"] for item in stored["items"]]
+    assert "kept" in kinds
+    assert "refused" not in kinds
 
 
 async def test_rejects_the_harnesss_own_calls_with_session_failed_after_a_failure() -> None:
@@ -295,7 +340,7 @@ async def test_fails_it_from_a_failed_id_mint() -> None:
         )
         is storage.error
     )
-    assert await opened["harness"].closed == {"reason": "failed", "error": storage.error}
+    assert await opened["harness"].closed == {"kind": "failed", "error": storage.error}
     await opened["harness"].close(context)
 
 
@@ -329,7 +374,7 @@ async def test_fails_it_for_a_storage_request_error_from_a_commit_whose_effect_i
         )
         is rejection
     )
-    assert await opened["harness"].closed == {"reason": "failed", "error": rejection}
+    assert await opened["harness"].closed == {"kind": "failed", "error": rejection}
     await opened["harness"].close(context)
 
 
@@ -367,17 +412,25 @@ async def test_fails_it_for_a_throw_in_its_own_commit_listeners() -> None:
     storage = ControlledStorage()
     opened = await started(storage)
     bug = RuntimeError("listener bug")
-    opened["harness"].observe_commits(lambda publication, _context: _raise(bug))
+    # Upstream's listener throws synchronously (`followCommits(() => { throw bug })`,
+    # harness-storage-failure.test.ts:330): the Session's own commit observers are called inside the
+    # publication, so the error the publication returns is what fails the Session. Only the host's
+    # `subscribeCommits` observers may be asynchronous, and their errors are reported, never fatal.
+    opened["harness"].observe_stored_commits(lambda publication, _context: _throw(bug))
     # The commit itself is durable and resolves; the Session fails behind it.
     assert await opened["root"].commit(
         lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
     )
-    assert await opened["harness"].closed == {"reason": "failed", "error": bug}
+    assert await opened["harness"].closed == {"kind": "failed", "error": bug}
     assert opened["reports"] == [bug]
     await opened["harness"].close(context)
 
 
 async def _raise(error: BaseException) -> None:
+    raise error
+
+
+def _throw(error: BaseException) -> None:
     raise error
 
 
@@ -397,7 +450,7 @@ async def test_fails_it_for_a_storage_error_during_a_host_close_before_the_backe
     held.release()
     assert await _capture(committing) is failure
     await closing
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert opened["reports"] == [failure]
 
 
@@ -425,8 +478,8 @@ async def test_ends_an_abort_that_joins_a_run_ignoring_its_signal_and_a_reentran
     reentered: list[Any] = []
     holder: dict[str, Any] = {}
 
-    def on_report(error: BaseException) -> None:
-        reports.append(error)
+    def on_report(report: Report) -> None:
+        reports.append(report["error"])
         reentered.append(holder["harness"].wait_for_idle(context))
 
     harness = await Harness.open(
@@ -477,6 +530,11 @@ async def test_does_not_fail_it_for_a_read_its_caller_cancelled() -> None:
             return await super().scan_entries(query, limit, cursor, read_context)
 
     opened = await started(CancelledRead())
+    # An entry to scan: the Session's cache answers the bounds of the context, not its entries
+    # (upstream ``harness-storage-failure.test.ts:420``).
+    await opened["root"].commit(
+        lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
+    )
     cancelling = with_abort_signal(controller.signal, context)
     assert await _capture(opened["root"].context(cancelling)) is cancelled
     assert await opened["root"].commit(
@@ -490,7 +548,7 @@ async def test_reports_a_listener_or_on_report_whose_promise_rejects_without_an_
         raise RuntimeError("async listener")
 
     opened = await started(MemoryStorage())
-    opened["harness"].subscribe_commits(async_throw)
+    observe_commits_as_host(opened["harness"], async_throw)
     opened["harness"].subscribe_close(async_throw)
     await opened["root"].commit(
         lambda tx: tx.append_entry(opened["root"].id, {"kind": "note"}), context
@@ -508,7 +566,7 @@ async def test_reports_a_listener_or_on_report_whose_promise_rejects_without_an_
         {"models": {}, "registry": registry, "on_report": async_throw},
         context,
     )
-    rejecting.subscribe_commits(lambda publication, _context: _raise(RuntimeError("sync listener")))
+    observe_commits_as_host(rejecting, lambda publication, _context: _raise(RuntimeError("sync listener")))
     again = await rejecting.root(context)
     await again.commit(lambda tx: tx.append_entry(again.id, {"kind": "note"}), context)
     await rejecting.close(context)
@@ -525,8 +583,8 @@ async def test_reports_a_throwing_commit_or_close_listener_and_runs_the_others()
     def close_listener() -> None:
         raise RuntimeError("close listener")
 
-    opened["harness"].subscribe_commits(commit_listener)
-    opened["harness"].subscribe_commits(lambda publication, _context: seen.append("commit"))
+    observe_commits_as_host(opened["harness"], commit_listener)
+    observe_commits_as_host(opened["harness"], lambda publication, _context: seen.append("commit"))
     opened["harness"].subscribe_close(close_listener)
     opened["harness"].subscribe_close(lambda: seen.append("close"))
     assert await opened["root"].commit(
@@ -570,7 +628,7 @@ def test_reports_a_throwing_clock_once_also_when_the_report_handler_reads_the_cl
 
     clock: Any = None
 
-    def report(error: BaseException) -> None:
+    def report(error: BaseException, _info: ReportInfo) -> None:
         reports.append(error)
         # Reentry, as a handler that commits does: the clock is read again before this report returns.
         if len(reports) < 5:
@@ -589,7 +647,7 @@ async def test_keeps_working_when_on_report_throws_and_falls_back_when_the_clock
     def broken_clock() -> int:
         raise RuntimeError("clock broke")
 
-    def broken_report(error: BaseException) -> None:
+    def broken_report(_report: Report) -> None:
         raise RuntimeError("report broke")
 
     harness = await Harness.open(
@@ -650,7 +708,7 @@ async def test_ends_waits_and_running_tasks_with_the_first_error() -> None:
     ):
         error = await _capture(call())
         assert isinstance(error, SessionFailed) and error.cause is failure
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     await eventually(lambda: signals == ["aborted"])
     assert opened["reports"] == [failure]
     await opened["harness"].close(context)
@@ -662,7 +720,7 @@ async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> 
     failure = RuntimeError("observer broke")
 
     class FailingObserver:
-        def advance_frame(self, *_args: Any) -> None:
+        def advance(self, *_args: Any) -> None:
             raise failure
 
         def close_session(self, _failure: Any) -> None:
@@ -671,15 +729,15 @@ async def test_keeps_feeding_the_other_observers_of_a_view_when_one_throws() -> 
     async def attach(_value: Any, _release: Any, _storage: Any, _views: Any) -> Any:
         return FailingObserver()
 
-    await harness._views.attach(root.id, attach, context)
+    await harness._views.attach(root.id, None, attach, context)
     watch = await root.watch(context)
     seen: list[Any] = []
-    watch.start(lambda value, _ops, _context: seen.append(value))
+    watch.start(lambda call, _context: seen.append(call["value"]))
     await root.commit(lambda tx: tx.append_entry(root.id, {"kind": "note"}), context)
     await eventually(lambda: len(seen) > 0)
     assert opened["reports"] == [failure]
     await harness.close(context)
-    assert (await watch.closed)["reason"] == "session_closed"
+    assert (await watch.closed)["kind"] == "ended"
 
 
 async def test_faults_only_the_task_and_ends_the_watch_for_an_unformattable_value() -> None:
@@ -707,7 +765,7 @@ async def test_faults_only_the_task_and_ends_the_watch_for_an_unformattable_valu
     watch = await harness.watch_doc(LiveDoc, root.id, context)
     assert watch is not None
 
-    async def listener(_value: Any, _ops: Any, _context: Any) -> None:
+    async def listener(_call: Any, _context: Any) -> None:
         raise unformattable
 
     watch.start(listener)
@@ -725,7 +783,7 @@ async def test_faults_only_the_task_and_ends_the_watch_for_an_unformattable_valu
         live["compactions"] = []
 
     await root.commit(touch, context)
-    assert (await watch.closed)["reason"] == "listener_error"
+    assert (await watch.closed)["kind"] == "listener_error"
     assert await root.commit(
         lambda tx: tx.append_entry(root.id, {"kind": "note"}), context
     )

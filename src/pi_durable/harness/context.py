@@ -73,34 +73,57 @@ class ContextRange(TypedDict):
     settled: list[MessageRecord]
     open: list[MessageRecord]
     baseline: Baseline
+    #: Whether the range reached the conversation's newest entry when it was read, so the entries
+    #: of later commits extend it (:func:`advance_range`); a range cut off at an earlier entry is not.
+    current: bool
 
 
 class ContextSession(Protocol):
-    """The Session seam a context read needs: run a job on the mutation line."""
+    """The Session seam a context read needs: run a job on the mutation line, answer what its own
+    commits already made known of a conversation's newest entry and head marker, and say where that
+    newest entry stood at the last publication."""
 
-    async def read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any: ...
+    async def read_on_line(self, job: Callable[[Storage], Awaitable[Any]]) -> Any: ...
+
+    async def latest_entry_id(
+        self, conversation_id: ConversationId, context: Context
+    ) -> EntryId | None: ...
+
+    async def latest_head_marker(
+        self, conversation_id: ConversationId, at_or_before: EntryId | None, context: Context
+    ) -> EntryWithHead | None: ...
+
+    def known_latest_entry_id(self, conversation_id: ConversationId) -> EntryId | None: ...
 
 
 async def capture_context_bounds(
+    session: ContextSession,
     storage: Storage,
     conversation_id: ConversationId,
     context: Context,
     at: EntryId | None = None,
+    visible: bool = False,
 ) -> ContextBounds | None:
-    """Capture the bounds of the current context, or of the context cut off at the visible entry ``at``."""
+    """Capture the bounds of the current context, or of the context cut off at the visible entry ``at``.
+
+    The newest entry and the head marker come from ``session``, which answers either from what its own
+    commits made known (no Storage scan) or through ``storage``. ``visible`` says ``at`` is known to
+    be visible, as an entry of a range of the conversation is: the read of storage that would prove
+    it is then skipped.
+    """
 
     tail: EntryId
     if at is None:
-        page = await storage.scan_entries({"conversationId": conversation_id}, 1, None, context)
-        if not page["items"]:
+        latest = await session.latest_entry_id(conversation_id, context)
+        if latest is None:
             return None
-        tail = page["items"][0]["id"]
+        tail = latest
     else:
-        if await storage.entry(conversation_id, at, context) is None:
+        if not visible and await storage.entry(conversation_id, at, context) is None:
             raise ValueError(f"Entry {at} is not visible from conversation {conversation_id}")
         tail = at
     return {
-        "head": await storage.find_latest_head_marker(conversation_id, tail, context),
+        "head": await session.latest_head_marker(conversation_id, tail, context),
         "tail": tail,
     }
 
@@ -114,7 +137,9 @@ async def read_context(
 ) -> ContextView:
     """Read one conversation's committed context: bounds on the Session line, entries off it."""
 
-    bounds = await session.read_on_line(lambda: capture_context_bounds(storage, conversation_id, context, at))
+    bounds = await session.read_on_line(
+        lambda line: capture_context_bounds(session, line, conversation_id, context, at)
+    )
     return await derive_context(storage, conversation_id, bounds, context)
 
 
@@ -148,10 +173,10 @@ def empty_view() -> ContextView:
 def derive_view(bounds: ContextBounds, entries: Sequence[EntryRecord]) -> ContextView:
     """Derive the context view from the oldest-first entries scanned within ``bounds``."""
 
-    return derive_range(bounds, entries)["view"]
+    return derive_range(bounds, entries, False)["view"]
 
 
-def derive_range(bounds: ContextBounds, entries: Sequence[EntryRecord]) -> ContextRange:
+def derive_range(bounds: ContextBounds, entries: Sequence[EntryRecord], current: bool) -> ContextRange:
     """Derive the context view and the range a later read can extend."""
 
     edits: dict[EntryId, ContextEdit] = {}
@@ -181,6 +206,7 @@ def derive_range(bounds: ContextBounds, entries: Sequence[EntryRecord]) -> Conte
         "settled": settled,
         "open": open_messages,
         "baseline": baseline,
+        "current": current,
     }
 
 
@@ -192,20 +218,32 @@ async def read_context_from(
     at: EntryId | None,
     previous: ContextRange | None,
 ) -> tuple[ContextView, ContextRange | None]:
-    """Read the context, reusing ``previous``: with the same head, only newer entries are scanned."""
+    """Read the context, reusing ``previous``: with the same head, only newer entries are scanned.
 
-    bounds = await session.read_on_line(lambda: capture_context_bounds(storage, conversation_id, context, at))
+    A range outlives the read, so its entries are frozen like ``MemoryStorage`` records, and the
+    returned view has its own arrays. A caller that keeps the range for :func:`advance_range`
+    checks ``current`` again, synchronously where it installs it: a commit can be published between
+    this function's return and the caller's continuation.
+    """
+
+    visible = at is not None and previous is not None and range_entry(previous, at) is not None
+    bounds = await session.read_on_line(
+        lambda line: capture_context_bounds(session, line, conversation_id, context, at, visible)
+    )
     if bounds is None:
         return empty_view(), None
     freeze_json(bounds["head"])
+    current = at is None
     if previous is None or _head_id(previous["bounds"]) != _head_id(bounds):
         scanned = await scan_range(storage, conversation_id, range_query(bounds), context)
-        range_value = derive_range(bounds, cast(list[EntryRecord], freeze_json(scanned)))
+        range_value = derive_range(bounds, cast(list[EntryRecord], freeze_json(scanned)), current)
     elif bounds["tail"] == previous["bounds"]["tail"]:
         range_value = previous
     elif bounds["tail"] < previous["bounds"]["tail"]:
         range_value = derive_range(
-            bounds, [entry for entry in previous["entries"] if entry["id"] <= bounds["tail"]]
+            bounds,
+            [entry for entry in previous["entries"] if entry["id"] <= bounds["tail"]],
+            False,
         )
     else:
         min_entry_id = cast(EntryId, previous["bounds"]["tail"] + 1)
@@ -215,7 +253,10 @@ async def read_context_from(
             {"minEntryId": min_entry_id, "maxEntryId": bounds["tail"]},
             context,
         )
-        range_value = extend_range(previous, bounds, cast(list[EntryRecord], freeze_json(added)))
+        range_value = extend_range(
+            previous, bounds, cast(list[EntryRecord], freeze_json(added)), current
+        )
+    range_value = demote_missed(range_value, session.known_latest_entry_id(conversation_id))
     view = range_value["view"]
     return (
         {
@@ -232,12 +273,13 @@ def extend_range(
     previous: ContextRange,
     bounds: ContextBounds,
     added: Sequence[EntryRecord],
+    current: bool,
 ) -> ContextRange:
     """Extend ``previous`` by entries after its tail under the same head marker."""
 
     entries = [*previous["entries"], *added]
     if any("edits" in entry or "head" in entry or entry["id"] in previous["edited"] for entry in added):
-        return derive_range(bounds, entries)
+        return derive_range(bounds, entries, current)
     contributions = [contribute(entry, None) for entry in added]
     settled, open_messages = settle(
         previous["settled"],
@@ -260,7 +302,72 @@ def extend_range(
         "settled": settled,
         "open": open_messages,
         "baseline": baseline,
+        "current": current,
     }
+
+
+def demote_missed(range_value: ContextRange, known_latest: EntryId | None) -> ContextRange:
+    """``range_value`` as not ``current`` when an entry was committed while its scan ran off the line.
+
+    The entries the scan returned are those at or below its bounds' tail; a conversation whose newest
+    entry the Session already knows to be another one had an entry the range did not see, so extending
+    it from the next publication would skip that entry. A caller keeping a range checks this again,
+    synchronously where it installs the range: a commit can be published between the read's return
+    and the caller's continuation.
+    """
+
+    if range_value["current"] and known_latest != range_value["bounds"]["tail"]:
+        return {**range_value, "current": False}
+    return range_value
+
+
+def range_entry(range_value: ContextRange, id: EntryId) -> EntryRecord | None:
+    """Entry ``id`` of ``range_value``, by binary search: a range holds its entries in ID order."""
+
+    entries = range_value["entries"]
+    low, high = 0, len(entries) - 1
+    while low <= high:
+        middle = (low + high) // 2
+        entry = entries[middle]
+        if entry["id"] == id:
+            return entry
+        if entry["id"] < id:
+            low = middle + 1
+        else:
+            high = middle - 1
+    return None
+
+
+def advance_range(
+    range_value: ContextRange,
+    appended: Sequence[EntryRecord],
+) -> ContextRange | None:
+    """``range_value`` with the entries one commit appended to its conversation, without reading Storage.
+
+    The conversation's own new entries are its newest, and a new head marker's head never lies
+    before the range's start. A range that is not ``current`` stays as it is; the next read extends
+    it from Storage. ``None`` drops the range.
+    """
+
+    if not range_value["current"] or not appended:
+        return range_value
+    added = cast(list[EntryRecord], freeze_json(list(appended)))
+    head: EntryWithHead | None = range_value["bounds"]["head"]
+    for entry in added:
+        if entry.get("head") is not None:
+            head = cast(EntryWithHead, entry)
+    bounds: ContextBounds = {"head": head, "tail": added[-1]["id"]}
+    previous_head = range_value["bounds"]["head"]
+    previous_id = None if previous_head is None else previous_head["id"]
+    if (None if head is None else head["id"]) == previous_id:
+        return extend_range(range_value, bounds, added, True)
+    assert head is not None
+    start = head["head"]
+    # Heads only move forward: a compaction keeps a later entry, a reset starts at itself, older is stale.
+    if previous_head is not None and start < previous_head["head"]:
+        return None
+    entries = [entry for entry in [*range_value["entries"], *added] if entry["id"] >= start]
+    return derive_range(bounds, entries, True)
 
 
 def _head_id(bounds: ContextBounds) -> EntryId | None:
@@ -494,10 +601,12 @@ __all__ = [
     "ContextSession",
     "EntryRange",
     "UNDECIDED",
+    "advance_range",
     "capture_context_bounds",
     "carries_system_message",
     "contribute",
     "derive_context",
+    "demote_missed",
     "derive_range",
     "derive_view",
     "empty_view",
@@ -508,6 +617,7 @@ __all__ = [
     "order_tool_results",
     "read_context",
     "read_context_from",
+    "range_entry",
     "range_query",
     "scan_range",
     "select_active",

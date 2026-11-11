@@ -8,7 +8,7 @@ derivation, the in-memory reference backend, and the durable task scheduler with
 agent resolution, extension hooks, submissions, inbox boundaries, and Harness surface. The
 built-in generation, compaction, and tool tasks, nested tool calls with structured output, provider
 identity, and the usage ledger are included; the `tool_search` subpath adds BM25 deferred-tool
-discovery, the conversation view, agent event stream, and task graph expose committed state, and
+discovery, the conversation view and task graph expose committed state, and
 the optional `openai` and `anthropic` extras supply the model adapters generation streams through.
 """
 
@@ -39,7 +39,14 @@ from .entries import (
     UserEntry,
     define_entry,
 )
-from .errors import ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError
+from .errors import (
+    ConversationBusy,
+    ConversationIdle,
+    ReadAfterWrite,
+    ReadOnlySession,
+    SessionFailed,
+    StorageRequestError,
+)
 from .harness.agent import (
     DEFAULT_COMPACTION_POLICY,
     DEFAULT_PROGRESS_POLICY,
@@ -59,17 +66,10 @@ from .harness.define import (
     define_extension,
     define_tool,
     hook,
+    run_end_task,
     section,
     wrap_section,
     wrap_tool,
-)
-from .harness.events import (
-    AgentEvent,
-    AgentEventStream,
-    MessageChange,
-    SnapshotEvent,
-    ToolEventCall,
-    watch_events,
 )
 from .harness.generation import (
     GenerationCheckpoint,
@@ -86,6 +86,8 @@ from .harness.live import (
     LiveState,
     NestedToolSlot,
     NestedToolSummary,
+    RunFailure,
+    RunFailureReason,
     ToolSlot,
 )
 from .harness.provider import ProviderDoc, ProviderState
@@ -99,6 +101,13 @@ from .harness.tool import (
     ToolTaskCheckpoint,
     ToolTaskInput,
     ToolTaskResult,
+)
+from .harness.transcript import (
+    ConversationTranscript,
+    ConversationTranscriptOptions,
+    EntryLoader,
+    TranscriptItem,
+    TranscriptView,
 )
 from .harness.types import (
     AfterFailedRun,
@@ -143,11 +152,14 @@ from .harness.types import (
     Registry,
     RegistryReader,
     RegistrySnapshot,
+    Report,
     ReportFrom,
     ReportInfo,
+    ReportKind,
     ReportReason,
     ReportTask,
-    ReportType,
+    RunEndTask,
+    RunSummary,
     SetTimer,
     Settings,
     SettledSubmissionRecord,
@@ -169,14 +181,14 @@ from .harness.types import (
     Wrap,
 )
 from .harness.usage import UsageDoc, UsageState
-from .harness.view import ConversationView
+from .harness.view import ConversationView, ConversationWindow
 from .providers import Model, Models
-from .session.session import DocumentState, SessionImpl, create_session
+from .session.session import SessionImpl, create_session
 from .storage.memory import MemoryStorage, PreparedMemoryCommit
 from .tasks import Task, TaskDefinition, define_task
 from .types import DocumentReader, PhaseHandler, Session, SessionEnd, Tx
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "add_tools",
@@ -184,8 +196,6 @@ __all__ = [
     "Agent",
     "AgentChange",
     "AgentDoc",
-    "AgentEvent",
-    "AgentEventStream",
     "AgentState",
     "AnyTask",
     "AssistantEntry",
@@ -211,10 +221,14 @@ __all__ = [
     "ConversationDocFamilyToken",
     "ConversationDocToken",
     "ConversationHandle",
+    "ConversationIdle",
     "ConversationInit",
     "ConversationRetryPolicy",
     "ConversationStreamOptions",
+    "ConversationTranscript",
+    "ConversationTranscriptOptions",
     "ConversationView",
+    "ConversationWindow",
     "ConversationWatch",
     "create_registry",
     "create_session",
@@ -233,8 +247,8 @@ __all__ = [
     "DocFamilyToken",
     "DocToken",
     "DocumentReader",
-    "DocumentState",
     "Entry",
+    "EntryLoader",
     "EnvTarget",
     "Extension",
     "GenerationCheckpoint",
@@ -247,6 +261,7 @@ __all__ = [
     "HarnessOptions",
     "HarnessSettings",
     "hook",
+    "run_end_task",
     "HookApi",
     "HookRegistration",
     "HookResult",
@@ -261,7 +276,6 @@ __all__ = [
     "LiveDoc",
     "LiveState",
     "MemoryStorage",
-    "MessageChange",
     "Model",
     "ModelRef",
     "Models",
@@ -279,17 +293,23 @@ __all__ = [
     "ProviderState",
     "QueueMode",
     "ReadAfterWrite",
+    "ReadOnlySession",
     "Registry",
     "RegistryReader",
     "RegistrySnapshot",
+    "Report",
     "ReportFrom",
     "ReportInfo",
+    "ReportKind",
     "ReportReason",
     "ReportTask",
-    "ReportType",
     "ResetEntry",
     "RewindableConversationDocFamilyToken",
     "RewindableConversationDocToken",
+    "RunEndTask",
+    "RunFailure",
+    "RunFailureReason",
+    "RunSummary",
     "section",
     "Session",
     "SessionDocFamilyToken",
@@ -301,7 +321,6 @@ __all__ = [
     "Settings",
     "SettledSubmissionRecord",
     "SettledTask",
-    "SnapshotEvent",
     "StorageRequestError",
     "Submission",
     "SubmissionDraft",
@@ -317,9 +336,10 @@ __all__ = [
     "TaskGraphWatch",
     "TaskInspection",
     "TaskRuntime",
+    "TranscriptItem",
+    "TranscriptView",
     "ToolControl",
     "ToolDiagnostic",
-    "ToolEventCall",
     "ToolExecutionApi",
     "ToolExecutionMode",
     "ToolExecutionResult",
@@ -339,7 +359,6 @@ __all__ = [
     "UserInput",
     "__version__",
     "Wake",
-    "watch_events",
     "Wrap",
     "wrap_section",
     "wrap_tool",

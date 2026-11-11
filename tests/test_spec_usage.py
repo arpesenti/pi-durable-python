@@ -35,10 +35,10 @@ from pi_durable import (
     wrap_tool,
 )
 from pi_durable.context import Context
-from pi_durable.harness.types import HarnessSettings, ReportInfo, TaskRuntime, Wake
+from pi_durable.harness.types import HarnessSettings, Report, TaskRuntime, Wake
 from pi_durable.session.transaction import Transaction
 from pi_durable.tools import create_bash_tool, create_edit_tool, create_read_tool
-from pi_durable.types import EntryDraft, EntryId, RunningTask, Storage, TaskId
+from pi_durable.types import EntryDraft, EntryId, RunningTask, Storage
 
 # ─── Names the spec leaves to the application ────────────────────────────────
 
@@ -152,18 +152,13 @@ def wake_host(wake: Wake) -> None:
         _ = at
 
 
-def report_to_a_breaker(error: BaseException, info: ReportInfo) -> None:
-    """A host's ``on_report``: act on the typed info, not only the error."""
+def report_to_a_breaker(report: Report) -> None:
+    """A host's ``on_report``: one report carries the error and says what happened."""
 
-    kind = info["type"]
-    if kind == "task_faulted" and info.get("reason") == "restart_limit":
-        _ = info["task"]["id"]
-
-
-async def retry_a_parked_task(harness: Harness, id: TaskId, context: Context) -> None:
-    await harness.retry_task(id, context)
-    if harness.wake()["active"]:
-        harness.resume()
+    kind = report["kind"]
+    if kind == "task_faulted" and report.get("reason") == "restart_limit":
+        _ = report["task"]["id"]
+        _ = report["error"]
 
 
 def settings_from_a_function() -> HarnessSettings:

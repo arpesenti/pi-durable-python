@@ -37,6 +37,13 @@ RESERVED_SEGMENTS = frozenset({"__proto__", "constructor", "prototype"})
 MAX_DELTA_OPERATIONS = 4_096
 """Beyond this many operations a batch folds into one root replacement, as Chord does."""
 
+MAX_PENDING_OPS = 10_000
+"""Chord's bound on the operations one :class:`PendingOps` queue holds (spec §9.2).
+
+Past it the queue is taken as one self-contained root replacement of the newest value, so a slow
+watch listener costs memory proportional to the value, not to the commits it missed.
+"""
+
 OVERLAP_SCAN_LIMIT = 65_536
 """Characters Chord's bounded overlap search examines; beyond it a string is written whole."""
 
@@ -160,6 +167,90 @@ def assert_valid_op(op: object) -> None:
         raise TypeError(f"unknown op verb: {verb}")
 
 
+class PendingOps:
+    """Chord's pending operation queue: raw batches folded while a watch listener is busy.
+
+    An operation on a leaf — a string append, or a set of a primitive — folds into the last pending
+    operation on the same path: appends join and a set replaces an earlier set or append. Any other
+    operation keeps the order of everything before it, and a root replacement drops everything
+    before it. Nothing is replayed, re-diffed, or measured: folding is convergent delivery, not an
+    audit stream (spec §9.2).
+    """
+
+    __slots__ = ("_anchor", "_exact", "_last", "_ops")
+
+    def __init__(self) -> None:
+        self._ops: list[Op] = []
+        # The batch as published, while that is exactly what the queue holds: a listener that kept
+        # up is handed its own commit's operation batch, not a copy of it (spec §9.2).
+        self._exact: list[Op] | None = None
+        # The index the trailing run of foldable operations begins at, and the last such operation
+        # of each path. An operation before the anchor is never folded into: a non-foldable one
+        # would then be applied out of order.
+        self._anchor = 0
+        self._last: dict[tuple[Any, ...], int] = {}
+
+    def __bool__(self) -> bool:
+        return bool(self._ops)
+
+    def push(self, ops: list[Op]) -> None:
+        """Queue one committed operation batch, folding it into what already waits."""
+
+        was_empty = not self._ops
+        folded = False
+        for op in ops:
+            verb = op[0]
+            if verb == "r":
+                self._ops = [op]
+                self._anchor = 1
+                self._last = {}
+                folded = True
+                continue
+            if verb == "a" or (verb == "s" and _is_leaf_value(op[2])):
+                path = tuple(op[1])
+                index = self._last.get(path)
+                # A set replaces whatever waited on its path; an append joins only an earlier append.
+                # A waiting operation is never mutated: the fold writes a new tuple over the old one.
+                if index is not None and index >= self._anchor and (
+                    verb == "s" or self._ops[index][0] == "a"
+                ):
+                    self._ops[index] = (
+                        ["a", op[1], self._ops[index][2] + op[2]]
+                        if verb == "a"
+                        else op
+                    )
+                    folded = True
+                else:
+                    self._ops.append(op)
+                    self._last[path] = len(self._ops) - 1
+                continue
+            self._ops.append(op)
+            self._anchor = len(self._ops)
+            self._last = {}
+        self._exact = ops if was_empty and not folded else None
+
+    def take(self) -> list[Op] | None:
+        """Take everything queued, folded: the operations, or ``None`` for a root replacement.
+
+        ``None`` says the queue passed :data:`MAX_PENDING_OPS` after folding, so the holder delivers
+        one self-contained ``[["r", newestValue]]`` instead of the operations.
+        """
+
+        exact, self._exact = self._exact, None
+        ops, self._ops = self._ops, []
+        self._anchor = 0
+        self._last = {}
+        if len(ops) > MAX_PENDING_OPS:
+            return None
+        return exact if exact is not None else ops
+
+
+def _is_leaf_value(value: JsonValue) -> bool:
+    """Whether a set writes a primitive: only such a set folds into an earlier one on its path."""
+
+    return not isinstance(value, (dict, list))
+
+
 def _resolve(root: JsonValue, path: Sequence[Any]) -> Any:
     value: Any = root
     for segment in path:
@@ -257,8 +348,10 @@ def apply_immutable_batches(target: JsonValue, batches: Iterable[Sequence[Op]]) 
 
 __all__ = [
     "MAX_DELTA_OPERATIONS",
+    "MAX_PENDING_OPS",
     "Op",
     "PathError",
+    "PendingOps",
     "RESERVED_SEGMENTS",
     "UnsafePathError",
     "apply",

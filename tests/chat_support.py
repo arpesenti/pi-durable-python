@@ -13,9 +13,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from session_support import context
+from session_support import Deferred, context
+from task_support import eventually
 
-from pi_durable import Harness, MemoryStorage
+from pi_durable import Harness, LiveDoc, MemoryStorage
 from pi_durable.context import AbortError
 from pi_durable.harness.registry import create_registry
 from pi_durable.harness.types import Registry
@@ -217,6 +218,91 @@ def unanswered() -> Step:
     return Step(build)
 
 
+def failing_once() -> dict[str, Any]:
+    """A response that fails for good once ``gate`` opens; ``reached`` settles when it was requested."""
+
+    gate: Deferred = Deferred()
+    reached: Deferred = Deferred()
+
+    async def step(_request: Any, _options: Any) -> dict[str, Any]:
+        reached.resolve()
+        await gate.promise
+        return assistant_message([], stop_reason="error", error_message="Invalid request")
+
+    return {"step": step, "gate": gate, "reached": reached}
+
+
+def hang_after_partial(text: str, spend: dict[str, Any] | None = None) -> Step:
+    """A response that commits one partial, then blocks until its attempt is interrupted.
+
+    The port's host-died idiom: a harness closed over this request leaves the attempt in flight, and
+    the reopened harness finds the attempt cut off with its committed partial.
+    """
+
+    def build(_request: dict[str, Any], options: dict[str, Any]) -> AssistantStream:
+        async def events() -> Any:
+            partial = assistant_message([faux_text(text)], usage=spend)
+            partial["stopReason"] = "pending"
+            yield {"type": "start", "partial": partial}
+            yield {"type": "text_delta", "partial": partial}
+            signal = options.get("signal")
+            if signal is not None:
+                await signal.wait()
+            raise AbortError(None)
+
+        never: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        return AssistantStream(events(), never)
+
+    return Step(build)
+
+
+async def live_state(harness: Any, conversation_id: Any) -> dict[str, Any]:
+    """``pi.live`` as a plain dict, empty when the conversation is idle."""
+
+    value = await harness.snapshot(LiveDoc, conversation_id, context)
+    return {} if value is None else dict(value)
+
+
+async def captured_partial(harness: Any, conversation_id: Any) -> dict[str, Any]:
+    """Wait until the in-flight attempt has committed a partial, and return ``pi.live`` then."""
+
+    seen: dict[str, Any] = {}
+
+    async def check() -> bool:
+        state = await live_state(harness, conversation_id)
+        if "message" not in (state.get("generation") or {}):
+            return False
+        seen["live"] = state
+        return True
+
+    await eventually(check)
+    return seen["live"]
+
+
+def unanswered_reached() -> dict[str, Any]:
+    """Upstream's ``chat-support.ts`` ``unanswered()``: the step, and ``reached`` once it was requested.
+
+    The port's ``unanswered()`` gives the step alone; cases that wait for the request to have been
+    made — upstream's ``await busy.reached`` — need the signal too.
+    """
+
+    reached: Deferred = Deferred()
+
+    def build(_request: dict[str, Any], options: dict[str, Any]) -> AssistantStream:
+        reached.resolve()
+
+        async def events() -> AsyncIterator[dict[str, Any]]:
+            signal = options.get("signal")
+            if signal is not None:
+                await signal.wait()
+            raise AbortError(getattr(signal, "reason", None))
+            yield  # pragma: no cover
+
+        return AssistantStream(events(), _never())
+
+    return {"step": Step(build), "reached": reached}
+
+
 class FauxModels:
     """The ``Models`` protocol over a queue of scripted responses."""
 
@@ -256,9 +342,12 @@ class FauxModels:
                 steps.append(static(dict(response)))
             else:
                 raise TypeError(f"Unsupported faux response {response!r}")
-        pending = int(self.deferred.get("pendingFetches", 0))
-        if pending > 0 and steps:
-            steps[0].deferred_remaining = pending
+        # Configuring `deferred` is what makes the first response deferred; `pendingFetches` counts
+        # the later fetches that still report the response pending. The two are separate knobs
+        # upstream's faux keeps separate too: a case that wants one poll and an immediate answer
+        # configures `deferred` alone, and `deferredFetchCount` is then 1.
+        if self.deferred and steps:
+            steps[0].deferred_remaining = 1
         self.responses = steps
         self.requests = []
         self.models_used = []
@@ -407,6 +496,7 @@ class ChatSetup:
     models: FauxModels
     registry: Registry
     reports: list[BaseException] = field(default_factory=list)
+    infos: list[dict[str, Any]] = field(default_factory=list)
     settings: dict[str, Any] = field(default_factory=dict)
     now: Callable[[], int] = lambda: 0
 
@@ -429,6 +519,13 @@ def chat_setup(options: Mapping[str, Any] | None = None) -> ChatSetup:
     )
 
 
+def _record(setup: ChatSetup, report: dict[str, Any]) -> None:
+    """Split the one ``Report`` the host is handed into its error and its info, as upstream's helper does."""
+
+    setup.reports.append(report["error"])
+    setup.infos.append({key: value for key, value in report.items() if key != "error"})
+
+
 async def open_chat(
     storage: Storage,
     setup: ChatSetup,
@@ -442,7 +539,7 @@ async def open_chat(
         "registry": setup.registry,
         "settings": setup.settings,
         "now": setup.now,
-        "on_report": setup.reports.append,
+        "on_report": lambda report: _record(setup, report),
     }
     if env is not None:
         options["env"] = env
@@ -451,6 +548,63 @@ async def open_chat(
         context, {"agent": {"model": {"provider": "faux", "modelId": "faux-1"}}}
     )
     return {"harness": harness, "root": root}
+
+
+_killed: list[Storage] = []
+"""The storages of killed Harnesses: a crash does not close its own storage."""
+
+
+class KillableStorage:
+    """A Storage whose calls hang once it is killed: a crash writes nothing more.
+
+    Every case that crashes a host needs one, so it lives beside ``open_chat``.
+    """
+
+    def __init__(self, inner: Storage) -> None:
+        self._inner = inner
+        self.dead = False
+
+    def kill(self) -> None:
+        self.dead = True
+        _killed.append(self._inner)
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._inner, name)
+        if not callable(value):
+            return value
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            if self.dead:
+                return _never()
+            return value(*args, **kwargs)
+
+        return call
+
+
+async def close_killed() -> None:
+    """Close the storages of killed Harnesses; a test calls it in its cleanup."""
+
+    while _killed:
+        storage = _killed.pop()
+        try:
+            await storage.close(context)
+        except Exception:
+            pass
+
+
+async def open_killable(
+    open_storage: Callable[[str], Awaitable[Storage]], path: Any, setup: ChatSetup, *, env: Any = None
+) -> dict[str, Any]:
+    """Open a chat over the SQLite file at ``path``, as upstream's ``openKillable`` does.
+
+    ``kill()`` simulates a crash of the process running it; opening the same path again is the
+    replacement host. ``open_storage`` opens the file, so a test keeps its own SQLite backend.
+    """
+
+    inner = await open_storage(str(path))
+    storage = KillableStorage(inner)
+    opened = await open_chat(storage, setup, env=env)
+    return {**opened, "kill": storage.kill}
 
 
 async def all_entries(conversation: Any, call_context: Any = context) -> list[EntryRecord]:
@@ -464,10 +618,52 @@ def live_of(value: Mapping[str, Any] | None) -> dict[str, Any]:
     return dict(value or {})
 
 
+def only_failure(
+    value: Mapping[str, Any] | None,
+    task_id: Any,
+    inputs: list[Any],
+    reason: str,
+    detail: str | None = None,
+    with_first: bool = True,
+) -> None:
+    """Assert ``pi.live`` holds nothing but ``runFailure``, with the fields the run's end owes.
+
+    Upstream asserts the whole document that way where a run ended with nothing running --
+    ``harness-run-failure.test.ts:49`` and ``:91`` compare ``pi.live`` with
+    ``toEqual({runFailure: ...})`` -- and reaches for the weaker ``toMatchObject`` on the record alone
+    where the document still carries more (``:73``, ``:133``, ``:135``, ``:156``, ``:159``). Every
+    translated case that calls this helper ends a run with the document emptied, so it asserts the
+    stronger shape in all of them: something upstream tolerates here, a leftover ``run`` or a field
+    off the reason set, is a port bug this would notice. ``first`` is ``expect.any(Number)`` upstream;
+    ``detail`` upstream matches with ``stringContaining`` in some cases and exactly in others, so it
+    matches as a fragment.
+    """
+
+    state = dict(value or {})
+    assert set(state) == {"runFailure"}, f"expected only runFailure, got {sorted(state)}"
+    record = dict(state["runFailure"])
+    expected: dict[str, Any] = {"taskId": task_id, "inputs": inputs, "reason": reason}
+    if with_first:
+        assert isinstance(record.pop("first", None), int), "runFailure.first is missing"
+    if detail is not None:
+        assert detail in str(record.pop("detail", "")), f"no detail matching {detail!r}"
+    assert record == expected, f"{record} != {expected}"
+
+
 __all__ = [
     "AssistantStream",
     "ChatSetup",
     "EntryRecord",
+    "live_of",
+    "live_state",
+    "close_killed",
+    "KillableStorage",
+    "open_killable",
+    "captured_partial",
+    "failing_once",
+    "hang_after_partial",
+    "only_failure",
+    "unanswered_reached",
     "FauxModels",
     "MemoryStorage",
     "Step",

@@ -36,6 +36,9 @@ from . import (
     Err,
     ExecutionEnv,
     ExecutionError,
+    FileChange,
+    FileChangeFailed,
+    FileChangePaths,
     FileError,
     FileErrorCode,
     FileInfo,
@@ -50,9 +53,6 @@ from . import (
     ShellOutputInfo,
     TextLine,
     TextLineReader,
-    WatchChange,
-    WatchError,
-    WatchPaths,
     WatchTarget,
     err,
     ok,
@@ -434,6 +434,8 @@ class PosixFileWatcher:
 
     Polling is the portable choice: it sees creations, replacements, and renamed ancestors without
     depending on a platform's event stream, and mode ``polling`` is one of the documented modes.
+    A watcher is stopped, never closed: :meth:`stop` is the entry point 1.5.0 names
+    (upstream ``src/env/index.ts:140``).
     """
 
     mode: Literal["native", "polling"] = "polling"
@@ -441,7 +443,7 @@ class PosixFileWatcher:
     def __init__(
         self,
         targets: Sequence[_WatchTarget],
-        on_change: Callable[[WatchChange], None],
+        on_change: Callable[[FileChange], None],
         *,
         poll_interval_ms: int = _DEFAULT_POLL_INTERVAL_MS,
         max_directories: int = _DEFAULT_MAX_DIRECTORIES,
@@ -452,13 +454,13 @@ class PosixFileWatcher:
         self._max_directories = max_directories
         self._snapshot: dict[str, _Entry] = {}
         self._task: asyncio.Task[None] | None = None
-        self._closed = False
+        self._stopped = False
 
     @classmethod
     async def open(
         cls,
         targets: Sequence[_WatchTarget],
-        on_change: Callable[[WatchChange], None],
+        on_change: Callable[[FileChange], None],
         *,
         poll_interval_ms: int = _DEFAULT_POLL_INTERVAL_MS,
         max_directories: int = _DEFAULT_MAX_DIRECTORIES,
@@ -476,8 +478,8 @@ class PosixFileWatcher:
         watcher._task = asyncio.create_task(watcher._run())
         return watcher
 
-    def _deliver(self, change: WatchChange) -> None:
-        if self._closed:
+    def _deliver(self, change: FileChange) -> None:
+        if self._stopped:
             return
         try:
             self._on_change(change)
@@ -487,22 +489,22 @@ class PosixFileWatcher:
 
     async def _run(self) -> None:
         try:
-            while not self._closed:
+            while not self._stopped:
                 await asyncio.sleep(self._poll_interval)
-                if self._closed:
+                if self._stopped:
                     return
                 try:
                     snapshot = await self._scan()
                 except _BudgetExceeded as error:
-                    self._deliver(WatchError(error=FileError("invalid", str(error))))
+                    self._deliver(FileChangeFailed(kind="failed", error=FileError("invalid", str(error))))
                     return
                 except (FileError, OSError) as error:
-                    self._deliver(WatchError(error=to_file_error(error)))
+                    self._deliver(FileChangeFailed(kind="failed", error=to_file_error(error)))
                     return
                 changed = self._diff(self._snapshot, snapshot)
                 self._snapshot = snapshot
                 if changed:
-                    self._deliver(WatchPaths(paths=sorted(changed)))
+                    self._deliver(FileChangePaths(kind="paths", paths=sorted(changed)))
         except asyncio.CancelledError:
             return
 
@@ -600,11 +602,13 @@ class PosixFileWatcher:
                 await scan_directory(index, target, target.path)
         return snapshot
 
-    async def close(self, context: Context) -> None:
+    async def stop(self, context: Context) -> None:
+        """Idempotently stop reporting; no change call starts after this returns."""
+
         del context
-        if self._closed:
+        if self._stopped:
             return
-        self._closed = True
+        self._stopped = True
         task = self._task
         self._task = None
         if task is not None and not task.done():
@@ -1350,7 +1354,7 @@ class PosixExecutionEnv(ExecutionEnv):
     async def watch(
         self,
         targets: Sequence[WatchTarget],
-        on_change: Callable[[WatchChange], None],
+        on_change: Callable[[FileChange], None],
         context: Context,
     ) -> Result[FileWatcher, FileError]:
         aborted = _abort_result(context)
@@ -1374,7 +1378,7 @@ class PosixExecutionEnv(ExecutionEnv):
             )
             after_open = _abort_result(context)
             if after_open is not None:
-                await watcher.close(context)
+                await watcher.stop(context)
                 return after_open
             return ok(watcher)
         except FileError as error:

@@ -44,6 +44,8 @@ TOOL_SEARCH_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["query"],
+    # Opened, as upstream's `toolSearchSchema` is: `obj({...}, {open: true})` (tool-search/tool-search.ts).
+    "additionalProperties": True,
 }
 
 

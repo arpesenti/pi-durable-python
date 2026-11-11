@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from ..documents import define_doc
+from ..session.session import persist_within
 from ..session.transaction import Transaction
 from ..types import ConversationId, ConversationRecord
 from .types import (
@@ -38,6 +39,9 @@ DEFAULT_COMPACTION_POLICY: dict[str, Any] = {
 DEFAULT_PROGRESS_POLICY: dict[str, Any] = {
     "partial_interval_ms": 100,
     "output_interval_ms": 100,
+    #: How long a deferred commit, including one of running progress, may stay in memory unstored
+    #: (`CommitPersistence`); a crash loses at most about this much of an answer (`agent.ts:77`).
+    "persist_within_ms": 1_000,
 }
 
 DEFAULT_CONTEXT_RETENTION_MS = 600_000
@@ -88,6 +92,8 @@ def resolve_settings(settings: Any) -> Settings:
         value = _field(progress_partial, key)
         if value is not None:
             progress[key] = value
+    # A host may hand Infinity or refuse a number outright, and the Session reads this at each use.
+    progress["persist_within_ms"] = persist_within(progress["persist_within_ms"])
     return Settings(
         extensions=extensions,
         stream=dict(_field(settings, "stream", {}) or {}),
@@ -143,6 +149,9 @@ async def add_tools(tx: Transaction, conversation_id: ConversationId, added: lis
 async def configure(tx: Transaction, conversation_id: ConversationId, change: Mapping[str, Any]) -> None:
     """Apply one change to ``pi.agent``: a given field replaces the stored one, ``None`` clears it."""
 
+    for key, value in change.items():
+        if _CHANGE_FIELDS.get(key, key) == "maxTurns":
+            _check_max_turns(value)
     state = await tx.doc(AgentDoc, conversation_id)
     for key, value in change.items():
         field = _CHANGE_FIELDS.get(key, key)
@@ -156,13 +165,31 @@ async def configure(tx: Transaction, conversation_id: ConversationId, change: Ma
             state[field] = value
 
 
+def _check_max_turns(value: Any) -> None:
+    """Reject a turn bound that is not an integer ``1`` or more; ``None`` clears it, as any field."""
+
+    if value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 1):
+        return
+    raise ValueError(f"maxTurns must be an integer 1 or more, got {value!r}")
+
+
 _CHANGE_FIELDS = {
     "thinking_level": "thinkingLevel",
     "model_tools": "modelTools",
+    "max_turns": "maxTurns",
 }
 
 _AGENT_FIELDS = frozenset(
-    {"model", "thinkingLevel", "extensions", "tools", "modelTools", "instructions", "cwd"}
+    {
+        "model",
+        "thinkingLevel",
+        "extensions",
+        "tools",
+        "modelTools",
+        "instructions",
+        "cwd",
+        "maxTurns",
+    }
 )
 
 
@@ -292,6 +319,7 @@ def resolve_agent(
         sections=agent_sections,
         instructions=instructions,
         cwd=stored.get("cwd"),
+        max_turns=stored.get("maxTurns"),
     )
 
 

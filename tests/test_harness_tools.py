@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pytest
 from session_support import context
+from submission_support import transcript
 from task_support import aborted
 from tool_support import (
     DONE,
@@ -22,6 +23,7 @@ from tool_support import (
     all_entries,
     calls,
     chat_setup,
+    open_chat,
     result_text,
     results,
     run,
@@ -125,7 +127,7 @@ async def test_gives_tools_and_hooks_the_harness_models() -> None:
     await result["harness"].close(context)
 
 
-async def test_answers_calls_to_tools_the_request_did_not_offer_without_a_task() -> None:
+async def test_answers_calls_to_tools_the_request_did_not_offer_through_a_flagged_task() -> None:
     setup = chat_setup()
     add_tool(setup.registry, tool("echo", lambda *_args: {"output": []}))
     result = await run(setup, [calls(["ghost", {}, "c1"], ["echo", {}, "c2"]), DONE])
@@ -141,7 +143,33 @@ async def test_answers_calls_to_tools_the_request_did_not_offer_without_a_task()
             {"severity": "error", "code": "tool_unavailable", "message": "Tool ghost is not available"}
         ]
     }
-    assert len(await _tool_tasks(result["harness"], result["root"].id)) == 1
+    # #11043: the unoffered call has its own task, so `afterTool` and `control` apply to it as to
+    # any call, and only the offered one carries no flag.
+    inputs = [task["input"] for task in await _tool_tasks(result["harness"], result["root"].id)]
+    assert len(inputs) == 2
+    assert any(item.get("callId") == "c1" and item.get("unoffered") is True for item in inputs)
+    assert any(item.get("callId") == "c2" and "unoffered" not in item for item in inputs)
+    await result["harness"].close(context)
+
+
+async def test_never_runs_a_tool_the_request_did_not_offer_even_when_the_agent_has_it() -> None:
+    setup = chat_setup()
+    ran: list[str] = []
+    add_tool(
+        setup.registry,
+        tool("hidden", lambda *_args: ran.append("ran") or {"output": []}, deferred=True),
+    )
+    result = await run(setup, [calls(["hidden", {}, "c1"]), DONE])
+    assert result["status"] == "done"
+    assert ran == []
+    assert result_text(results(result["entries"])[0]) == (
+        "<harness>\n[error] Tool hidden is not available\n</harness>"
+    )
+    # Its slot carries the flag, and it settles through its own task like any other call.
+    live = await result["harness"].snapshot(LiveDoc, result["root"].id, context)
+    assert live == {}
+    tasks = await _tool_tasks(result["harness"], result["root"].id)
+    assert [task["input"].get("unoffered") for task in tasks] == [True]
     await result["harness"].close(context)
 
 
@@ -977,7 +1005,11 @@ async def test_rejects_details_still_waiting_when_the_call_is_aborted_during_aft
 
     add_tool(setup.registry, tool("slow", slow))
 
-    async def after_tool(_call: Any, _result: Any, _api: Any, call_context: Any) -> Any:
+    async def after_tool(_call: Any, result: Any, _api: Any, call_context: Any) -> Any:
+        # The abort handler's result runs the hooks too (#11043); only the executed call's waits
+        # (`harness-tools.test.ts:1268`). Without this guard the case hangs on the abort invocation.
+        if any(item.get("code") == "aborted" for item in result.get("diagnostics") or ()):
+            return None
         in_after_tool.set()
         await aborted(call_context.abort_signal)
         return None
@@ -1049,7 +1081,10 @@ async def test_records_a_results_usage_under_its_tool_and_on_the_message() -> No
     await result["harness"].close(context)
 
 
-async def test_a_round_handoff_appends_a_reset_entry_and_ends_the_run() -> None:
+async def test_continues_the_run_in_a_new_context_when_a_tool_requests_a_handoff() -> None:
+    # Upstream harness-inbox.test.ts:352. The reset precedes every queued item and the next
+    # generation answers in its context; the run's inputs settle with that answer, not with the
+    # tool-calling one (spec §7.3, "A round that also terminates ... ends the run as terminate").
     setup = chat_setup()
     add_tool(
         setup.registry,
@@ -1061,19 +1096,146 @@ async def test_a_round_handoff_appends_a_reset_entry_and_ends_the_run() -> None:
             },
         ),
     )
+    result = await run(setup, [calls(["handoff", {}, "c1"]), DONE])
+    assert result["status"] == "done"
+    entries = result["entries"]
+    assert transcript(entries) == [
+        "pi.user:go",
+        "pi.assistant",
+        "pi.tool-result",
+        "pi.reset:take over",
+        "pi.assistant:done",
+    ]
+    reset = next(entry for entry in entries if entry["kind"] == "pi.reset")
+    assert reset["head"] == reset["id"]
+    assert reset["model"][0]["content"] == "take over"
+    # The handoff continues the run: the next generation asks the model in the new context, whose
+    # model-visible history starts at the handoff text.
+    assert setup.faux.call_count == 2
+    asked = [f"{m['role']}:{m['content']}" for m in setup.faux.requests[1][0]["messages"]]
+    assert asked == ["system:", "user:take over"]
+    assert await result["harness"].snapshot(LiveDoc, result["root"].id, context) == {}
+    await result["harness"].close(context)
+
+
+async def test_ends_the_run_after_the_handoff_when_the_round_also_terminates() -> None:
+    # Upstream harness-inbox.test.ts:502: the reset is written, then the round ends as terminate
+    # does, settling the inputs with the tool-calling answer.
+    setup = chat_setup()
+    add_tool(
+        setup.registry,
+        tool(
+            "handoff",
+            lambda *_args: {
+                "output": [{"type": "text", "text": "bye"}],
+                "control": {"handoff": "take over", "terminate": True},
+            },
+        ),
+    )
     result = await run(setup, [calls(["handoff", {}, "c1"])])
     assert result["status"] == "done"
     entries = result["entries"]
-    assert [entry["kind"] for entry in entries] == [
-        "pi.user",
-        "pi.system",
+    assert transcript(entries) == [
+        "pi.user:go",
         "pi.assistant",
         "pi.tool-result",
-        "pi.reset",
+        "pi.reset:take over",
     ]
-    reset = entries[-1]
-    assert reset["head"] == reset["id"]
-    assert reset["model"][0]["content"] == "take over"
-    # The handoff ends the run: no successor generation asks the model again.
+    assert result["entries"][2]["id"]  # the tool-calling answer settles the input
     assert setup.faux.call_count == 1
+    assert await result["harness"].snapshot(LiveDoc, result["root"].id, context) == {}
     await result["harness"].close(context)
+
+
+async def _generation_task(harness: HarnessType, conversation_id: Any) -> Any:
+    """The run's ``pi.generation`` task, the one whose abort handler answers the calls it never started."""
+
+    page = await harness.commit(
+        lambda tx: tx.scan_tasks({"conversationId": conversation_id}, 100), context
+    )
+    found = [task for task in page["items"] if task["kind"] == "pi.generation"]
+    assert len(found) == 1, found
+    return found[0]["id"]
+
+
+async def test_answers_the_calls_an_aborted_round_never_started_with_their_own_aborted_result() -> None:
+    """1.5.0's built-in entries, the half of the ``pi.tool-result`` producer list 1.5.0 rewrote: the
+    calls a sequential round never started -- still in its ``pending``, and offered by its request --
+    get their own ``aborted`` result from the run's abort handler, beside the one the call that was
+    running writes itself.
+    """
+
+    setup = chat_setup()
+    # Sequential, so the round starts `a` and leaves `b` pending: the call that never started.
+    setup.settings["tool_execution"] = "sequential"
+    started = asyncio.Event()
+
+    async def hold(_args: Any, _api: Any, call_context: Any) -> Any:
+        started.set()
+        await aborted(call_context.abort_signal)
+        return {"output": []}
+
+    async def answer_b(_args: Any, _api: Any, _call_context: Any) -> Any:
+        return {"output": []}
+
+    add_tool(setup.registry, tool("a", hold))
+    add_tool(setup.registry, tool("b", answer_b))
+    setup.faux.set_responses([calls(["a", {}, "c1"], ["b", {}, "c2"]), DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await root.submit({"type": "input", "content": "go"}, context)
+    await started.wait()
+    # The round is in flight with `b` unstarted: the run itself is interrupted here, not one tool.
+    generation = await _generation_task(harness, root.id)
+    assert await harness.abort_task(generation, context) == "marked"
+    settled = await harness.wait_for_task(generation, context)
+    assert settled["state"]["outcome"]["status"] == "aborted"
+    texts = [result_text(item) for item in results(await all_entries(root))]
+    # The running call writes its own result; the one that never started gets the handler's.
+    assert any("Tool a was aborted" in text for text in texts), texts
+    assert any("Tool b was aborted" in text for text in texts), texts
+    await harness.close(context)
+
+
+async def test_answers_an_unoffered_call_the_aborted_round_left_pending_with_unavailable() -> None:
+    """1.5.0's built-in entries, the other arm of the half 1.5.0 rewrote: a call the request never
+    offered -- a tool the registry dropped after the model asked for it -- that was still in the
+    round's ``pending`` when the run was aborted gets the ``tool_unavailable`` result from the run's
+    abort handler, because a call its request did not offer could not have run either way.
+
+    Upstream ``src/harness/generation.ts``'s abort handler branches on the slot's ``unoffered`` flag
+    for exactly this case; the port's other ``tool_unavailable`` results come from the call's own tool
+    task (``test_harness_tools.py:130``, ``:155``, ``:176``, ``:232``), never from here.
+    """
+
+    setup = chat_setup()
+    # Sequential, so the round starts `a` and leaves the unoffered call pending.
+    setup.settings["tool_execution"] = "sequential"
+    started = asyncio.Event()
+
+    async def hold(_args: Any, _api: Any, call_context: Any) -> Any:
+        started.set()
+        await aborted(call_context.abort_signal)
+        return {"output": []}
+
+    add_tool(setup.registry, tool("a", hold))
+    # `ghost` is in no registry at all: the request does not offer it, and its task would only answer
+    # it with `tool_unavailable` had the round ever reached it.
+    setup.faux.set_responses([calls(["a", {}, "c1"], ["ghost", {}, "c2"]), DONE])
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await root.submit({"type": "input", "content": "go"}, context)
+    await started.wait()
+    generation = await _generation_task(harness, root.id)
+    assert await harness.abort_task(generation, context) == "marked"
+    settled = await harness.wait_for_task(generation, context)
+    assert settled["state"]["outcome"]["status"] == "aborted"
+    texts = [result_text(item) for item in results(await all_entries(root))]
+    # The running call is answered as aborted; the unoffered one is answered as unavailable, which is
+    # a different result from anything the tool-task path writes.
+    assert any("Tool a was aborted" in text for text in texts), texts
+    assert any("Tool ghost is not available" in text for text in texts), texts
+    assert not any("Tool ghost was aborted" in text for text in texts), texts
+    await harness.close(context)

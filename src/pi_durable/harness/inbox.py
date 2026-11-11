@@ -69,9 +69,13 @@ class Boundary:
 
 @dataclass(frozen=True, slots=True)
 class BoundaryResult:
-    """Selected user submission IDs and whether a reset was among the placed writes."""
+    """Selected user submission IDs, the first entry the boundary placed, and whether a reset was placed.
+
+    ``first`` is where a run the boundary starts begins: ``LiveRun.first``.
+    """
 
     users: list[SubmissionId]
+    first: EntryId | None
     reset: bool
 
 
@@ -135,6 +139,7 @@ async def apply_boundary(
     users.sort()
 
     placed: list[SubmissionId] = []
+    first: EntryId | None = None
     for index in writes:
         item = items[index]
         draft = _entry_draft(item)
@@ -146,6 +151,8 @@ async def apply_boundary(
         if head is not None:
             boundary.head = entry["id"] if head == "self" else head
         tx.place_submission(cast(SubmissionId, item["id"]), entry["id"])
+        if first is None:
+            first = entry["id"]
 
     for index in users:
         item = items[index]
@@ -158,10 +165,12 @@ async def apply_boundary(
         )
         tx.place_submission(cast(SubmissionId, item["id"]), entry["id"])
         placed.append(cast(SubmissionId, item["id"]))
+        if first is None:
+            first = entry["id"]
 
     for index in sorted([*writes, *users], reverse=True):
         del items[index]
-    return BoundaryResult(users=placed, reset=reset)
+    return BoundaryResult(users=placed, first=first, reset=reset)
 
 
 async def append_input(

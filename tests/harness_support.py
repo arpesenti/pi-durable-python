@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any, cast
 
-from session_support import context
+from session_support import Deferred, context
 
 from pi_durable import MemoryStorage
 from pi_durable.harness.define import define_extension, define_tool, section
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
-from pi_durable.harness.types import Extension, Registry, ToolRegistration
+from pi_durable.harness.types import Extension, Registry, Report, ToolRegistration
 from pi_durable.types import MessageRecord, Storage
 
 
@@ -26,12 +27,40 @@ def tool(name: str, description: str | None = None) -> ToolRegistration:
     )
 
 
+class HeldLine:
+    """A held Session line: :attr:`entered` settles once the holding commit runs, ``release()`` lets it go."""
+
+    def __init__(self) -> None:
+        self.entered = Deferred()
+        self._released = Deferred()
+
+    def release(self) -> None:
+        self._released.resolve()
+
+    async def hold(self, _tx: Any) -> None:
+        self.entered.resolve()
+        await self._released.promise
+
+
+def hold_line(harness: Any) -> HeldLine:
+    """Hold the mutation line with a commit whose callback waits; the jobs queued after it start on release.
+
+    Upstream's ``holdLine`` (``test/harness-tasks.test.ts:91``). Group commit stores off the line, so a
+    held Storage call no longer holds the line: a test that wants the line held commits a callback that
+    waits for it.
+    """
+
+    held = HeldLine()
+    asyncio.ensure_future(harness.commit(held.hold, context))
+    return held
+
+
 async def open_harness(
     storage: Storage | None = None,
     tool_names: tuple[str, ...] = (),
     *,
     registry: Registry | None = None,
-    on_report: Callable[[BaseException], Any] | None = None,
+    on_report: Callable[[Report], Any] | None = None,
 ) -> dict[str, Any]:
     """Open a Harness with a fresh registry holding the named tools."""
 

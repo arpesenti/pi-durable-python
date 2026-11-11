@@ -88,7 +88,31 @@ READ_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["path"],
+    # Opened, as upstream's read is: `obj({...}, {open: true})` (src/tools/read.ts).
+    "additionalProperties": True,
 }
+
+READ_IMAGE_BLOCK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {"const": "image"},
+        "data": {"type": "string"},
+        "mimeType": {"type": "string"},
+    },
+    "required": ["type", "data", "mimeType"],
+    # Opened upstream too: `obj({...}, {open: true})`.
+    "additionalProperties": True,
+}
+
+READ_STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
+    "anyOf": [{"type": "string"}, READ_IMAGE_BLOCK_SCHEMA]
+}
+"""What one ``read`` call hands back: the text it read, or the image block it produced.
+
+Upstream's ``union([str(), obj({type: lit("image"), data: str(), mimeType: str()}, {open: true})])``
+(src/tools/read.ts), spelled as data. An error result hands back no value, which no union can say;
+upstream lets an error omit it, as the harness here does.
+"""
 
 
 def _is_safe_integer(value: Any) -> bool:
@@ -303,7 +327,11 @@ async def _read_text(
         )
 
     output: list[Any] = [] if output_text == "" else [{"type": "text", "text": output_text}]
-    result: ToolExecutionResult = {"output": output, "diagnostics": diagnostics}
+    result: ToolExecutionResult = {
+        "output": output,
+        "diagnostics": diagnostics,
+        "structuredOutput": output_text,
+    }
     if details is not None:
         result["details"] = cast(JsonValue, details)
     return result
@@ -416,9 +444,13 @@ async def _read_image(
     if not image_model["vision"]:
         notes.append("The current model does not support images; it sees a placeholder instead.")
     message = " ".join([f"Read image file [{output_mime}].", *notes])
+    # One block, handed to the model as the content and to programs as the value; a TypedDict is
+    # not assignable to the result's ``JsonValue``, so the block is a plain object here.
+    block: dict[str, Any] = {"type": "image", "data": data, "mimeType": output_mime}
     return {
-        "output": [{"type": "image", "data": data, "mimeType": output_mime}],
+        "output": [block],
         "diagnostics": [ToolDiagnostic(severity="info", code="image", message=message)],
+        "structuredOutput": block,
     }
 
 
@@ -491,6 +523,7 @@ def create_read_tool(
                 "full file, continue with offset until complete."
             ),
             "parameters": READ_SCHEMA,
+            "structured_output_schema": READ_STRUCTURED_OUTPUT_SCHEMA,
             "execute": execute,
         }
     )
@@ -498,7 +531,9 @@ def create_read_tool(
 
 __all__ = [
     "READ_CHUNK",
+    "READ_IMAGE_BLOCK_SCHEMA",
     "READ_SCHEMA",
+    "READ_STRUCTURED_OUTPUT_SCHEMA",
     "ReadToolDetails",
     "ReadToolInput",
     "ReadToolOptions",

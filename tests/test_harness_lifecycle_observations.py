@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from session_support import ControlledStorage, context, flush
+from session_support import ControlledStorage, Mirror, context, flush
 from task_support import completed, open_tasks
 
 from pi_durable import MemoryStorage, define_doc
@@ -25,6 +25,24 @@ Notes = define_doc(
         "checkpoint_when": lambda _value, _ops, _info: False,
     }
 )
+
+
+class Recorder:
+    """A host observer naming itself in a shared list for every call and recording its ends."""
+
+    def __init__(self, name: str, frames: list[str]) -> None:
+        self.name = name
+        self.frames = frames
+        self.value: Any = None
+        self.ends: list[Any] = []
+
+    def advance(self, call: Any, _context: Any = None) -> None:
+        self.frames.append(self.name)
+        if call["kind"] == "value" and not call["retired"]:
+            self.value = call["value"]
+
+    def end(self, end: Any) -> None:
+        self.ends.append(end)
 
 
 def one_step(name: str) -> Any:
@@ -47,37 +65,25 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     opened = await open_tasks(storage, [])
     harness = opened["harness"]
     root = await harness.root(context)
+    frames: list[str] = []
 
     async def before(tx: Any) -> None:
         (await tx.doc(Notes)).text = "before"
 
     await harness.commit(before, context)
-    doc_state = await harness.document_state(Notes, context)
+    doc_mirror = Recorder("docObserver", frames)
+    view_mirror = Recorder("viewObserver", frames)
+    graph_mirror = Recorder("graphObserver", frames)
+    doc_observation = await harness.observe_doc(Notes, doc_mirror, context)
     doc_watch = await harness.watch_doc(Notes, context)
-    assert doc_state is not None and doc_watch is not None
-    view_state = await root.view_state(context)
+    assert doc_observation is not None and doc_watch is not None
+    view_observation = await harness.observe_conversation(root.id, view_mirror, context)
     view_watch = await root.watch(context)
-    graph_state = await harness.task_graph(context)
+    graph_observation = await harness.observe_task_graph(graph_mirror, context)
     graph_watch = await harness.watch_task_graph(context)
-    frames: list[str] = []
-
-    def state_listener(_value: Any, _context: Any, delivery: Any, name: str) -> None:
-        if delivery.kind == "update":
-            frames.append(name)
-
-    doc_state.subscribe(lambda value, ctx, delivery: state_listener(value, ctx, delivery, "docState"))
-    view_state.subscribe(
-        lambda value, ctx, delivery: state_listener(value, ctx, delivery, "viewState")
-    )
-    graph_state.subscribe(
-        lambda value, ctx, delivery: state_listener(value, ctx, delivery, "graphState")
-    )
-    doc_watch.start(lambda _value, _ops, _ctx: frames.append("docWatch"))
-    view_watch.start(lambda _value, _ops, _ctx: frames.append("viewWatch"))
-    graph_watch.start(lambda _value, _ops, _ctx: frames.append("graphWatch"))
-    doc_value = doc_state.value
-    view_value = view_state.value
-
+    doc_watch.start(lambda _call, _ctx: frames.append("docWatch"))
+    view_watch.start(lambda _call, _ctx: frames.append("viewWatch"))
+    graph_watch.start(lambda _call, _ctx: frames.append("graphWatch"))
     held = storage.hold_commits()
 
     async def during(tx: Any) -> None:
@@ -97,12 +103,12 @@ async def test_publishes_no_frame_to_observation_from_a_commit_that_settles_duri
     await closing
     await flush()
     assert frames == []
-    assert doc_state.value is doc_value
-    assert view_state.value is view_value
-    assert graph_state.value == {"tasks": {}}
-    assert await graph_watch.closed == {"reason": "session_closed"}
-    assert await doc_watch.closed == {"reason": "session_closed"}
-    assert await view_watch.closed == {"reason": "session_closed"}
+    assert doc_observation.value == {"text": "before"}
+    assert [entry["kind"] for entry in view_observation.value["entries"]] == []
+    assert graph_observation.value == {"tasks": {}}
+    assert await graph_watch.closed == {"kind": "ended"}
+    assert await doc_watch.closed == {"kind": "ended"}
+    assert await view_watch.closed == {"kind": "ended"}
     # The commit itself settled.
     assert any(write["type"] == "entry" for write in storage.commits[-1])
 
@@ -120,9 +126,12 @@ async def test_queued_view_and_graph_acquisitions_reject_at_the_seal() -> None:
     blocking = asyncio.ensure_future(harness.commit(blocker, context))
     await held.entered.wait()
     queued = {
-        "viewState": asyncio.ensure_future(root.view_state(context)),
-        "watch": asyncio.ensure_future(root.watch(context)),
-        "taskGraph": asyncio.ensure_future(harness.task_graph(context)),
+        "viewObserver": asyncio.ensure_future(
+            harness.observe_conversation(root.id, Mirror(), context)
+        ),        "watch": asyncio.ensure_future(root.watch(context)),
+        "taskGraphObserver": asyncio.ensure_future(
+            harness.observe_task_graph(Mirror(), context)
+        ),
         "watchTaskGraph": asyncio.ensure_future(harness.watch_task_graph(context)),
     }
     await asyncio.sleep(0)
@@ -184,21 +193,21 @@ async def test_read_only_viewers_never_enable_scheduling() -> None:
     await harness.usage(context)
     await harness.conversation(root.id, context)
     await harness.snapshot(Notes, context)
-    doc_state = await harness.document_state(Notes, context)
-    assert doc_state is not None
-    doc_state.dispose()
+    doc_observation = await harness.observe_doc(Notes, Mirror(), context)
+    assert doc_observation is not None
+    doc_observation.detach()
     doc_watch = await harness.watch_doc(Notes, context)
     assert doc_watch is not None
     await doc_watch.stop()
     await root.agent(context)
     await root.context(context)
     await root.entries({}, 10, None, context)
-    view_state = await root.view_state(context)
-    view_state.dispose()
+    view_observation = await harness.observe_conversation(root.id, Mirror(), context)
+    view_observation.detach()
     view_watch = await root.watch(context)
     await view_watch.stop()
-    graph_state = await harness.task_graph(context)
-    graph_state.dispose()
+    graph_observation = await harness.observe_task_graph(Mirror(), context)
+    graph_observation.detach()
     graph_watch = await harness.watch_task_graph(context)
     await graph_watch.stop()
     await flush()

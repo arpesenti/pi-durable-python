@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, NotRequired, TypedDict, cast
 
 from ..context import Context
 from ..entries import AssistantEntry, ResetEntry, SystemEntry, UserEntry
-from ..ids import ConversationId, EntryId, TaskId
+from ..errors import is_failure
+from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue, copy_json
 from ..providers import (
     is_context_overflow,
@@ -26,16 +28,34 @@ from ..providers import (
 )
 from ..session.drafts import DraftList, DraftObject
 from ..session.transaction import Transaction
-from ..tasks import define_task
+from ..tasks import Task, define_task
 from ..types import EntryDraft, MessageRecord, TaskRecord
-from .agent import add_tools, section_extension
+from .agent import add_tools, agent_hooks, section_extension
 from .compaction import compaction_policy, create_compaction, estimate_context, select_cut
-from .inbox import Boundary, QueueModes, apply_boundary, prepare_boundary, withdraw_queued_inputs
-from .live import LiveDoc, end_run, start_run
+from .inbox import (
+    Boundary,
+    QueueModes,
+    apply_boundary,
+    has_queued_reset,
+    prepare_boundary,
+    withdraw_queued_inputs,
+)
+from .live import (
+    GENERATION_TASK_NAME,
+    PROGRESS_COMMIT,
+    LiveDoc,
+    RunEndUnanswered,
+    cut_off_count,
+    cut_off_too_often,
+    end_run,
+    salvageable,
+    start_run,
+)
 from .prompt import current_tools, plan_system_entries, render_sections, replay_sections
 from .provider import ensure_provider_session_id
+from .scheduler import ended_by_crashes
 from .tool import ToolTask, append_tool_result, entry_tool_calls, harness_error
-from .types import AfterFailedRun, ContextView, ModelRef, PromptInput
+from .types import AfterFailedRun, ContextView, ModelRef, PromptInput, RunSummary
 from .usage import record_usage
 from .util import (
     assign_json,
@@ -75,6 +95,8 @@ class RetryCheckpoint(TypedDict):
     attempt: int
     compacted: NotRequired[TaskId]
     until: int
+    poll: NotRequired[dict[str, Any]]
+    """The deferred response an interrupted poll will be polled again for."""
 
 
 class PollCheckpoint(TypedDict):
@@ -94,8 +116,29 @@ class ToolsCheckpoint(TypedDict):
     pending: list[str]
 
 
+class FinishCheckpoint(TypedDict):
+    """A run that answered, waiting for what its ``afterRun`` hooks ask for."""
+
+    phase: str
+    run: RunSummary
+
+
+class DrainCheckpoint(TypedDict):
+    """The run's after-run tasks are running; their outcomes do not decide the run's."""
+
+    phase: str
+    answer: EntryId
+    tasks: list[TaskId]
+
+
 GenerationCheckpoint = (
-    PrepareCheckpoint | RequestCheckpoint | RetryCheckpoint | PollCheckpoint | ToolsCheckpoint
+    PrepareCheckpoint
+    | RequestCheckpoint
+    | RetryCheckpoint
+    | PollCheckpoint
+    | ToolsCheckpoint
+    | FinishCheckpoint
+    | DrainCheckpoint
 )
 """Checkpoint shapes the generation phases read and write."""
 
@@ -113,6 +156,9 @@ def _compact_fields(compacted: Any) -> dict[str, Any]:
 
 
 async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     conversation_id = runtime.conversation_id
     agent = await runtime.agent(context)
     settings = runtime.settings
@@ -139,6 +185,13 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
             await fail_model_error(runtime, compaction_failure(outcome), context)
             return
     view = await runtime.context(conversation_id, context)
+    # The model owes an answer only to a context ending in a user message or tool results; system
+    # messages say nothing it answers. Otherwise, as for a continue after an answer or in an empty
+    # conversation, the run ends before any request.
+    last = next((message for message in reversed(view["messages"]) if message["role"] != "system"), None)
+    if last is None or last["role"] not in ("user", "toolResult"):
+        await fail_nothing_to_answer(runtime, context)
+        return
     shown = replay_sections(view["messages"])
     env: Any = None
     try:
@@ -146,7 +199,7 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
     except BaseException as error:
         if context.abort_signal is not None and context.abort_signal.aborted:
             raise
-        runtime.report(error, {"type": "host", "callback": "env"})
+        runtime.report(error, {"kind": "host", "callback": "env"})
     prompt_input = PromptInput(
         conversation_id=conversation_id,
         agent=agent,
@@ -159,7 +212,7 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
         runtime.report(
             error,
             {
-                "type": "extension",
+                "kind": "extension",
                 **optional_extension(section_extension(agent, failed_section.key)),
             },
         )
@@ -226,6 +279,16 @@ async def _prepare_phase(task: TaskRecord, runtime: Any, context: Context) -> No
 
 async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     checkpoint = task_checkpoint(task)
+    # Charging the attempt may itself be what keeps failing, such as converting a huge partial: the
+    # limit ends it.
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
+    # The host stopped while this request was in flight: a failed attempt under the retry policy, not
+    # a resend (spec section 8.3).
+    if task.get("restarts") is not None:
+        await interrupted(runtime, checkpoint, context)
+        return
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     ref = cast(ModelRef, checkpoint["model"])
@@ -239,7 +302,10 @@ async def _request_phase(task: TaskRecord, runtime: Any, context: Context) -> No
         await convert_partial(tx, live, conversation_id)
         live["generation"] = {"attempt": attempt}
 
-    await runtime.commit(start, context)
+    # The attempt shown is presentation, stored like progress (`PROGRESS_COMMIT`); converting a
+    # partial left by an interrupted attempt appends an entry, which makes the commit immediate
+    # (`generation.ts:269-283`).
+    await runtime.commit(start, context, PROGRESS_COMMIT)
     model = runtime.models.get_model(ref["provider"], ref["modelId"])
     if model is None:
         await fail_no_model(runtime, ref, context)
@@ -281,13 +347,31 @@ async def _retry_phase(task: TaskRecord, runtime: Any, context: Context) -> None
     attempt = int(checkpoint["attempt"])
     compacted = checkpoint.get("compacted")
     until = int(checkpoint["until"])
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     if until > runtime.now():
         await runtime.sleep_until(until, checkpoint, context)
         return
+    poll = checkpoint.get("poll")
     conversation_id = runtime.conversation_id
 
     async def retry(tx: Transaction) -> dict[str, Any]:
         live = await tx.doc(LiveDoc, conversation_id)
+        # A poll the host died during polls its response again, as the next attempt.
+        if poll is not None:
+            poll_at = runtime.now()
+            live["generation"] = {"attempt": attempt + 1, "deferred": {"pollAt": poll_at}}
+            return {
+                "status": "running",
+                "checkpoint": {
+                    "phase": "poll",
+                    "attempt": attempt + 1,
+                    **_compact_fields(compacted),
+                    **cast(dict[str, Any], poll),
+                    "pollAt": poll_at,
+                },
+            }
         live["generation"] = {"attempt": attempt + 1}
         return {
             "status": "running",
@@ -301,6 +385,16 @@ async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
     """After the sleep until ``pollAt``; a run before it sleeps again (spec section 8.3)."""
 
     checkpoint = task_checkpoint(task)
+    # Cut off the limit in a row, the poll ends the run rather than fetching again.
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
+    # The host stopped while the poll's fetch was in flight: a failed attempt, as for a request. Checked
+    # before the time, which may have moved backwards on a replacement host; a sleeping poll is not cut
+    # off.
+    if task.get("restarts") is not None:
+        await interrupted(runtime, checkpoint, context)
+        return
     poll_at = int(checkpoint["pollAt"])
     if poll_at > runtime.now():
         await runtime.sleep_until(poll_at, checkpoint, context)
@@ -328,6 +422,9 @@ async def _poll_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
 
 
 async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    if cut_off_too_often(task, runtime):
+        await _end_cut_off(runtime, task, context)
+        return
     checkpoint = cast(ToolsCheckpoint, task_checkpoint(task))
     assistant = checkpoint["assistant"]
     started = list(checkpoint["tools"])
@@ -340,7 +437,17 @@ async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None
 
     async def start(tx: Transaction) -> dict[str, Any]:
         live = await tx.doc(LiveDoc, runtime.conversation_id)
-        task_id = await create_tool_task(tx, runtime, assistant, call_id)
+        unoffered = next(
+            (
+                True
+                for slot in live.get("tools") or ()
+                if slot.get("callId") == call_id
+                and slot.get("taskId") is None
+                and slot.get("unoffered") is True
+            ),
+            None,
+        )
+        task_id = await create_tool_task(tx, runtime, assistant, call_id, unoffered)
         for slot in live.get("tools") or ():
             if slot.get("callId") == call_id and slot.get("taskId") is None:
                 slot["taskId"] = task_id
@@ -356,21 +463,75 @@ async def _tools_phase(task: TaskRecord, runtime: Any, context: Context) -> None
     await runtime.commit(start, context)
 
 
+async def _finish_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """Ask the ``afterRun`` hooks for tasks and create them as the generation's children (spec §8.3).
+
+    The run answered, settled its inputs, and kept ``pi.live.run`` in commit A; this phase asks once,
+    creates what passed the checks in the commit that moves to ``drain``, and ends the run now when the
+    hooks asked for nothing.
+    """
+
+    run = cast(RunSummary, task_checkpoint(task)["run"])
+    if cut_off_too_often(task, runtime):
+        await _end_answered_cut_off(runtime, task, run["answer"], context)
+        return
+    prepared: list[dict[str, Any]] = []
+
+    async def ask(handler: Callable[..., Any]) -> None:
+        asked = await call_hook(handler, dict(run), runtime, context)
+        if isinstance(asked, Mapping):
+            requests = asked.get("tasks")
+            if requests is not None:
+                prepare_run_end_tasks(runtime, cast(Sequence[Mapping[str, Any]], requests), prepared)
+
+    await runtime.hooks.each("afterRun", ask)
+    if not prepared:
+        await end_answered_run(runtime, run["answer"], context)
+        return
+    conversation_id = runtime.conversation_id
+
+    async def create(tx: Transaction) -> dict[str, Any]:
+        created: list[TaskId] = []
+        for ready in prepared:
+            created.append(
+                await tx.create_task(
+                    ready["task"],
+                    ready["input"],
+                    {"ownership": {"kind": "task", "taskId": runtime.task_id}},
+                )
+            )
+        live = await tx.doc(LiveDoc, conversation_id)
+        held = live.get("run")
+        if held is not None and held["taskId"] == runtime.task_id and held.get("afterRun") is not None:
+            held["afterRun"]["tasks"] = created
+        return {
+            "status": "waiting",
+            "checkpoint": {"phase": "drain", "answer": run["answer"], "tasks": created},
+            "on": created,
+            "policy": "allSettled",
+        }
+
+    await runtime.commit(create, context)
+
+
+async def _drain_phase(task: TaskRecord, runtime: Any, context: Context) -> None:
+    """The after-run tasks are terminal, whatever their outcomes: end the run."""
+
+    answer = task_checkpoint(task)["answer"]
+    if cut_off_too_often(task, runtime):
+        await _end_answered_cut_off(runtime, task, cast(EntryId, answer), context)
+        return
+    await end_answered_run(runtime, answer, context)
+
+
 async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     checkpoint = task_checkpoint(task)
-    if checkpoint["phase"] == "poll":
-        ref = cast(ModelRef, checkpoint["model"])
-        model = runtime.models.get_model(ref["provider"], ref["modelId"])
-        if model is not None:
-            try:
-                await runtime.models.cancel_deferred(
-                    model, cast(JsonObject, checkpoint["handle"]), {"signal": runtime.signal}
-                )
-            except BaseException as error:
-                # A provider call such as cancelling a deferred response is a host callback.
-                runtime.report(error, {"type": "host", "callback": "models"})
+    polled = _deferred_of(checkpoint)
+    if polled is not None:
+        await _cancel_deferred(runtime, polled, context)
     conversation_id = runtime.conversation_id
-    # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results.
+    # Runs after the round's tool tasks are terminal; calls never started get ``aborted`` results,
+    # unoffered ones ``tool_unavailable``.
     unstarted = (
         await read_calls(runtime, checkpoint["assistant"], checkpoint["pending"], context)
         if checkpoint["phase"] == "tools"
@@ -381,12 +542,24 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
         live = await tx.doc(LiveDoc, conversation_id)
         await convert_partial(tx, live, conversation_id)
         for call in unstarted:
-            message = f"Tool {call['name']} was aborted"
+            # A call its request did not offer could not have run either way.
+            unoffered = next(
+                (
+                    slot.get("unoffered") is True
+                    for slot in live.get("tools") or ()
+                    if slot.get("callId") == call["id"]
+                ),
+                False,
+            )
+            if unoffered:
+                error = harness_error("tool_unavailable", f"Tool {call['name']} is not available")
+            else:
+                error = harness_error("aborted", f"Tool {call['name']} was aborted")
             await append_tool_result(
                 tx,
                 conversation_id,
                 call,
-                harness_error("aborted", message),
+                error,
                 {"timestamp": runtime.now()},
             )
         end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "aborted"})
@@ -395,17 +568,31 @@ async def _abort(task: TaskRecord, runtime: Any, context: Context) -> None:
     await runtime.commit(stop, context)
 
 
+def _migrate(input: Any, checkpoint: Any, _version: int) -> dict[str, Any]:
+    """Carry a stored ``pi.generation`` task forward to version 2.
+
+    Version 2 leaves calls to tools the request did not offer in a sequential round's ``pending``,
+    flagged ``unoffered`` in their slots; a version 1 checkpoint has no such calls, so it is kept as
+    it is.
+    """
+
+    return {"input": input, "checkpoint": checkpoint}
+
+
 GenerationTask = define_task(
     {
         "name": "pi.generation",
-        "version": 1,
+        "version": 2,
         "initial": lambda _input: {"phase": "prepare", "attempt": 1},
+        "migrate": _migrate,
         "phases": {
             "prepare": _prepare_phase,
             "request": _request_phase,
             "retry": _retry_phase,
             "poll": _poll_phase,
             "tools": _tools_phase,
+            "finish": _finish_phase,
+            "drain": _drain_phase,
         },
         "abort": _abort,
     }
@@ -479,7 +666,9 @@ class _Flusher:
             generation = live["generation"]
             assign_json(generation, "message", message)
 
-        await self._runtime.commit(flush, self._context)
+        # The partial answer is presentation, not state: deferred, so watches see each revision at once and
+        # Storage gets them together (`generation.ts:715-724`).
+        await self._runtime.commit(flush, self._context, PROGRESS_COMMIT)
 
 
 async def stream_response(
@@ -490,13 +679,31 @@ async def stream_response(
     attempt: int,
     context: Context,
 ) -> dict[str, Any]:
-    """Stream one request and return the terminal message, publishing throttled partials."""
+    """Stream one request and return the terminal message, publishing throttled partials.
 
+    The ``beforeProviderRequest`` chain runs over the payload as it is built, before the provider call,
+    and its replacement holds for this request only: the body is rebuilt from the committed messages on
+    every run of the request phase, and the chain runs each time (spec section 7.2). A request a close
+    resends is the same attempt, so the rebuilt body the chain sees is the committed one, not the
+    replacement an earlier send of the same attempt took.
+    """
+
+    payload: dict[str, Any] = {"messages": list(messages)}
+
+    async def before_provider_request(handler: Callable[..., Any]) -> None:
+        nonlocal payload
+        replaced = await call_hook(handler, {"model": model, "payload": payload}, runtime, context)
+        if replaced is not None:
+            value = replaced.get("payload") if isinstance(replaced, Mapping) else None
+            if value is not None:
+                payload = value
+
+    await runtime.hooks.each("beforeProviderRequest", before_provider_request)
     interval = int(runtime.settings.progress.get("partial_interval_ms", 100))
     flusher = _Flusher(runtime, interval, attempt, context)
     flusher.start()
     try:
-        stream = runtime.models.stream_simple(model, {"messages": list(messages)}, options)
+        stream = runtime.models.stream_simple(model, payload, options)
         async for event in stream:
             kind = event.get("type")
             if kind in ("done", "error"):
@@ -665,6 +872,7 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             continuation = result.get("continue")
 
     await runtime.hooks.each("onYield", on_yield)
+    after_run = await asks_after_run(runtime, context)
     conversation_id = runtime.conversation_id
 
     async def finish(tx: Transaction) -> dict[str, Any]:
@@ -680,12 +888,29 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             "status": "terminal",
             "outcome": {"status": "completed", "result": {"entryId": entry["id"]}},
         }
+        continues = continuation if takes_continuation(continuation, boundary) else None
+        if continues is None and after_run:
+            # Commit A: the run keeps ``pi.live.run`` and asks its hooks in ``finish``; the final
+            # boundary, and the queued items it selects, wait for the run's end.
+            held = hold_run(
+                tx,
+                live,
+                runtime,
+                {"reason": "answer", "answer": entry["id"], "last": entry["id"]},
+            )
+            if held is not None:
+                return held
         placed = await apply_boundary(tx, boundary, "final", runtime.now())
-        if continuation is not None and not placed.users and not placed.reset:
-            user = {"role": "user", "content": continuation, "timestamp": runtime.now()}
+        if continues is not None:
+            user = {"role": "user", "content": continues, "timestamp": runtime.now()}
             await tx.append_entry(
                 UserEntry, conversation_id, cast(EntryDraft, {"model": [user]})
             )
+            # The continuation starts the run's turn count over: bounding ``onYield`` loops is the
+            # extension's job.
+            run = live.get("run")
+            if run is not None and run["taskId"] == runtime.task_id:
+                run["turns"] = 0
             del live["generation"]
             hand_over(
                 live,
@@ -700,7 +925,7 @@ async def answer(runtime: Any, message: Mapping[str, Any], context: Context) -> 
             {"status": "done", "answer": entry["id"]},
         )
         if placed.users:
-            await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
+            await start_run(tx, conversation_id, live, placed.users, task_for(runtime), placed.first)
         return result
 
     await runtime.commit(finish, context)
@@ -730,13 +955,24 @@ def _is_sequential(tools: Sequence[Any], name: str) -> bool:
 
 
 async def create_tool_task(
-    tx: Transaction, runtime: Any, assistant: EntryId, call_id: str
+    tx: Transaction,
+    runtime: Any,
+    assistant: EntryId,
+    call_id: str,
+    unoffered: bool | None = None,
 ) -> TaskId:
-    """A tool task for ``call_id``, owned by the generation."""
+    """A tool task for ``call_id``, owned by the generation.
 
+    ``unoffered`` flags a call to a tool the request did not offer: its task settles
+    ``tool_unavailable`` without resolving the name.
+    """
+
+    input: dict[str, Any] = {"kind": "model", "assistant": assistant, "callId": call_id}
+    if unoffered:
+        input["unoffered"] = True
     return await tx.create_task(
         ToolTask,
-        {"kind": "model", "assistant": assistant, "callId": call_id},
+        input,
         {"ownership": {"kind": "task", "taskId": runtime.task_id}},
     )
 
@@ -750,9 +986,10 @@ async def start_tool_round(
 ) -> None:
     """Append the tool-calling answer and start its tool round in one commit.
 
-    A call to a tool the request did not offer gets its ``tool_unavailable`` result here; every other
-    call gets a tool task owned by the generation, only the first one now when the round is
-    sequential. The generation then waits for them in its ``tools`` phase, keeping the run.
+    Every call gets a tool task owned by the generation, in call order, only the first one now when
+    the round is sequential; a call to a tool the request did not offer is flagged, and its task
+    settles ``tool_unavailable``. The generation then waits for them in its ``tools`` phase, keeping
+    the run.
     """
 
     conversation_id = runtime.conversation_id
@@ -774,41 +1011,35 @@ async def start_tool_round(
         tool_tasks: list[TaskId] = []
         pending: list[str] = []
         for call in calls:
-            if call["name"] not in offered:
-                unavailable = harness_error("tool_unavailable", f"Tool {call['name']} is not available")
-                result = await append_tool_result(
-                    tx,
-                    conversation_id,
-                    call,
-                    unavailable,
-                    {"timestamp": runtime.now()},
-                )
-                slots.append(
-                    {
-                        "callId": call["id"],
-                        "name": call["name"],
-                        "status": "done",
-                        "entry": result["id"],
-                    }
-                )
-                continue
+            unoffered = call["name"] not in offered
             if sequential and tool_tasks:
                 pending.append(call["id"])
-                slots.append({"callId": call["id"], "name": call["name"], "status": "pending"})
+                slot = {"callId": call["id"], "name": call["name"], "status": "pending"}
+                if unoffered:
+                    slot["unoffered"] = True
+                slots.append(slot)
                 continue
-            task_id = await create_tool_task(tx, runtime, entry["id"], call["id"])
+            task_id = await create_tool_task(tx, runtime, entry["id"], call["id"], unoffered)
             tool_tasks.append(task_id)
-            slots.append(
-                {
-                    "callId": call["id"],
-                    "name": call["name"],
-                    "taskId": task_id,
-                    "status": "pending",
-                }
-            )
+            started = {
+                "callId": call["id"],
+                "name": call["name"],
+                "taskId": task_id,
+                "status": "pending",
+            }
+            if unoffered:
+                started["unoffered"] = True
+            slots.append(started)
         if "generation" in live:
             del live["generation"]
         live["tools"] = slots
+        run = live.get("run")
+        if run is not None and run["taskId"] == runtime.task_id:
+            # A tool round is one turn of the run.
+            run["turns"] += 1
+            # A run its boundary started without placing anything, as a continue after an answer, begins here.
+            if run.get("first") is None:
+                run["first"] = entry["id"]
         checkpoint_value: dict[str, Any] = {
             "phase": "tools",
             "assistant": entry["id"],
@@ -867,6 +1098,12 @@ async def finish_tool_round(
     for control in controls.values():
         if control is not None and control.get("handoff") is not None:
             handoff = str(control["handoff"])
+    # Read from the phase's agent, as every agent field; a ``configure()`` during the round
+    # applies at its end.
+    max_turns = (await runtime.agent(context)).max_turns
+    # A terminate round asks the hooks too: the run ends, and its last entry is the newest result or
+    # the handoff's reset.
+    after_run = terminate and await asks_after_run(runtime, context)
 
     async def finish(tx: Transaction) -> dict[str, Any]:
         boundary = await prepare_boundary(
@@ -878,38 +1115,83 @@ async def finish_tool_round(
             await add_tools(tx, conversation_id, added)
         live = await tx.doc(LiveDoc, conversation_id)
         now = runtime.now()
-        if terminate or handoff is not None:
-            if handoff is not None:
-                message = {"role": "user", "content": handoff, "timestamp": now}
-                entry = await tx.append_entry(
-                    ResetEntry,
-                    conversation_id,
-                    cast(EntryDraft, {"head": "self", "model": [message]}),
-                )
-                boundary.head = entry["id"]
+        # The run's last entry so far: the newest result, or the assistant when no result has an entry.
+        last = max([assistant, *results])
+        if handoff is not None:
+            message = {"role": "user", "content": handoff, "timestamp": now}
+            entry = await tx.append_entry(
+                ResetEntry,
+                conversation_id,
+                cast(EntryDraft, {"head": "self", "model": [message]}),
+            )
+            boundary.head = entry["id"]
+            last = entry["id"]
+        if after_run:
+            held = hold_run(
+                tx, live, runtime, {"reason": "terminate", "answer": assistant, "last": last}
+            )
+            if held is not None:
+                return held
+        if terminate:
             placed = await apply_boundary(tx, boundary, "final", now)
             end_run(tx, live, runtime.task_id, {"status": "done", "answer": assistant})
             if placed.users:
-                await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
-        else:
-            placed = await apply_boundary(tx, boundary, "postTools", now)
-            if placed.reset:
-                # The queued reset cut the run's context before an answer.
-                end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "reset"})
-                if placed.users:
-                    await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
-            else:
-                for key in ("tools", "nestedTools"):
-                    if key in live:
-                        del live[key]
-                run = live.get("run")
-                if run is not None and run["taskId"] == runtime.task_id:
-                    run["inputs"].extend(placed.users)
-                hand_over(
+                await start_run(tx, conversation_id, live, placed.users, task_for(runtime), placed.first)
+            return {
+                "status": "terminal",
+                "outcome": {"status": "completed", "result": {"entryId": assistant}},
+            }
+        run = live.get("run")
+        turns = run["turns"] if run is not None and run["taskId"] == runtime.task_id else 0
+        if max_turns is not None and turns >= max_turns:
+            # The turn limit ends the run like a failure: ``after_failed_run`` decides the queued
+            # items, and a continue resumes it on the round's results. The table was read for the
+            # boundary already, before any write.
+            policy = cast(AfterFailedRun, runtime.settings.after_failed_run)
+            failure: _Failure = {"policy": policy}
+            if policy == "continue":
+                failure["boundary"] = boundary
+            await _end_failed_run(
+                tx,
+                runtime,
+                live,
+                failure,
+                {
+                    "status": "unanswered",
+                    "reason": "turn_limit",
+                    "detail": "1 turn" if turns == 1 else f"{turns} turns",
+                },
+            )
+            return {
+                "status": "terminal",
+                "outcome": {"status": "completed", "result": {"entryId": assistant}},
+            }
+        placed = await apply_boundary(tx, boundary, "postTools", now)
+        if placed.reset:
+            # The queued reset cut the run's context before an answer.
+            end_run(tx, live, runtime.task_id, {"status": "unanswered", "reason": "reset"})
+            if placed.users:
+                await start_run(
+                    tx,
+                    conversation_id,
                     live,
-                    runtime.task_id,
-                    await create_generation(tx, conversation_id, task_for(runtime)),
+                    placed.users,
+                    task_for(runtime),
+                    placed.first,
+                    keep_failure=True,
                 )
+        else:
+            for key in ("tools", "nestedTools"):
+                if key in live:
+                    del live[key]
+            following = live.get("run")
+            if following is not None and following["taskId"] == runtime.task_id:
+                following["inputs"].extend(placed.users)
+            hand_over(
+                live,
+                runtime.task_id,
+                await create_generation(tx, conversation_id, task_for(runtime)),
+            )
         return {
             "status": "terminal",
             "outcome": {"status": "completed", "result": {"entryId": assistant}},
@@ -934,6 +1216,193 @@ class _Failure(TypedDict):
     boundary: NotRequired[Boundary]
 
 
+async def fail_nothing_to_answer(runtime: Any, context: Context) -> None:
+    """End the run without a request: its context has nothing the model would answer."""
+
+    message = "The conversation has nothing to answer"
+    conversation_id = runtime.conversation_id
+
+    async def fail(tx: Transaction) -> dict[str, Any]:
+        failure = await _prepare_failure(tx, runtime)
+        live = await tx.doc(LiveDoc, conversation_id)
+        await _end_failed_run(
+            tx, runtime, live, failure, {"status": "unanswered", "reason": "nothing_to_answer"}
+        )
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": message, "detail": {"reason": "nothing_to_answer"}},
+            },
+        }
+
+    await runtime.commit(fail, context)
+
+
+async def interrupted(
+    runtime: Any, checkpoint: Mapping[str, Any], context: Context
+) -> None:
+    """End the in-flight attempt the host stopped as a failed one under ``settings.retry`` (spec §8.3).
+
+    The committed partial becomes an aborted entry; the next attempt follows the backoff, a poll's by
+    polling its deferred response again, and with no retry left the run ends ``interrupted``.
+    """
+
+    attempt = int(checkpoint["attempt"])
+    compacted = checkpoint.get("compacted")
+    policy = runtime.settings.retry
+    retry = bool(policy.get("enabled", True)) and attempt <= int(policy.get("max_retries", 3))
+    until = runtime.now() + retry_delay_ms(policy, attempt) if retry else 0
+    polled = checkpoint if checkpoint["phase"] == "poll" else None
+    if polled is None:
+        text = f"The host stopped while the model was answering, on attempt {attempt}"
+    else:
+        text = f"The host stopped while the deferred answer was fetched, on attempt {attempt}"
+    # A run that ends does not leave the provider's job running.
+    if not retry and polled is not None:
+        await _cancel_deferred(runtime, polled, context)
+    conversation_id = runtime.conversation_id
+
+    async def apply(tx: Transaction) -> dict[str, Any]:
+        # Read before the first table write; only a failure uses it.
+        failure = None if retry else await _prepare_failure(tx, runtime)
+        live = await tx.doc(LiveDoc, conversation_id)
+        await convert_partial(tx, live, conversation_id)
+        if failure is None:
+            live["generation"] = {"attempt": attempt, "retry": {"at": until, "error": text}}
+            following: dict[str, Any] = {
+                "phase": "retry",
+                "attempt": attempt,
+                **_compact_fields(compacted),
+                "until": until,
+            }
+            if polled is not None:
+                following["poll"] = {
+                    "model": polled["model"],
+                    **({"thinkingLevel": polled["thinkingLevel"]} if "thinkingLevel" in polled else {}),
+                    "cutoff": polled["cutoff"],
+                    "handle": polled["handle"],
+                }
+            return {"status": "sleeping", "checkpoint": following, "until": until}
+        await _end_failed_run(
+            tx,
+            runtime,
+            live,
+            failure,
+            {"status": "unanswered", "reason": "interrupted", "detail": text},
+        )
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": text, "detail": {"reason": "interrupted"}},
+            },
+        }
+
+    await runtime.commit(apply, context)
+
+
+def _deferred_of(checkpoint: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The deferred response a checkpoint polls, or will poll again after a retry's backoff."""
+
+    if checkpoint["phase"] == "poll":
+        return checkpoint
+    if checkpoint["phase"] == "retry":
+        return cast(Mapping[str, Any] | None, checkpoint.get("poll"))
+    return None
+
+
+async def _cancel_deferred(runtime: Any, polled: Mapping[str, Any], context: Context) -> None:
+    """Cancel a deferred response no attempt will poll again; a failure is reported, never thrown.
+
+    Only a *failure* is reported: ``CancelledError`` and the other teardown signals are how a task is
+    ended at all, so they keep unwinding (``errors.is_failure``). Upstream's ``catch`` at
+    ``generation.ts:589-596`` cannot express the difference -- aborting in Node is not cancelling, and
+    vitest abandons a handler that never settles rather than cancelling it -- so swallowing everything
+    here would leave a killed host's abort invocation un-cancellable forever.
+    """
+
+    ref = cast(ModelRef, polled["model"])
+    model = runtime.models.get_model(ref["provider"], ref["modelId"])
+    if model is None:
+        return
+    try:
+        await runtime.models.cancel_deferred(
+            model, cast(JsonObject, polled["handle"]), {"signal": runtime.signal}
+        )
+    except BaseException as error:
+        # A provider call such as cancelling a deferred response is a host callback.
+        if not is_failure(error):
+            raise
+        runtime.report(error, {"kind": "host", "callback": "models"})
+
+
+async def _end_cut_off(runtime: Any, task: TaskRecord, context: Context) -> None:
+    """End a run whose generation was cut off ``settings.restart_limit`` times in a row (spec §5.4).
+
+    At the limit it still keeps a committed partial as an aborted entry and cancels a deferred response
+    it polled; past the limit that cleanup may be what cut it off, so it ends without it.
+    """
+
+    checkpoint = task_checkpoint(task)
+    text = f"The generation was interrupted {cut_off_count(task)} in its {checkpoint['phase']} phase"
+    salvage = salvageable(task, runtime)
+    polled = _deferred_of(checkpoint)
+    if salvage and polled is not None:
+        await _cancel_deferred(runtime, polled, context)
+    conversation_id = runtime.conversation_id
+
+    async def apply(tx: Transaction) -> dict[str, Any]:
+        failure = await _prepare_failure(tx, runtime)
+        live = await tx.doc(LiveDoc, conversation_id)
+        if salvage:
+            await convert_partial(tx, live, conversation_id)
+        await _end_failed_run(
+            tx,
+            runtime,
+            live,
+            failure,
+            {"status": "unanswered", "reason": "restart_limit", "detail": text},
+        )
+        return {
+            "status": "terminal",
+            "outcome": {
+                "status": "failed",
+                "error": {"message": text, "detail": {"reason": "restart_limit"}},
+            },
+        }
+
+    await runtime.commit(apply, context)
+
+
+async def _end_answered_cut_off(
+    runtime: Any, task: TaskRecord, answer: EntryId, context: Context
+) -> None:
+    """End a run that answered once its ``finish`` or ``drain`` phase was cut off the limit (§5.4).
+
+    The run answered, so it ends ``completed``, without a failure and without the tasks it would still
+    have waited for -- marked, so the scheduler still reports it ``task_interrupted``. Queued items stay
+    queued, as after a failed run.
+    """
+
+    checkpoint = task_checkpoint(task)
+    text = f"The generation was interrupted {cut_off_count(task)} in its {checkpoint['phase']} phase"
+    conversation_id = runtime.conversation_id
+
+    async def apply(tx: Transaction) -> dict[str, Any]:
+        live = await tx.doc(LiveDoc, conversation_id)
+        end_run(tx, live, runtime.task_id, {"status": "done", "answer": answer})
+        return ended_by_crashes(
+            {
+                "status": "terminal",
+                "outcome": {"status": "completed", "result": {"entryId": answer}},
+            },
+            text,
+        )
+
+    await runtime.commit(apply, context)
+
+
 async def _prepare_failure(tx: Transaction, runtime: Any) -> _Failure:
     settings = runtime.settings
     policy = cast(AfterFailedRun, settings.after_failed_run)
@@ -955,16 +1424,17 @@ async def _end_failed_run(
     runtime: Any,
     live: Any,
     failure: _Failure,
-    settlement: Any,
+    end: RunEndUnanswered,
 ) -> None:
     """End a failed run and do with the inputs queued behind it what ``after_failed_run`` says.
 
     ``keep`` leaves them queued, ``continue`` starts the next run with them, and ``withdraw`` settles
-    them ``unanswered`` with reason ``run_failed`` while queued writes stay (spec section 6).
+    them ``unanswered`` with reason ``run_failed`` while queued writes stay (spec section 6). The run a
+    ``continue`` starts keeps the failure: it was started in the commit that ended the failed one.
     """
 
     conversation_id = runtime.conversation_id
-    end_run(tx, live, runtime.task_id, settlement)
+    end_run(tx, live, runtime.task_id, end)
     if failure["policy"] == "withdraw":
         await withdraw_queued_inputs(tx, conversation_id, "run_failed")
     boundary = failure.get("boundary")
@@ -972,7 +1442,135 @@ async def _end_failed_run(
         return
     placed = await apply_boundary(tx, boundary, "final", runtime.now())
     if placed.users:
-        await start_run(tx, conversation_id, live, placed.users, task_for(runtime))
+        await start_run(
+            tx, conversation_id, live, placed.users, task_for(runtime), placed.first, keep_failure=True
+        )
+
+
+async def asks_after_run(runtime: Any, context: Context) -> bool:
+    """Whether the phase's agent selects an ``afterRun`` hook, so a run that answers waits for its
+    tasks (spec section 8.3)."""
+
+    hooks = agent_hooks(await runtime.agent(context), GENERATION_TASK_NAME)
+    return any(callable(entry["handlers"].get("afterRun")) for entry in hooks)
+
+
+def takes_continuation(continuation: Any, boundary: Boundary) -> bool:
+    """Whether an answer's ``onYield`` continuation is taken (spec section 8.3).
+
+    Decided from the inbox before the final boundary places anything: only when it holds no user item,
+    of which the boundary would select one, and no reset, which would otherwise run first. A
+    continuation starts the turn count over.
+    """
+
+    if continuation is None:
+        return False
+    items = boundary.inbox["items"]
+    return not any(item["mode"] in ("steer", "followUp") for item in items) and not has_queued_reset(
+        items
+    )
+
+
+def hold_run(tx: Transaction, live: Any, runtime: Any, end: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Commit A of a run that answered with ``afterRun`` hooks selected (spec section 8.3).
+
+    Settle the run's inputs ``done`` with the answer and keep ``pi.live.run`` for the after-run tasks,
+    then ask the hooks in ``finish``. The final boundary waits for the run's end, so queued items stay
+    queued. A run the generation no longer owns is left alone.
+    """
+
+    run = live.get("run")
+    if run is None or run["taskId"] != runtime.task_id:
+        return None
+    for submitted in list(run["inputs"]):
+        tx.settle_submission(cast(SubmissionId, submitted), {"status": "done", "answer": end["answer"]})
+    run["inputs"] = []
+    run["afterRun"] = {}
+    for key in ("generation", "tools", "nestedTools"):
+        if key in live:
+            del live[key]
+    # A run started before `first` was recorded has its answer as its first entry.
+    summary: RunSummary = {
+        "reason": end["reason"],
+        "first": run.get("first") if run.get("first") is not None else end["answer"],
+        "answer": end["answer"],
+        "last": end["last"],
+    }
+    return {"status": "running", "checkpoint": {"phase": "finish", "run": summary}}
+
+
+def prepare_run_end_tasks(
+    runtime: Any, requests: Sequence[Mapping[str, Any]], prepared: list[dict[str, Any]]
+) -> None:
+    """Check the tasks one ``afterRun`` hook asked for, off the line, and add those that pass.
+
+    A broken request is skipped instead of failing the creating commit: its kind must be an installed
+    task that is not built-in, its input JSON, and its definition's ``initial()`` must return a JSON
+    checkpoint of one of its phases. The task is created from the installed definition, as every task
+    runs under it, with that checkpoint, so ``initial()`` runs once. Then throw the rejections, which
+    ``hooks.each`` reports against the hook's extension.
+    """
+
+    rejected: list[Exception] = []
+    for request in requests:
+        try:
+            asked = request["task"]
+            name = str(asked.definition.name)
+            if name.startswith("pi."):
+                raise ValueError(f"An afterRun hook cannot start the built-in task {name}")
+            installed = runtime.registry.task(name)
+            if installed is None:
+                raise ValueError(f"Task {name} is not installed")
+            input = copy_json(request["input"])
+            definition = installed.definition
+            checkpoint = copy_json(definition.initial(input))
+            if not isinstance(checkpoint, Mapping) or checkpoint.get("phase") not in definition.phases:
+                phase = checkpoint.get("phase") if isinstance(checkpoint, Mapping) else checkpoint
+                raise ValueError(f"Task {name} starts at the unknown phase {phase}")
+            prepared.append(
+                {
+                    "task": Task(
+                        replace(definition, initial=lambda _input, held=checkpoint: held)
+                    ),
+                    "input": input,
+                }
+            )
+        except Exception as error:
+            rejected.append(error)
+    if len(rejected) == 1:
+        raise rejected[0]
+    if len(rejected) > 1:
+        raise ExceptionGroup(f"{len(rejected)} afterRun task requests were rejected", rejected)
+
+
+async def end_answered_run(runtime: Any, answer: EntryId, context: Context) -> None:
+    """Commit B of a run that answered (spec section 8.3): its after-run tasks are terminal, or there
+    were none.
+
+    Place what the final boundary selects, end the run without a failure, and start the next one for
+    selected user items.
+    """
+
+    conversation_id = runtime.conversation_id
+
+    async def finish(tx: Transaction) -> dict[str, Any]:
+        settings = runtime.settings
+        boundary = await prepare_boundary(
+            tx,
+            conversation_id,
+            QueueModes(settings.steering_mode, settings.follow_up_mode),
+        )
+        live = await tx.doc(LiveDoc, conversation_id)
+        placed = await apply_boundary(tx, boundary, "final", runtime.now())
+        end_run(tx, live, runtime.task_id, {"status": "done", "answer": answer})
+        if placed.users:
+            await start_run(tx, conversation_id, live, placed.users, task_for(runtime), placed.first)
+        return {
+            "status": "terminal",
+            "outcome": {"status": "completed", "result": {"entryId": answer}},
+        }
+
+    await runtime.commit(finish, context)
 
 
 async def fail_model_error(runtime: Any, text: str, context: Context) -> None:
@@ -1011,7 +1609,16 @@ async def fail_no_model(runtime: Any, ref: ModelRef | None, context: Context) ->
         failure = await _prepare_failure(tx, runtime)
         live = await tx.doc(LiveDoc, conversation_id)
         await _end_failed_run(
-            tx, runtime, live, failure, {"status": "unanswered", "reason": "no_model"}
+            tx,
+            runtime,
+            live,
+            failure,
+            {
+                "status": "unanswered",
+                "reason": "no_model",
+                "detail": message,
+                "settlement": {"status": "unanswered", "reason": "no_model"},
+            },
         )
         return {
             "status": "terminal",

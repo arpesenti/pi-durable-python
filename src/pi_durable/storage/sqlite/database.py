@@ -31,6 +31,13 @@ class SqliteExecutor(Protocol):
     def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
         """Run one statement with positional bindings."""
 
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        """Run one statement with positional bindings and return the rows it changed.
+
+        A commit writes its sequence and ID allocation with this member and requires exactly the one
+        metadata row it changed: an adapter that cannot report the count cannot serve a commit.
+        """
+
     def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
         """Return the first row of one statement, or ``None``."""
 

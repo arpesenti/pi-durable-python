@@ -27,6 +27,7 @@ from pi_durable.context import AbortController, AbortError
 from pi_durable.harness.util import cancellation_error
 from pi_durable.ids import TaskId
 from pi_durable.tasks import define_task
+from pi_durable.types import CommitReceipt
 
 GATES: dict[str, Deferred] = {}
 RUNS: dict[str, int] = {}
@@ -558,24 +559,27 @@ async def test_fails_the_harness_on_a_failed_cascade_commit_and_reopening_applie
     state: dict[str, Any] = {}
 
     class Failing(ControlledStorage):
-        async def commit(self, writes: Any, commit_context: Any) -> Any:
+        async def commit_batches(
+            self, batches: Any, receive: CommitReceipt, commit_context: Any
+        ) -> Any:
             target = state.get("failMark")
             if target is not None and any(
                 write["type"] == "task"
                 and write["value"]["id"] == target
                 and write["value"].get("abortRequested")
+                for writes in batches
                 for write in writes
             ):
                 state["failMark"] = None
                 raise failure
-            return await super().commit(writes, commit_context)
+            return await super().commit_batches(batches, receive, commit_context)
 
     storage = Failing()
     opened = await open_harness(storage)
     tree = await owned_child(opened["root"], "owner")
     state["failMark"] = tree["inner"]
     open_gate("owner", "failed")
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert opened["reports"] == [failure]
     await opened["harness"].close(context)
     reopened = await open_harness(storage.reopen())
@@ -793,7 +797,9 @@ async def test_aborts_a_subagent_run_and_rejects_its_waiting_tool() -> None:
     assert await tool_wait.promise
     child = await harness.conversation(held["child"], context)
     await child.wait_for_idle(context)
-    assert await harness.snapshot(LiveDoc, held["child"], context) == {}
+    child_live = await harness.snapshot(LiveDoc, held["child"], context)
+    assert child_live is not None and set(child_live) == {"runFailure"}
+    assert child_live["runFailure"]["reason"] == "aborted"
     inspection = await harness.inspect(context)
     assert [
         record for record in inspection["submissions"] if record["conversationId"] == held["child"]

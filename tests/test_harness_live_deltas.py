@@ -11,12 +11,20 @@ import asyncio
 from typing import Any, cast
 
 from chat_support import all_entries, assistant_message, chat_setup, open_chat, slow_message
-from session_support import context, document_changes
+from session_support import context, document_changes, observe_commits, observe_commits_as_host
 
 from pi_durable import LiveDoc, MemoryStorage
+from pi_durable.types import CommitReceipt, Seq
 
 
 def live_commit_ops(harness: Any) -> list[list[Any]]:
+    """Every pi.live write, in the order the Session's own follower was handed them.
+
+    The follower seam, as upstream's ``followCommits`` is (`harness-live-deltas.test.ts:271`,
+    `session-support.ts:250-256`): a streamed partial is shown to memory when it is adopted, so a
+    test of what the stream wrote follows memory rather than Storage.
+    """
+
     commits: list[list[Any]] = []
 
     def observe(publication: Any, _context: Any) -> None:
@@ -24,7 +32,7 @@ def live_commit_ops(harness: Any) -> list[list[Any]]:
             if change["record"]["kind"] == "pi.live" and change["ops"]:
                 commits.append(list(change["ops"]))
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     return commits
 
 
@@ -38,15 +46,8 @@ async def test_streams_partial_text_as_appends() -> None:
     commits = live_commit_ops(harness)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
-    partials = [
-        ops
-        for ops in commits
-        if any(op[0] == "s" and op[1] == ["generation", "message"] for op in ops)
-        or any(
-            op[0] == "a" and op[1][:3] == ["generation", "message", "content"]
-            for op in ops
-        )
-    ]
+    # Everything between the two writes that start the run and the one that ends it: the stream.
+    partials = commits[2:-1]
     assert len(partials) > 2
     assert partials[0] == [["s", ["generation", "message"], partials[0][0][2]]]
     for ops in partials[1:]:
@@ -62,23 +63,36 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs(
     live_id: dict[str, Any] = {}
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, call_context: Any) -> Any:
-            kind: str | None = None
-            for write in writes:
-                if (
-                    write["type"] == "document.change"
-                    and write["id"] == live_id.get("id")
-                ):
-                    kind = write["content"]["kind"]
-            seq = await super().commit(writes, call_context)
-            if kind is not None:
-                written[seq] = kind
-            return seq
+        async def commit_batches(
+            self,
+            batches: Any,
+            receive: CommitReceipt,
+            call_context: Any,
+        ) -> Any:
+            kinds: dict[int, str] = {}
+            for index, writes in enumerate(batches):
+                for write in writes:
+                    if (
+                        write["type"] == "document.change"
+                        and write["id"] == live_id.get("id")
+                    ):
+                        kinds[index] = write["content"]["kind"]
+
+            def recorded(index: int, seq: Seq) -> None:
+                receive(index, seq)
+                if index in kinds:
+                    written[seq] = kinds[index]
+
+            return await super().commit_batches(batches, recorded, call_context)
 
     setup = chat_setup()
     setup.faux.set_responses(
         [slow_message(assistant_message("streamed answer"), chunks=8, interval=0.03)]
     )
+    # A case about what reaches Storage mid-stream has to name the window it stores within, or the
+    # deferred partials all wait for the end of the run and there is no mid-stream write to observe --
+    # the same reason upstream's own progress cases set it (`harness-generation.test.ts:122-123`).
+    setup.settings["progress"] = {"persist_within_ms": 100}
     opened = await open_chat(RecordingStorage(), setup)
     harness, root = opened["harness"], opened["root"]
     values: dict[int, dict[str, Any]] = {}
@@ -91,7 +105,7 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs(
             if change["value"] is not None:
                 values[publication["seq"]] = change["value"]
 
-    harness.subscribe_commits(observe)
+    observe_commits_as_host(harness, observe)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
 
@@ -105,7 +119,7 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs(
         assert (kind == "base") is nothing_runs(values[seq]), (kind, values[seq])
         kinds.append(kind)
     # The generation-only path writes a base when the run ends (and at the submission commit before
-    # this subscription); the tool-handover bases arrive with the tool-execution ticket.
+    # this subscription), and a delta for each partial stored while the answer is still streaming.
     assert kinds.count("base") >= 1
     assert "delta" in kinds
     await harness.close(context)
@@ -224,9 +238,10 @@ async def test_hands_a_generation_over_to_its_tool_round_with_one_field_write_ea
     assert commits[0][0][0] == "s" and commits[0][0][1] == ["run"]
     assert commits[0][0][2]["taskId"] == first_generation
     assert len(commits[0][0][2]["inputs"]) == 1
+    assert commits[0][0][2]["turns"] == 0
     # request
     assert commits[1] == [["s", ["generation"], {"attempt": 1}]]
-    # the generation starts its tool round and keeps the run
+    # the generation starts its tool round and keeps the run, counting the round as one turn
     assert contains(
         commits[2],
         ["d", ["generation"]],
@@ -235,6 +250,7 @@ async def test_hands_a_generation_over_to_its_tool_round_with_one_field_write_ea
             ["tools"],
             [{"callId": "c1", "name": "noop", "taskId": tool_task, "status": "pending"}],
         ],
+        ["s", ["run", "turns"], 1],
     )
     # intent
     assert commits[3] == [["s", ["tools", 0, "status"], "running"]]
@@ -253,7 +269,7 @@ async def test_hands_a_generation_over_to_its_tool_round_with_one_field_write_ea
     assert commits[6] == [["s", ["generation"], {"attempt": 1}]]
     # the answer ends the run
     assert contains(commits[7], ["d", ["run"]], ["d", ["generation"]])
-    assert [len(commits[index]) for index in (2, 4, 5)] == [2, 2, 2]
+    assert [len(commits[index]) for index in (2, 4, 5)] == [3, 2, 2]
     await harness.close(context)
 
 
@@ -360,15 +376,24 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs_
     live_id: dict[str, Any] = {}
 
     class RecordingStorage(MemoryStorage):
-        async def commit(self, writes: Any, call_context: Any) -> Any:
-            kind: str | None = None
-            for write in writes:
-                if write["type"] == "document.change" and write["id"] == live_id.get("id"):
-                    kind = write["content"]["kind"]
-            seq = await super().commit(writes, call_context)
-            if kind is not None:
-                written[seq] = kind
-            return seq
+        async def commit_batches(
+            self,
+            batches: Any,
+            receive: CommitReceipt,
+            call_context: Any,
+        ) -> Any:
+            kinds: dict[int, str] = {}
+            for index, writes in enumerate(batches):
+                for write in writes:
+                    if write["type"] == "document.change" and write["id"] == live_id.get("id"):
+                        kinds[index] = write["content"]["kind"]
+
+            def recorded(index: int, seq: Seq) -> None:
+                receive(index, seq)
+                if index in kinds:
+                    written[seq] = kinds[index]
+
+            return await super().commit_batches(batches, recorded, call_context)
 
     setup = chat_setup()
     for name in ("first", "second"):
@@ -382,6 +407,8 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs_
         add_tool(setup.registry, tool(name, execute))
     setup.faux.set_responses([calls(["first", {}, "a"], ["second", {}, "b"]), DONE])
     setup.settings["tool_execution"] = "sequential"
+    # Store deferred progress within each tool's run, so running slots reach Storage as deltas.
+    setup.settings["progress"] = {"persist_within_ms": 50}
     opened = await open_chat(RecordingStorage(), setup)
     harness, root = opened["harness"], opened["root"]
     values: dict[int, dict[str, Any]] = {}
@@ -394,7 +421,7 @@ async def test_stores_a_complete_base_exactly_in_the_commits_where_nothing_runs_
             if change["value"] is not None:
                 values[publication["seq"]] = change["value"]
 
-    harness.subscribe_commits(observe)
+    observe_commits_as_host(harness, observe)
     harness.resume()
     await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
 

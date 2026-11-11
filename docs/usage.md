@@ -5,7 +5,7 @@ the testing helpers. Snippets marked with an `<!-- example -->` marker run in th
 (`tests/test_release_docs.py`); the rest are shaped like the code but need credentials, an SDK, or a
 deployment decision.
 
-The normative description is the [vendored specification](./upstream/spec-1.4.0.md). This guide
+The normative description is the [vendored specification](./upstream/spec-1.5.0.md). This guide
 shows the Python spelling of it; [`PARITY.md`](../PARITY.md) is the export-by-export contract and
 [`upstream/README.md`](./upstream/README.md) records the upstream baseline it pins.
 
@@ -96,8 +96,8 @@ asyncio.run(main())
 ```
 
 Writes go through `tx.doc(...)`; reads go through `session.snapshot()` (a copy),
-`session.document_state()` (a disposable state that delivers later commits), or
-`session.watch_doc()` (every committed frame, exact and ordered). A retirement
+`session.observe_doc()` (a synchronous mirror of each publication, attached on the line), or
+`session.watch_doc()` (every committed frame, coalesced behind one listener). A retirement
 (`tx.retire_doc()`) ends an incarnation; the next write starts a fresh one from `initial`.
 
 <!-- example -->
@@ -115,23 +115,38 @@ CounterDoc = define_doc(
 )
 
 
+class CounterObserver:
+    """Mirrors the counter as storage commits it."""
+
+    def __init__(self) -> None:
+        self.seen: list[int] = []
+
+    def advance(self, call: dict, _context: object) -> None:
+        if call["kind"] == "value" and not call["retired"]:
+            self.seen.append(call["value"]["count"])
+
+    def end(self, _end: dict) -> None:
+        return None
+
+
 async def main() -> None:
     session = create_session(MemoryStorage())
     await session.commit(lambda tx: tx.doc(CounterDoc), BACKGROUND_CONTEXT)
 
-    state = await session.document_state(CounterDoc, BACKGROUND_CONTEXT)
-    assert state is not None
-    seen: list[int] = []
-    # The listener runs with the acquisition value first, then once per committed change.
-    state.subscribe(lambda value, context, delivery: seen.append(value["count"]))
+    observer = CounterObserver()
+    observation = await session.observe_doc(CounterDoc, observer, BACKGROUND_CONTEXT)
+    assert observation is not None
+    # Attached on the line: the value of the observation is the current revision, and every later
+    # change reaches the observer in line order, before the commit that made it resumes.
+    print(observation.value["count"])  # 0
 
     async def count_to_five(tx):
         (await tx.doc(CounterDoc)).count = 5
 
     await session.commit(count_to_five, BACKGROUND_CONTEXT)
-    print(seen)  # [0, 5]
+    print(observer.seen)  # [5]
 
-    state.dispose()
+    observation.detach()
     await session.close(BACKGROUND_CONTEXT)
 
 
@@ -286,15 +301,21 @@ Details worth knowing:
 - **Pacing timers.** `runtime.set_timer(callback, delay_ms)` arms a non-durable host timer for work
   inside a phase, such as a throttled progress commit; the invocation's end disarms it, and calling
   it after the end arms nothing.
-- **Restarts and parking.** Open counts a task a crash, eviction, or reset cut off in
-  `TaskRecord.restarts` and writes it back as `pending` with the count one higher. A state the task
-  commits itself that differs from its current one is progress and clears the count; a close is not
-  a crash, so the tasks it stops come back `pending` uncounted. At `settings.restart_limit` (default
-  `5`, `math.inf` never parks) the task is **parked**: `inspect()` and the task graph show
-  `{"kind": "blocked", "reason": "restart_limit"}`, it is reported once as `task_parked`, it is not
-  active in `harness.wake()`, and `harness.retry_task(id, context)` runs it again. An abort mark
-  starts the count over and still runs a parked task's abort handler; an abort handler cut off that
-  many times ends the task `faulted` with detail `{"reason": "restart_limit"}`.
+- **Restarts.** Open counts a task a crash, eviction, or reset cut off in `TaskRecord.restarts` and
+  writes it back as `pending` with the count one higher. A state the task commits itself that differs
+  from its current one is progress and clears the count; a close is not a crash, so the tasks it stops
+  come back `pending` uncounted. At `settings.restart_limit` (default `5`, `math.inf` never ends a
+  task for it) a task ends visibly instead of running again: a tool call settles with an error result
+  carrying the `restart_limit` diagnostic and its task fails with detail
+  `{"reason": "restart_limit"}`, a compaction fails into `pi.live.compactionFailure`, a generation
+  ends its run with `pi.live.runFailure` reason `restart_limit` (a run that answered already ends
+  without a failure), and a task of an extension's kind ends `faulted` with detail
+  `{"reason": "restart_limit"}`, reported as `task_faulted`. A built-in task that ends itself this way
+  is reported as `task_interrupted` with its `restarts`, so a host keeps a crash-loop signal. Nothing
+  is parked and there is no entry point that runs a cut-off task again: to do the work again, submit
+  it again. Raising `settings.restart_limit` before the task is next reserved lets it run longer. An
+  abort mark starts the count over and still runs the abort handler; an abort handler cut off that many
+  times ends the task `faulted` with detail `{"reason": "restart_limit"}`.
 
 ## The Harness
 
@@ -319,23 +340,23 @@ reopening the Harness; `api.models` in tools and hooks reads the current value a
 Harness starts paused; `resume()` (or the first submission) enables scheduling, and `close(context)`
 seals admission and joins the handlers.
 
-`on_report(error, info)` receives failures that do not fail the calling operation, plus the error
-that fails the Session. `info` is a `ReportInfo` whose `type` says what happened:
+`on_report(report)` receives one `Report` per failure that does not fail the calling operation,
+plus the error that fails the Session: the fields of a `ReportInfo` tagged by `kind`, beside the
+`error` itself.
 
-| `type` | Meaning |
+| `kind` | Meaning |
 | --- | --- |
-| `session_failed` | The error failed the Session, which closes. |
+| `storage_failed` | The error failed the Session, which closes. |
 | `task_faulted` | A task ended `faulted`: a phase threw (`reason: "threw"`), or its abort handler was cut off (`reason: "restart_limit"`). |
-| `task_parked` | The restart limit parked a task. |
+| `task_interrupted` | Crashes ended a built-in task: it ended itself at the restart limit (`reason: "restart_limit"`), or a run ended because the host kept stopping while the model answered (`reason: "interrupted"`), with the task's `restarts`. |
 | `migration_failed` | A task's migration threw; the task is blocked. |
-| `task_outdated` | A running task keeps its old definition, which is missing (`missing_task`) or cannot take it (`incompatible_task`). |
+| `task_outdated` | A running task keeps its old definition, which is missing (`missing_task`), older than the task (`task_too_old`), or newer without a `migrate` (`migration_failed`). |
 | `task_error` | A task's own `runtime.report()`, or a failure in running it. |
 | `extension_error` | A hook, section, wrapper, or a tool's invalid structured output, with the extension's name. |
-| `host_error` | A host callback threw: `now`, `settings`, `registry`, `env`, `models`, `set_timer`, or `on_wake`. |
+| `host_error` | A host callback threw: `now`, `settings`, `registry`, `env`, `models`, `set_timer`, or `on_wake`. The port reports against no other callback name: upstream's `telemetry` member is excluded (ADR 0003). |
 | `listener_error` | A commit, close, watch, view, or document listener threw. |
 
-Every task report carries `task` (its ID, kind, and conversation), and `extension` when known. A
-one-argument callback still works: the Harness inspects its arity.
+Every task report carries `task` (its ID, kind, and conversation), and `extension` when known.
 
 ### Timers and wakeups
 
@@ -358,16 +379,17 @@ timer for sleeps: it calls `on_wake(wake)` after open and whenever the value cha
 arms its own wakeup, such as a Durable Object alarm, and calls `resume()` when it fires. `resume()`
 also makes due sleeps runnable, which is how a wakeup resumes them.
 
-A parked task, a `completing` task, and a wait on a live task do not count as active; the work they
-wait for does. A task no definition can take is not active either: only a registry change, or
-`retry_task()` for a parked task, can let it run, and either offers `on_wake` the new value.
+A `completing` task and a wait on a live task do not count as active; the work they wait for does. A
+task no definition can take is not active either: only a registry change can let it run, and it offers
+`on_wake` the new value.
 
 ### Conversations
 
 `harness.root()` creates or returns the root conversation; `create_conversation({"ownership": ...})`
 starts another; `fork()` copies a conversation at an entry. Each returns a stateless handle bound to
 the Harness: `submit`, `commit`, `entries`, `context`, `agent`, `configure`, `fork`, `compact`,
-`reset`, `abort`, `wait_for_idle`, `view_state`, and `watch`.
+`reset`, `abort`, `wait_for_idle`, and `watch`; the view is also mirrored synchronously by
+`harness.observe_conversation(id, observer, context)`.
 
 <!-- example -->
 ```python
@@ -375,6 +397,16 @@ import asyncio
 
 from pi_durable import Harness, MemoryStorage, UserEntry, create_registry
 from pi_durable.context import BACKGROUND_CONTEXT
+
+
+class GraphObserver:
+    """Takes the task graph as storage commits it; the example only reads what it was handed."""
+
+    def advance(self, _call: dict, _context: object) -> None:
+        return None
+
+    def end(self, _end: dict) -> None:
+        return None
 
 
 async def main() -> None:
@@ -398,9 +430,10 @@ async def main() -> None:
         fork_view = await fork.context(BACKGROUND_CONTEXT)
         print([message["role"] for message in fork_view["messages"]])  # ['user']
 
-        graph = await harness.task_graph(BACKGROUND_CONTEXT)
+        graph = await harness.observe_task_graph(GraphObserver(), BACKGROUND_CONTEXT)
+        assert graph is not None
         print(sorted(graph.value))  # ['tasks']
-        graph.dispose()
+        graph.detach()
     finally:
         await harness.close(BACKGROUND_CONTEXT)
 
@@ -476,12 +509,18 @@ Only a blocking compaction makes the run wait; a background one runs beside it. 
 
 ### Observation
 
-- `conversation.view_state()` and `conversation.watch()` expose the conversation view: active
-  entries plus the built-in documents, advanced only by committed publications.
-- `harness.task_graph()` and `harness.watch_task_graph()` expose every live task, its waits, and
-  the conversations it owns.
-- `watch_events(harness, conversation_id, context)` returns the experimental `AgentEventStream`
-  that translates committed publications into coding-agent-shaped events.
+- `conversation.watch(context, window)` and
+  `harness.observe_conversation(id, observer, context, window)` expose the conversation view: one
+  consumer's `window` over the transcript — the newest 50 entries by default, then appends, dropping
+  the oldest past 100 — plus the built-in documents, advanced only by committed publications. The
+  observer mirrors each publication synchronously on the line; the watch folds its changes behind
+  one listener. `ConversationTranscript` pages a client past that window.
+- `harness.observe_task_graph(observer, context)` and `harness.watch_task_graph()` expose every
+  live task, its waits, and the conversations it owns.
+
+A renderer renders state: what a run looks like is what its conversation view shows — the entry
+window, `pi.live` with its run, generation, tool slots, and compaction listings, and the other
+built-in documents — and what its task graph and reports show. This version has no event stream.
 
 Close the Harness when the host stops. `close(context)` seals admission synchronously and joins the
 running work; storages and execution environments are the host's to close.
@@ -723,5 +762,5 @@ The adapter suites in `tests/` do exactly that.
 - [`../PARITY.md`](../PARITY.md) — every export, its Python target, and its tests.
 - [`../docs/parity-report.md`](./parity-report.md) — the translated suites and the deviations that
   remain.
-- [the vendored specification](./upstream/spec-1.4.0.md) — the normative specification.
+- [the vendored specification](./upstream/spec-1.5.0.md) — the normative specification.
 - [`../GLOSSARY.md`](../GLOSSARY.md) — the vocabulary this guide uses.

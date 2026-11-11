@@ -96,9 +96,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Snapshots, document states, and watches are disposable reads: `snapshot()` copies the committed
-value, `document_state()` subscribes to later commits, and `watch_doc()` delivers every committed
-frame. `MemoryStorage` is the reference backend; SQLite and JSONL live in
+Snapshots, watches, and observers are the three reads of committed state: `snapshot()` copies the
+value once, `watch_doc()` folds every committed frame into a coalesced listener, and
+`observe_doc()` mirrors each publication synchronously on the line, the way an adapter that has to
+stay in step with storage needs. `MemoryStorage` is the reference backend; SQLite and JSONL live in
 `pi_durable.storage.sqlite` and `pi_durable.storage.jsonl`.
 
 ### A conversation
@@ -113,6 +114,20 @@ import asyncio
 
 from pi_durable import Harness, MemoryStorage, UserEntry, create_registry
 from pi_durable.context import BACKGROUND_CONTEXT
+
+
+class ViewObserver:
+    """Keeps the newest committed view, the way an adapter that renders it would."""
+
+    def __init__(self) -> None:
+        self.value: dict = {}
+
+    def advance(self, call: dict, _context: object) -> None:
+        if call["kind"] == "value" and not call["retired"]:
+            self.value = call["value"]
+
+    def end(self, _end: dict) -> None:
+        return None
 
 
 async def main() -> None:
@@ -135,9 +150,20 @@ async def main() -> None:
         view = await conversation.context(BACKGROUND_CONTEXT)
         print([message["role"] for message in view["messages"]])  # ['user']
 
-        state = await conversation.view_state(BACKGROUND_CONTEXT)
-        print([entry["kind"] for entry in state.value["entries"]])  # ['pi.user']
-        state.dispose()
+        observer = ViewObserver()
+        observation = await harness.observe_conversation(
+            conversation.id, observer, BACKGROUND_CONTEXT
+        )
+        assert observation is not None
+        print([entry["kind"] for entry in observation.value["entries"]])  # ['pi.user']
+        # The observer is attached on the line: the value it was handed is the current one, and
+        # every later publication reaches it before its caller resumes.
+        observation.detach()
+
+        # The same view, folded behind one listener, with a window of its own.
+        watch = await conversation.watch(BACKGROUND_CONTEXT, {"min": 5, "max": 10})
+        assert watch.value["entries"] == observation.value["entries"]
+        await watch.stop()
     finally:
         await harness.close(BACKGROUND_CONTEXT)
 
@@ -195,7 +221,7 @@ executed by `tests/test_release_docs.py`.
 | --- | --- |
 | `pi_durable` | Root export: `Session`/`create_session`, `Harness`, entry tokens, document and task definitions, errors, provider protocol, `MemoryStorage`, and the built-in task types. |
 | `pi_durable.env` | The `ExecutionEnv` contract, the POSIX backend, output truncation, and line scanning. |
-| `pi_durable.harness` | Conversations, submissions and the inbox, the scheduler, agents and the registry, extensions and hooks, tools, generation, compaction, usage, the conversation view, the agent event stream, and the task graph. |
+| `pi_durable.harness` | Conversations, submissions and the inbox, the scheduler, agents and the registry, extensions and hooks, tools, generation, compaction, usage, the conversation view, and the task graph. |
 | `pi_durable.providers` | The `Model` catalog entry, the `Models` protocol, transcript and request helpers, retry and overflow classifiers, and the OpenAI/Anthropic adapters (`pi_durable.providers.openai`, `pi_durable.providers.anthropic`). |
 | `pi_durable.session` | The Session kernel, the transaction API, document drafts, forks, and observation. |
 | `pi_durable.storage` | The reference memory backend (`pi_durable.storage.memory`), SQLite (`pi_durable.storage.sqlite`), and JSONL (`pi_durable.storage.jsonl`). |
@@ -205,7 +231,7 @@ executed by `tests/test_release_docs.py`.
 
 The [usage guide](./docs/usage.md) walks through documents, tasks, the Harness, providers, storage
 backends, and extensions with runnable examples. The normative details are in the
-[vendored specification](./docs/upstream/spec-1.4.0.md); the parity matrix is
+[vendored specification](./docs/upstream/spec-1.5.0.md); the parity matrix is
 [`PARITY.md`](./PARITY.md), and the [audit report](./docs/parity-report.md) lists the translated
 suites and the remaining explicit deviations.
 
@@ -220,9 +246,10 @@ suites and the remaining explicit deviations.
   describes. Cross-language storage interoperability is incidental, not a contract; see
   [ADR 0001](./docs/adr/0001-parity-baseline-and-boundary.md).
 - **Stable surface.** The modules in the table above, the names exported from them, and the
-  specification sections they implement. `AgentEventStream` is experimental, as upstream says.
+  specification sections they implement.
 - **Excluded.** Code Mode, the image implementation (the `ImageProcessor` protocol remains),
-  Cloudflare adapters, PowerShell, Windows support, and the benchmark helpers. [`PARITY.md`](./PARITY.md)
+  Cloudflare adapters, PowerShell, Windows support, the benchmark helpers, and the attached-host
+  storage subpath, which needs a Chord host this port does not have. [`PARITY.md`](./PARITY.md)
   marks every exclusion.
 
 ## Development

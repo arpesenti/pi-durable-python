@@ -2,6 +2,10 @@
 
 **Status:** accepted
 
+**Superseded in part:** [ADR 0003](./0003-upstream-1-5-0-scope.md) re-baselines the port on tag
+`v1.5.0` and bounds what that release leaves out. The boundary, the public-surface rule, and the
+naming conventions decided here stand as written.
+
 The previous Python port was an architectural adaptation, not a line-by-line translation, and had
 grown deliberate deviations: non-streaming model access, no execution environment, no hooks or
 compaction, and post-1.3.0 behavior mixed in. We are replacing it with a from-scratch mechanical

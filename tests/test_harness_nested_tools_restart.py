@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from chat_support import chat_setup, open_chat
-from session_support import context
+from session_support import context, observe_commits
 from task_support import aborted, eventually
 from tool_support import (
     DONE,
@@ -51,13 +51,19 @@ def capture_nested_results(harness: Any) -> dict[str, dict[str, Any]]:
 
     def capture(publication: Any, _listener_context: Any) -> None:
         for change in publication["changes"]:
-            if change["type"] != "document" or change["record"]["kind"] != "pi.tool.nested-call":
+            # A retirement of the nested-call document is a document change too, and it has no
+            # value: only a change that carries one can hold a result.
+            if (
+                change["type"] != "document"
+                or change["kind"] != "change"
+                or change["record"]["kind"] != "pi.tool.nested-call"
+            ):
                 continue
             value = cast(dict[str, Any] | None, change["value"])
             if value is not None and "result" in value:
                 stored[str(change["record"]["key"])] = value["result"]
 
-    harness.subscribe_commits(capture)
+    observe_commits(harness, capture)
     return stored
 
 
@@ -519,11 +525,15 @@ async def test_clears_the_slots_of_nested_calls_an_earlier_attempt_finished_when
             ):
                 continue
             for sibling in publication["changes"]:
-                if sibling["type"] == "document" and sibling["record"]["kind"] == "pi.live":
+                if (
+                    sibling["type"] == "document"
+                    and sibling["kind"] == "change"
+                    and sibling["record"]["kind"] == "pi.live"
+                ):
                     value = cast(dict[str, Any] | None, sibling["value"])
                     observed["slots"] = len((value or {}).get("nestedTools") or ())
 
-    harness.subscribe_commits(capture)
+    observe_commits(harness, capture)
     harness.resume()
     submission = await harness.submission(submission_id, context)
     assert submission is not None

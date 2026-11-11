@@ -1,11 +1,15 @@
-"""Translated v1.3.0 ``jsonl-storage`` suite.
+"""Translated v1.3.0 ``jsonl-storage`` suite, plus the v1.5.0 ``JsonlStorage batches`` cases.
 
 Covers both conformance runs (fresh and across reopen) plus publication ordering, poisoning,
-reclamation, torn-tail truncation, and corruption detection.
+reclamation, torn-tail truncation, and corruption detection. The batched cases add the file
+backend's own half of the commit contract: one group appended as one write of every marker, a read
+started mid-append held off it, a torn marker recovered as the complete prefix before it, and the
+ID watermark rebuilt from what the files confirm.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -20,7 +24,7 @@ from storage_support import expect
 from pi_durable.context import BACKGROUND_CONTEXT, Context
 from pi_durable.env import Err, FileError, Result, err
 from pi_durable.env.posix import PosixExecutionEnv
-from pi_durable.ids import ROOT_CONVERSATION_ID, Seq
+from pi_durable.ids import ROOT_CONVERSATION_ID, ConversationId
 from pi_durable.storage.jsonl import (
     JsonlCorruptionError,
     JsonlStorage,
@@ -30,12 +34,12 @@ from pi_durable.storage.jsonl import (
 from pi_durable.testing import (
     StorageConformanceCase,
     StorageConformanceOptions,
+    commit_writes,
     create_expect_assertions,
     create_storage_conformance,
 )
 from pi_durable.types import (
     Storage,
-    StorageWrite,
 )
 
 context: Context = BACKGROUND_CONTEXT
@@ -86,11 +90,13 @@ class ReopeningStorage:
         self._directory = directory
         self._closed = False
 
-    async def commit(self, writes: Sequence[StorageWrite], commit_context: Context) -> Seq:
+    async def commit_batches(
+        self, batches: Any, receive: Any, commit_context: Context
+    ) -> Any:
         if self._closed:
-            return await self._current.commit(writes, commit_context)
+            return await self._current.commit_batches(batches, receive, commit_context)
         try:
-            return await self._current.commit(writes, commit_context)
+            return await self._current.commit_batches(batches, receive, commit_context)
         finally:
             await self._current.close(context)
             self._current = await _open_storage(Path(self._directory), options=None)
@@ -220,7 +226,8 @@ def _terminal_task(id: int) -> dict[str, Any]:
 
 
 async def _create_root(storage: Storage) -> None:
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
     )
 
@@ -379,8 +386,9 @@ async def test_publishes_every_commit_before_reclaiming_current_only_and_termina
     await _create_root(storage)
     task_id = await storage.mint_id()
     document_id = await storage.mint_id()
-    await storage.commit([{"type": "task", "value": _pending_task(task_id)}], context)
-    await storage.commit(
+    await commit_writes(storage, [{"type": "task", "value": _pending_task(task_id)}], context)
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -390,7 +398,8 @@ async def test_publishes_every_commit_before_reclaiming_current_only_and_termina
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -400,7 +409,8 @@ async def test_publishes_every_commit_before_reclaiming_current_only_and_termina
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -413,8 +423,8 @@ async def test_publishes_every_commit_before_reclaiming_current_only_and_termina
     assert len(_read_lines(directory / f"task-{task_id}.jsonl")) == 1
     assert len(_read_lines(directory / f"doc-{document_id}.jsonl")) == 1
 
-    await storage.commit([{"type": "document.retire", "id": document_id}], context)
-    await storage.commit([{"type": "task", "value": _terminal_task(task_id)}], context)
+    await commit_writes(storage, [{"type": "document.retire", "id": document_id}], context)
+    await commit_writes(storage, [{"type": "task", "value": _terminal_task(task_id)}], context)
 
     assert len(_read_lines(directory / "main.jsonl")) == 7
     assert not _file_exists(directory / f"task-{task_id}.jsonl")
@@ -430,7 +440,8 @@ async def test_orders_multiple_live_task_replacements_in_one_sidecar_by_ordinal(
     storage = await _open_storage(directory)
     await _create_root(storage)
     task_id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "task", "value": _pending_task(task_id, "first")},
             {"type": "task", "value": _pending_task(task_id, "second")},
@@ -451,7 +462,8 @@ async def test_removes_a_complete_plus_torn_unconfirmed_multi_record_append() ->
     task_id = await storage.mint_id()
     env.fail(Failure("append", 1, "short"))
     with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "task", "value": _pending_task(task_id, "first")},
                 {"type": "task", "value": _pending_task(task_id, "second-" + "x" * 512)},
@@ -477,7 +489,8 @@ async def test_serializes_the_candidate_before_io_and_leaves_preparation_failure
     env.clear()
     id = await storage.mint_id()
     with pytest.raises(TypeError):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -494,7 +507,8 @@ async def test_serializes_the_candidate_before_io_and_leaves_preparation_failure
     assert env.operations == []
     assert await storage.entry(id, context) is None
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -535,7 +549,8 @@ async def test_poisons_after_an_append_failure_and_recovers_only_confirmed_state
     second_id = await storage.mint_id()
     env.fail(failure)
     with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -587,7 +602,8 @@ async def test_poisons_after_a_flush_failure_and_never_writes_a_marker(failure: 
     second_id = await storage.mint_id()
     env.fail(failure)
     with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -618,7 +634,8 @@ async def test_orders_publication_flushes_and_flushes_main_only_to_authorize_rec
         first_id = await storage.mint_id()
         second_id = await storage.mint_id()
         env.clear()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.create",
@@ -646,7 +663,8 @@ async def test_orders_publication_flushes_and_flushes_main_only_to_authorize_rec
         assert env.operations == expected
 
         env.clear()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -667,7 +685,8 @@ async def test_orders_publication_flushes_and_flushes_main_only_to_authorize_rec
         ]
 
         env.clear()
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -683,9 +702,9 @@ async def test_orders_publication_flushes_and_flushes_main_only_to_authorize_rec
         assert env.operations == ["append:main.jsonl"]
 
         task_id = await storage.mint_id()
-        await storage.commit([{"type": "task", "value": _pending_task(task_id)}], context)
+        await commit_writes(storage, [{"type": "task", "value": _pending_task(task_id)}], context)
         env.clear()
-        await storage.commit([{"type": "task", "value": _terminal_task(task_id)}], context)
+        await commit_writes(storage, [{"type": "task", "value": _terminal_task(task_id)}], context)
         assert env.operations == [
             "append:main.jsonl",
             *(["flush:main.jsonl"] if fsync else []),
@@ -713,7 +732,8 @@ async def test_recovers_a_committed_base_across_a_reclaim_failure(failure: Failu
     storage = await _open_storage(directory, env)
     await _create_root(storage)
     id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -723,7 +743,8 @@ async def test_recovers_a_committed_base_across_a_reclaim_failure(failure: Failu
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -736,7 +757,8 @@ async def test_recovers_a_committed_base_across_a_reclaim_failure(failure: Failu
 
     env.fail(failure)
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -769,7 +791,8 @@ async def test_recovers_document_retirement_reclamation_across_a_remove_failure(
     await _create_root(storage)
     task_id = await storage.mint_id()
     id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "task", "value": _pending_task(task_id)},
             {
@@ -781,7 +804,7 @@ async def test_recovers_document_retirement_reclamation_across_a_remove_failure(
         context,
     )
     env.fail(Failure("remove", 1, mode))
-    assert await storage.commit([{"type": "document.retire", "id": id}], context) == 3
+    assert await commit_writes(storage, [{"type": "document.retire", "id": id}], context) == 3
     assert await storage.document(id, "current", context) is None
     await storage.close(context)
 
@@ -799,7 +822,8 @@ async def test_defers_reclamation_after_an_authorizing_main_flush_failure(mode: 
     storage = await _open_storage(directory, env, {"fsync": True})
     await _create_root(storage)
     id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -811,7 +835,8 @@ async def test_defers_reclamation_after_an_authorizing_main_flush_failure(mode: 
     )
     env.fail(Failure("flush", 2, mode))
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -858,7 +883,8 @@ async def test_keeps_a_committed_base_usable_after_a_reclaim_temp_flush_failure(
     storage = await _open_storage(directory, env, {"fsync": True})
     await _create_root(storage)
     id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -870,7 +896,8 @@ async def test_keeps_a_committed_base_usable_after_a_reclaim_temp_flush_failure(
     )
     env.fail(Failure("flush", 3, mode))
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -883,7 +910,8 @@ async def test_keeps_a_committed_base_usable_after_a_reclaim_temp_flush_failure(
         == 3
     )
     env.clear()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -908,9 +936,9 @@ async def test_recovers_terminal_task_reclamation_across_a_remove_failure(mode: 
     storage = await _open_storage(directory, env)
     await _create_root(storage)
     id = await storage.mint_id()
-    await storage.commit([{"type": "task", "value": _pending_task(id)}], context)
+    await commit_writes(storage, [{"type": "task", "value": _pending_task(id)}], context)
     env.fail(Failure("remove", 1, mode))
-    assert await storage.commit([{"type": "task", "value": _terminal_task(id)}], context) == 3
+    assert await commit_writes(storage, [{"type": "task", "value": _terminal_task(id)}], context) == 3
     assert await storage.task(id, context) == _terminal_task(id)
     await storage.close(context)
 
@@ -927,7 +955,8 @@ async def test_appends_later_deltas_to_the_replacement_sidecar_after_a_current_o
     storage = await _open_storage(directory)
     await _create_root(storage)
     id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -937,7 +966,8 @@ async def test_appends_later_deltas_to_the_replacement_sidecar_after_a_current_o
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -947,7 +977,8 @@ async def test_appends_later_deltas_to_the_replacement_sidecar_after_a_current_o
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -975,7 +1006,8 @@ async def test_never_reclaims_rewindable_history_including_after_a_base_and_reti
         "history": "rewindable",
         "fork": "asOf",
     }
-    created_at = await storage.commit(
+    created_at = await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -985,7 +1017,8 @@ async def test_never_reclaims_rewindable_history_including_after_a_base_and_reti
         ],
         context,
     )
-    changed_at = await storage.commit(
+    changed_at = await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -995,7 +1028,8 @@ async def test_never_reclaims_rewindable_history_including_after_a_base_and_reti
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -1005,7 +1039,7 @@ async def test_never_reclaims_rewindable_history_including_after_a_base_and_reti
         ],
         context,
     )
-    await storage.commit([{"type": "document.retire", "id": id}], context)
+    await commit_writes(storage, [{"type": "document.retire", "id": id}], context)
 
     assert len(_read_lines(directory / f"doc-{id}.jsonl")) == 3
     reopened = await _open_storage(directory)
@@ -1027,7 +1061,8 @@ async def test_reclaims_retired_task_session_and_latest_conversation_document_si
     session_id = await storage.mint_id()
     latest_id = await storage.mint_id()
     task_document_id = await storage.mint_id()
-    created_at = await storage.commit(
+    created_at = await commit_writes(
+        storage,
         [
             {"type": "task", "value": _pending_task(task_id)},
             {
@@ -1058,7 +1093,8 @@ async def test_reclaims_retired_task_session_and_latest_conversation_document_si
         ],
         context,
     )
-    retired_at = await storage.commit(
+    retired_at = await commit_writes(
+        storage,
         [
             {"type": "document.retire", "id": session_id},
             {"type": "document.retire", "id": latest_id},
@@ -1100,7 +1136,8 @@ async def test_truncates_torn_utf8_tails_at_exact_offsets_and_reuses_the_sequenc
     storage = await _open_storage(directory)
     await _create_root(storage)
     document_id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -1124,7 +1161,8 @@ async def test_truncates_torn_utf8_tails_at_exact_offsets_and_reuses_the_sequenc
     assert sidecar_path.stat().st_size == sidecar_size
     assert main_path.stat().st_size == main_size
     assert (
-        await reopened.commit(
+        await commit_writes(
+            reopened,
             [
                 {
                     "type": "document.change",
@@ -1145,8 +1183,8 @@ async def test_removes_complete_unconfirmed_tails_without_resurrecting_terminal_
     storage = await _open_storage(directory)
     await _create_root(storage)
     task_id = await storage.mint_id()
-    await storage.commit([{"type": "task", "value": _pending_task(task_id)}], context)
-    await storage.commit([{"type": "task", "value": _terminal_task(task_id)}], context)
+    await commit_writes(storage, [{"type": "task", "value": _pending_task(task_id)}], context)
+    await commit_writes(storage, [{"type": "task", "value": _terminal_task(task_id)}], context)
     sidecar_path = directory / f"task-{task_id}.jsonl"
     assert not _file_exists(sidecar_path)
     with sidecar_path.open("a") as handle:
@@ -1166,7 +1204,11 @@ async def test_removes_complete_unconfirmed_tails_without_resurrecting_terminal_
     reopened = await _open_storage(directory)
     assert not _file_exists(sidecar_path)
     assert await reopened.task(task_id, context) == _terminal_task(task_id)
-    assert await reopened.commit([], context) == 4
+    # Every batch has at least one write: the next commit is a real one, and its sequence is 4.
+    next_id = ConversationId(await reopened.mint_id())
+    assert await commit_writes(
+        reopened, [{"type": "conversation", "value": {"id": next_id}}], context
+    ) == 4
 
 
 async def test_fails_open_when_confirmed_sidecar_data_is_missing() -> None:
@@ -1174,7 +1216,8 @@ async def test_fails_open_when_confirmed_sidecar_data_is_missing() -> None:
     storage = await _open_storage(directory)
     await _create_root(storage)
     document_id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -1194,7 +1237,8 @@ async def test_rejects_a_confirmed_record_after_an_unconfirmed_sidecar_record() 
     storage = await _open_storage(directory)
     await _create_root(storage)
     document_id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -1204,7 +1248,8 @@ async def test_rejects_a_confirmed_record_after_an_unconfirmed_sidecar_record() 
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -1250,7 +1295,8 @@ async def test_rejects_structurally_invalid_confirmed_document_content() -> None
     storage = await _open_storage(directory)
     await _create_root(storage)
     document_id = await storage.mint_id()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -1267,6 +1313,188 @@ async def test_rejects_structurally_invalid_confirmed_document_content() -> None
 
     with pytest.raises(JsonlCorruptionError, match="Invalid document content"):
         await JsonlStorage.open(str(directory), PosixExecutionEnv(cwd=str(directory)), context)
+
+
+class _StalledJoinEnv(PosixExecutionEnv):
+    """A file system whose path resolutions stall, then fail, as a stalled mount's would."""
+
+    def __init__(self, *, cwd: str) -> None:
+        super().__init__(cwd=cwd)
+        self.stalling = False
+        self.reached = asyncio.Event()
+        self.unblock = asyncio.Event()
+
+    async def join_path(
+        self, parts: Sequence[str], join_context: Context
+    ) -> Result[str, FileError]:
+        if self.stalling:
+            self.reached.set()
+            await self.unblock.wait()
+            return err(FileError("unknown", "injected path resolution failure", parts[-1]))
+        return await super().join_path(parts, join_context)
+
+
+async def test_a_read_waiting_on_the_append_never_returns_what_a_failure_left_unstored() -> None:
+    """Memory runs ahead of the file mid-call, so a read waits for the append to settle."""
+
+    directory = _temp_directory("pi-durable-jsonl-waiting-read-")
+    env = _StalledJoinEnv(cwd=str(directory))
+    storage = await _open_storage(directory, env)
+    await _create_root(storage)
+    env.stalling = True
+    conversation_id = 100
+    document_id = 101
+    committing = asyncio.create_task(
+        storage.commit_batches(
+            [
+                [{"type": "conversation", "value": {"id": conversation_id}}],
+                [
+                    {
+                        "type": "document.create",
+                        "record": _session_document(document_id, "state"),
+                        "content": {"kind": "base", "version": 1, "value": {}},
+                    }
+                ],
+            ],
+            lambda index, seq: None,
+            context,
+        )
+    )
+    await env.reached.wait()
+    # Started while the batches are in memory and the append waits.
+    reading = asyncio.create_task(storage.conversation(conversation_id, context))
+    await asyncio.sleep(0)
+    env.unblock.set()
+
+    with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
+        await committing
+    with pytest.raises(JsonlStoragePoisonedError, match="poisoned"):
+        await reading
+
+    await storage.close(context)
+    reopened = await _open_storage(directory)
+    assert await reopened.conversation(conversation_id, context) is None
+
+
+async def test_a_reopened_directory_mints_above_an_id_only_a_sidecar_holds() -> None:
+    """Reopen rebuilds the ID watermark from what the files confirm, sidecars included."""
+
+    directory = _temp_directory("pi-durable-jsonl-mint-")
+    storage = await _open_storage(directory)
+    await _create_root(storage)
+    task_id = 9_000
+    entry_id = await storage.mint_id()
+    await storage.commit_batches(
+        [
+            [{"type": "task", "value": _pending_task(task_id)}],
+            [
+                {
+                    "type": "entry",
+                    "value": {
+                        "id": entry_id,
+                        "conversationId": ROOT_CONVERSATION_ID,
+                        "kind": "note",
+                    },
+                }
+            ],
+        ],
+        lambda index, seq: None,
+        context,
+    )
+    await storage.close(context)
+
+    reopened = await _open_storage(directory)
+    assert await reopened.task(task_id, context) is not None
+    assert await reopened.mint_id() > task_id
+
+
+@pytest.mark.parametrize("fsync", [False, True])
+async def test_a_group_appends_one_marker_write_and_a_torn_one_recovers_a_shorter_prefix(
+    fsync: bool,
+) -> None:
+    """One append per affected file, then all the markers in one write of ``main.jsonl``.
+
+    A torn marker is not a commit: reopening keeps the complete markers before it and drops that
+    batch's sidecar records as unconfirmed, so the sequence the group did not store is reused.
+    """
+
+    directory = _temp_directory("pi-durable-jsonl-group-")
+    env = InstrumentedEnv(cwd=str(directory))
+    storage = await _open_storage(directory, env, {"fsync": fsync})
+    await _create_root(storage)
+    document_id = await storage.mint_id()
+    await commit_writes(
+        storage,
+        [
+            {
+                "type": "document.create",
+                "record": _session_document(document_id),
+                "content": {"kind": "base", "version": 1, "value": {"n": 0}},
+            }
+        ],
+        context,
+    )
+    main_path = directory / "main.jsonl"
+    before = len(main_path.read_text())
+    entries = [await storage.mint_id() for _ in range(3)]
+    batches = [
+        [
+            {
+                "type": "entry",
+                "value": {"id": id, "conversationId": ROOT_CONVERSATION_ID, "kind": "note"},
+            },
+            {
+                "type": "document.change",
+                "id": document_id,
+                "content": {"kind": "delta", "version": 1, "ops": [["s", ["n"], index + 1]]},
+            },
+        ]
+        for index, id in enumerate(entries)
+    ]
+    env.clear()
+
+    # Reads wait for the append: a read started while it runs sees every batch durable.
+    committing = asyncio.create_task(storage.commit_batches(batches, lambda index, seq: None, context))
+    reading = asyncio.create_task(storage.entry(entries[2], context))
+    await asyncio.sleep(0)
+    assert await committing == {"stored": 3}
+    assert await reading is not None
+
+    sidecar = f"doc-{document_id}.jsonl"
+    flushed = [f"flush:{sidecar}"] if fsync else []
+    assert env.operations == [f"append:{sidecar}", *flushed, "append:main.jsonl"]
+    main = main_path.read_text()
+    markers = [line for line in main[before:].split("\n") if line != ""]
+    assert len(markers) == 3
+
+    await storage.close(context)
+    torn_at = len(main) - len(markers[2]) // 2
+    main_path.write_text(main[:torn_at])
+
+    reopened = await _open_storage(directory)
+    assert await reopened.entry(entries[0], context) is not None
+    assert await reopened.entry(entries[1], context) is not None
+    assert await reopened.entry(entries[2], context) is None
+    half = await reopened.document(document_id, "current", context)
+    assert half is not None and half["value"] == {"n": 2}
+    # The unconfirmed batch's sequences are reused, so the group's last seq was never taken.
+    assert (
+        await commit_writes(
+            reopened,
+            [
+                {
+                    "type": "document.change",
+                    "id": document_id,
+                    "content": {"kind": "delta", "version": 1, "ops": [["s", ["n"], 9]]},
+                }
+            ],
+            context,
+        )
+        == 5
+    )
+    again = await _open_storage(directory)
+    restored = await again.document(document_id, "current", context)
+    assert restored is not None and restored["value"] == {"n": 9}
 
 
 async def test_rejects_malformed_complete_main_and_sidecar_lines() -> None:

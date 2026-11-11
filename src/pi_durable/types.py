@@ -50,7 +50,11 @@ __all__ = [
     "ROOT_CONVERSATION_ID",
     "CheckpointInfo",
     "CommitChange",
+    "CommitObservation",
+    "CommitObserver",
+    "CommitOptions",
     "CommitPublication",
+    "CommitPersistence",
     "ContextEdit",
     "ConversationId",
     "ConversationOwnership",
@@ -79,6 +83,8 @@ __all__ = [
     "JoinPolicy",
     "JsonObject",
     "JsonValue",
+    "Observation",
+    "Observer",
     "Page",
     "PhaseHandler",
     "RunningTask",
@@ -107,11 +113,15 @@ __all__ = [
     "Tx",
     "TypedEntry",
     "TypedEntryDraft",
+    "WatchCall",
     "WatchEnd",
     "WatchEnded",
+    "WatchFailedCall",
     "WatchHandle",
+    "WatchValueCall",
     "entry_draft",
     "entry_record",
+    "watch_value_call",
 ]
 
 MessageRecord: TypeAlias = dict[str, JsonValue]
@@ -119,6 +129,47 @@ MessageRecord: TypeAlias = dict[str, JsonValue]
 Op: TypeAlias = list[Any]
 """One Chord delta operation, represented as its JSON array."""
 JsonValueT_co = TypeVar("JsonValueT_co", covariant=True)
+
+
+# ── Discriminant spellings (the 1.5.0 contract, #37) ────────────────────────
+#
+# Upstream 1.5.0 moves six tagged unions onto the tag key ``kind``. #33 let every reader take either
+# spelling; #37 deleted the retired one, so ``kind`` is now the only spelling the port reads or
+# writes, and no type, alias, or converter for a retired tag survives on the released surface. #35
+# had already worded ``WatchEnd`` with the ends the shipped build carries and renamed the
+# environment's file-change union to the name upstream gives it.
+#
+#   union                 retired spelling, now refused                  the one spelling
+#   ``WatchEnd``          ``reason``, worded ``cancelled``/             ``kind`` — spec-1.5.0.md:5397
+#                       ``session_closed``/``session_failed``/``retired``
+#   ``SessionEnd``        ``reason``                                    ``kind`` — spec-1.5.0.md:1378
+#   ``ReportInfo``        ``type``                                      ``kind`` — spec-1.5.0.md:680
+#   ``ReportFrom``        ``type``                                      ``kind`` — upstream src/types.ts:207
+#   ``DocumentCommitChange``  no tag: a retirement was ``value: null``  ``kind: "change" | "retire"``
+#                                                                         beside the ``type`` that stays
+#                                                                         — spec-1.5.0.md:1391
+#   ``FileChange``        no tag, under the name ``WatchChange``:       ``kind: "paths" | "overflow"
+#   (``env``)            which keys are present                              | "failed"``, and the name
+#                                                                            ``FileChange`` — upstream
+#                                                                            src/env/index.ts:127
+#
+# The single exception is the document migrate path: a database this port's previous release wrote
+# holds retired spellings inside its stored documents, and #30's promise that such a database opens
+# and migrates in place means ``harness/live.py`` still renames a stored ``reason`` and
+# ``harness/tool.py`` still tags a version 1 input that carried none. No live reader accepts one.
+#
+# 1.5.0 leaves the tag key of these alone, read at the lines named, so nothing here refuses them and
+# no reader converts their keys:
+#
+#   ``StorageWrite.type``, and ``TableCommitChange`` as its subset  — spec-1.5.0.md:5965
+#   ``SubmissionRecord.type`` and ``.status``, ``SubmissionCreate``, ``SubmissionSettlement.status``
+#                                                                   — spec-1.5.0.md:195 and 201
+#   ``TaskState.status`` and ``TaskOutcome.status``                 — spec-1.5.0.md:2090 and 2081
+#   ``DocumentContent.kind``                                        — spec-1.5.0.md:5953
+#   ``DocumentScope.kind`` (the ``scope`` of ``DocumentRecord``)    — spec-1.5.0.md:1335
+#
+# ``harness/types.py`` carries the two report unions and ``env/__init__.py`` the file-change one,
+# each with the same note.
 
 
 # ── Identity, conversation, and entry records ──────────────────────────────
@@ -303,6 +354,39 @@ class WriteUnansweredRecord(SubmissionRecordBase):
     answer: NotRequired[Never]
 
 
+class ContinuePlacedRecord(SubmissionRecordBase):
+    """A run started without a user message: owned by that run, and never queued."""
+
+    type: Literal["continue"]
+    status: Literal["placed"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueDoneRecord(SubmissionRecordBase):
+    """The run a continue started answered."""
+
+    type: Literal["continue"]
+    status: Literal["done"]
+    entry: NotRequired[Never]
+    answer: EntryId
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueUnansweredRecord(SubmissionRecordBase):
+    """The run a continue started ended without an answer."""
+
+    type: Literal["continue"]
+    status: Literal["unanswered"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: str
+    detail: NotRequired[JsonValue]
+
+
 SubmissionRecord: TypeAlias = (
     InputQueuedRecord
     | InputPlacedRecord
@@ -311,6 +395,9 @@ SubmissionRecord: TypeAlias = (
     | WriteQueuedRecord
     | WriteDoneRecord
     | WriteUnansweredRecord
+    | ContinuePlacedRecord
+    | ContinueDoneRecord
+    | ContinueUnansweredRecord
 )
 
 
@@ -383,6 +470,33 @@ class WriteUnansweredCreate(SubmissionCreateBase):
     answer: NotRequired[Never]
 
 
+class ContinuePlacedCreate(SubmissionCreateBase):
+    type: Literal["continue"]
+    status: Literal["placed"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueDoneCreate(SubmissionCreateBase):
+    type: Literal["continue"]
+    status: Literal["done"]
+    entry: NotRequired[Never]
+    answer: EntryId
+    reason: NotRequired[Never]
+    detail: NotRequired[Never]
+
+
+class ContinueUnansweredCreate(SubmissionCreateBase):
+    type: Literal["continue"]
+    status: Literal["unanswered"]
+    entry: NotRequired[Never]
+    answer: NotRequired[Never]
+    reason: str
+    detail: NotRequired[JsonValue]
+
+
 SubmissionCreate: TypeAlias = (
     InputQueuedCreate
     | InputPlacedCreate
@@ -391,6 +505,9 @@ SubmissionCreate: TypeAlias = (
     | WriteQueuedCreate
     | WriteDoneCreate
     | WriteUnansweredCreate
+    | ContinuePlacedCreate
+    | ContinueDoneCreate
+    | ContinueUnansweredCreate
 )
 
 
@@ -814,12 +931,27 @@ TableCommitChange: TypeAlias = ConversationWrite | EntryWrite | TaskWrite | Subm
 
 
 class DocumentCommittedChange(TypedDict):
+    """One creation or update: ``type: "document"`` with ``kind: "change"`` (spec §2)."""
+
     type: Literal["document"]
+    kind: Literal["change"]
     record: DocumentRecord
     conversationId: ConversationId | None
-    version: int | None
-    value: JsonObject | None
+    version: int
+    value: JsonObject
     ops: list[Op]
+
+
+class DocumentRetiredChange(TypedDict):
+    """The commit that retired the incarnation: ``type: "document"`` with ``kind: "retire"``.
+
+    A retirement carries no value, version, or operations — the tag says it (spec §2).
+    """
+
+    type: Literal["document"]
+    kind: Literal["retire"]
+    record: DocumentRecord
+    conversationId: ConversationId | None
 
 
 class DocumentCopiedChange(TypedDict):
@@ -829,7 +961,9 @@ class DocumentCopiedChange(TypedDict):
     source: DocumentCopySource
 
 
-DocumentCommitChange: TypeAlias = DocumentCommittedChange | DocumentCopiedChange
+DocumentCommitChange: TypeAlias = DocumentCommittedChange | DocumentRetiredChange | DocumentCopiedChange
+
+
 CommitChange: TypeAlias = TableCommitChange | DocumentCommitChange
 
 
@@ -838,26 +972,141 @@ class CommitPublication(TypedDict):
     changes: list[CommitChange]
 
 
-class WatchEnded(TypedDict):
-    reason: Literal["stopped", "cancelled", "session_closed", "retired"]
+class ObservedStoredCommit(TypedDict):
+    """A stored commit as the Session's own followers see it: a :data:`CommitPublication` and its kind."""
+
+    kind: Literal["stored"]
+    seq: Seq
+    changes: list[CommitChange]
 
 
-class WatchListenerErrorEnd(TypedDict):
-    reason: Literal["listener_error"]
-    error: BaseException
+class ObservedMemoryCommit(TypedDict):
+    """A deferred commit's document changes as memory adopted them and Storage never saw.
+
+    The Session's own followers receive it in place of a stored publication; it carries no sequence
+    number because the commit has none yet (spec §4.1).
+    """
+
+    kind: Literal["memory"]
+    changes: list[DocumentCommitChange]
 
 
-class WatchSessionFailedEnd(TypedDict):
-    reason: Literal["session_failed"]
+#: What the Session's own followers -- its watches, its document observers, and the internal commit
+#: listener -- are handed per commit: the durable publication once the commit is stored, the
+#: memory-only one while a deferred commit's changes are still held (spec §4.1).
+ObservedCommit: TypeAlias = ObservedStoredCommit | ObservedMemoryCommit
+
+
+class ImmediatePersistence(TypedDict):
+    """Store the commit before it resolves: what every commit does until it asks otherwise."""
+
+    kind: Literal["immediate"]
+
+
+class DeferredPersistence(TypedDict):
+    """Store the commit later than it is shown, at the latest about ``within_ms`` after it.
+
+    Held only when every write of the commit changes an existing conversation document with
+    ``history: "latest"`` and ``fork: "initial"``; anything else makes the commit immediate. The
+    Session adopts it and shows it to watches and views at once, and Storage gets it with the next
+    commit that reads or writes the document, when the document leaves memory or retires, at
+    ``close()``, or when the deadline comes (spec §4.1).
+    """
+
+    kind: Literal["deferred"]
+    #: How long the commit may wait to be stored, at the latest; the Session's default when absent,
+    #: and ``inf`` waits for another trigger. Refused when it is not a number of milliseconds, 0 or
+    #: more.
+    within_ms: NotRequired[int | float]
+
+
+CommitPersistence: TypeAlias = ImmediatePersistence | DeferredPersistence
+
+
+class CommitOptions(TypedDict):
+    """Options of one Session commit."""
+
+    persistence: NotRequired[CommitPersistence]
+
+
+class WatchValueCall(TypedDict, Generic[JsonValueT_co]):
+    """One listener call: the newest value, the operations that reach it, and a retirement.
+
+    ``ops`` turns the previously delivered value into ``value``: one commit's exact batch while the
+    listener keeps up, the folded batches of every commit since the previous call otherwise, or one
+    root replacement past :data:`~pi_durable.delta.MAX_PENDING_OPS` of them (spec §9.2). ``retired``
+    says the watched address went absent since the previous call, and is the only thing a retirement
+    carries: its value is the last one the watch was given and its operations those still pending.
+    """
+
+    kind: Literal["value"]
+    value: JsonValueT_co
+    ops: list[Op]
+    retired: bool
+
+
+class WatchFailedCall(TypedDict):
+    """A failure the source may recover from, after which the watch stays open.
+
+    Durable's failures are final — a Session that fails ends its watches ``failed`` — so the port
+    never sends one (spec §9.1). It is part of the listener's shape because the listener is written
+    once, against Chord's ``WatchCall``.
+    """
+
+    kind: Literal["failed"]
     error: object
 
 
-WatchEnd: TypeAlias = WatchEnded | WatchListenerErrorEnd | WatchSessionFailedEnd
-"""Terminal result of one document watch."""
+WatchCall: TypeAlias = WatchValueCall[JsonValueT_co] | WatchFailedCall
+"""The one shape every watch listener takes: document, conversation view, and task graph alike."""
+
+WatchValueT = TypeVar("WatchValueT")
+
+
+def watch_value_call(
+    value: WatchValueT,
+    ops: list[Op] | None = None,
+    retired: bool = False,
+) -> WatchValueCall[Any]:
+    """Build one ``value`` call: the only call Durable ever delivers (spec §9.1)."""
+
+    return {"kind": "value", "value": value, "ops": [] if ops is None else ops, "retired": retired}
+
+
+class WatchEnded(TypedDict):
+    """A watch that ended without an error.
+
+    ``stopped`` is ``stop()``'s own terminal result, ``aborted`` is the acquisition context's abort
+    signal, and ``ended`` is the Session ending beneath the watch (:class:`SessionEnd`).
+    """
+
+    kind: Literal["stopped", "aborted", "ended"]
+
+
+class WatchListenerErrorEnd(TypedDict):
+    kind: Literal["listener_error"]
+    error: BaseException
+
+
+class WatchFailedEnd(TypedDict):
+    kind: Literal["failed"]
+    error: object
+
+
+WatchEnd: TypeAlias = WatchEnded | WatchListenerErrorEnd | WatchFailedEnd
+"""Terminal result of one document watch, tagged by ``kind`` (spec-1.5.0.md:5397-5401).
+
+The words are the ones the shipped build carries, not the ones the 1.5.0 changelog claims:
+``chord/src/watch.ts:16-19`` declares ``stopped``, ``aborted``, ``ended``, ``listener_error`` and
+``failed``, and ``chord/src/watch.ts:46-55`` makes ``stop()`` the idempotent entry point that yields
+``stopped`` while ``aborted`` comes from the acquisition context's abort signal. There is no
+``cancelled`` end, and the 1.4.0 ``session_closed``, ``session_failed`` and ``retired`` ends are
+gone: a watch whose document retires stays open until it is stopped or the Session ends.
+"""
 
 
 class WatchHandle(Protocol, Generic[JsonValueT_co]):
-    """Serialized exact-frame observation of an immutable value with bounded pending delivery."""
+    """Serialized coalesced observation of an immutable value with bounded pending delivery."""
 
     @property
     def value(self) -> JsonValueT_co:
@@ -869,23 +1118,73 @@ class WatchHandle(Protocol, Generic[JsonValueT_co]):
         """Settle when the watch terminates; an already-running callback remains caller-owned."""
         ...
 
-    def start(self, listener: Callable[[JsonValueT_co, list[Op], Context], Any]) -> None:
-        """Install the sole asynchronous listener. Never invokes it inline."""
+    def start(self, listener: Callable[[WatchCall[Any], Context], Any]) -> None:
+        """Install the sole serialized asynchronous listener. Never invokes it inline."""
         ...
 
     def stop(self) -> asyncio.Future[WatchEnd]:
-        """Idempotently stop future callbacks and return this watch's terminal result."""
+        """Idempotently stop future callbacks and return this watch's terminal result.
+
+        The sole cancel entry point the shipped build has (``chord/src/watch.ts:46-55``): it yields
+        ``{"kind": "stopped"}``, never the ``aborted`` end the acquisition context's abort emits.
+        """
+
         ...
 
 
-DocumentWatch: TypeAlias = WatchHandle[JsonObject | None]
-"""Serialized exact-frame observation of one document incarnation."""
+DocumentWatch: TypeAlias = WatchHandle[JsonObject]
+"""Serialized coalesced observation of one document address."""
 
 
 class DocumentObserver(Protocol):
     """Non-creating document watch acquisition shared by Session and later invocation APIs."""
 
     async def watch_doc(self, token: Any, *args: Any) -> DocumentWatch | None: ...
+
+
+class Observer(Protocol):
+    """A host's synchronous mirror of committed state, attached on the Session's mutation line.
+
+    ``advance`` gets the very call the matching watch gets — a :data:`WatchCall` for a document, a
+    conversation view, or the task graph — unfolded, one per change, at the publication that made
+    it; ``end`` comes once and nothing follows it. An observer mirrors state rather than rendering
+    it, so its ``advance`` records and returns: it never awaits, calls the Session, or throws. A
+    throw, or a returned awaitable that rejects, is reported, detaches the observer, and ends it
+    ``listener_error`` (spec §9.1).
+    """
+
+    def advance(self, call: WatchCall[Any], context: Context) -> None: ...
+
+    def end(self, end: WatchEnd) -> None: ...
+
+
+class CommitObserver(Protocol):
+    """A host's synchronous observer of stored commits (``Session.observe_commits()``).
+
+    ``advance`` gets one :class:`CommitPublication` per stored commit — exactly what Storage made
+    durable — in a microtask of its publication, and ``end`` gets the Session's own close after the
+    last publication (spec §9.1).
+    """
+
+    def advance(self, publication: CommitPublication, context: Context) -> None: ...
+
+    def end(self, end: WatchEnd) -> None: ...
+
+
+class Observation(Protocol[JsonValueT_co]):
+    """An attached :class:`Observer`: the value it attached at, which every later ``advance``
+    reaches from, and how to detach it. The detach is idempotent: no call follows it."""
+
+    @property
+    def value(self) -> JsonValueT_co: ...
+
+    def detach(self) -> None: ...
+
+
+class CommitObservation(Protocol):
+    """An attached :class:`CommitObserver`. The detach is idempotent: no call follows it."""
+
+    def detach(self) -> None: ...
 
 
 # ── Queries and pages ───────────────────────────────────────────────────────
@@ -940,6 +1239,44 @@ class EntryLookup(TypedDict):
 # ── Storage protocol ────────────────────────────────────────────────────────
 
 
+class CommitResult(TypedDict):
+    """What one :meth:`Storage.commit_batches` call stored: the durable batch count, and the
+    refusal when a batch was refused.
+
+    ``refused`` is the error Durable's own checks raised for the first batch they refused; the
+    batches before it are durable and it, and every batch after it, is not. It is a resolved
+    outcome, unlike a database or driver error, which rejects the call.
+    """
+
+    stored: int
+    refused: NotRequired[BaseException]
+
+
+CommitReceipt: TypeAlias = Callable[[int, Seq], None]
+"""One durability receipt: ``receive(index, seq)`` per stored batch, in order, before the call settles."""
+
+CommitPublicationScope: TypeAlias = Callable[[Callable[[], None], Context], None]
+"""A storage's own scope for one commit's publication: it runs ``publish``, exactly once, inside it."""
+
+
+@runtime_checkable
+class PublishingStorage(Protocol):
+    """The optional publication scope a :class:`Storage` may carry, as one companion protocol.
+
+    Upstream declares ``publishing`` as an optional member of ``Storage``; a Python protocol has no
+    optional member, so it lives here instead and the Session asks for it with ``isinstance`` rather
+    than requiring it. A storage that owns a batch -- upstream's attached-host
+    store, which ADR 0003 excludes -- takes each commit's publication inside that batch, so what the
+    publication marks lands together with what the commit stored. It runs ``publish`` exactly once,
+    now or soon after; the Session publishes the next commit only once it ran, and reports and
+    publishes directly when the scope itself throws. Every bundled backend omits it, which is what
+    the Session publishes directly against.
+    """
+
+    def publishing(self, publish: Callable[[], None], context: Context) -> None:
+        """Run ``publish`` -- one stored commit's publication -- inside this storage's own scope."""
+
+
 @runtime_checkable
 class Storage(Protocol):
     """Atomic persistence boundary for Session records.
@@ -952,18 +1289,43 @@ class Storage(Protocol):
     An error a method throws is final: it fails the Session, which nothing retries, so retry
     transient failures inside the method. Two errors of a read fail only that read: a
     :class:`~pi_durable.errors.StorageRequestError` for an invalid request, and a rejection
-    because its caller's context was aborted. Any error from :meth:`commit` or :meth:`mint_id`
-    is fatal.
+    because its caller's context was aborted. Any error from :meth:`commit_batches` or
+    :meth:`mint_id` is fatal.
+
+    ``commit_batches`` is the only commit shape: a storage implements one call and no single-write
+    companion. Code that seeds or writes a storage directly, such as a test, goes through
+    :func:`pi_durable.testing.commit_writes`, which passes one batch to this call.
+
+    The optional publication scope is not a member here: see :class:`PublishingStorage`.
     """
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        """Atomically persist one batch and return its sequence."""
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        """Persist ``batches`` in order, each as one atomic commit with its own sequence.
+
+        Each batch is checked against the state the batches before it left, in as few round trips
+        as the backend can make. Every batch has at least one write. The call stops at the first
+        batch Durable's own rules refuse -- global IDs, document actions, copy resolution: the
+        batches before it are durable, it and the batches after it are not -- and resolves with
+        their number in ``stored`` and the refusal in ``refused``. Any other failure (a driver or
+        I/O error, a failed ``COMMIT``) rejects the whole call and stores nothing the backend could
+        roll back, and the receipts already made stand.
+
+        ``receive(index, seq)`` runs once per stored batch, in order, once all of them are durable
+        and before the next call starts; it is a durability receipt, not publication, and the
+        Session publishes later.
+        """
 
     async def mint_id(self) -> int:
-        """Return a fresh ID greater than every ID minted or stored before, also across reopen.
+        """Return a fresh ID above every ID minted since this storage was opened and every ID stored.
 
-        The value is unbranded; a caller applies :func:`~pi_durable.ids.id_from_number` at its
-        own trusted boundary.
+        The contract holds also across reopen: scans order by ID as creation order, and the Harness
+        relies on it. The value is unbranded; a caller applies
+        :func:`~pi_durable.ids.id_from_number` at its own trusted boundary.
         """
 
     async def conversation(self, id: ConversationId, context: Context) -> ConversationRecord | None:
@@ -1151,17 +1513,20 @@ class DocumentReader(Protocol):
 class SessionEndClosed(TypedDict):
     """The Session ended with ``close()``."""
 
-    reason: Literal["closed"]
+    kind: Literal["closed"]
 
 
 class SessionEndFailed(TypedDict):
     """The Session failed and closed itself; ``error`` is the first Storage error."""
 
-    reason: Literal["failed"]
+    kind: Literal["failed"]
     error: Any
 
 
 SessionEnd: TypeAlias = SessionEndClosed | SessionEndFailed
+"""Terminal result of one Session, tagged by ``kind`` (spec-1.5.0.md:1378, upstream
+``src/types.ts:1172``). A watch of a document, view, or graph mirrors it: ``ended`` for a Session
+that closed and ``failed`` for one that failed (spec-1.5.0.md:5397)."""
 
 
 class Session(Protocol):
@@ -1174,13 +1539,13 @@ class Session(Protocol):
     @property
     def closed(self) -> asyncio.Future[SessionEnd]: ...
 
-    def subscribe_commits(self, listener: Any) -> Any: ...
+    def observe_commits(self, observer: CommitObserver) -> CommitObservation: ...
 
     def subscribe_close(self, listener: Any) -> Any: ...
 
     async def snapshot(self, token: Any, *args: Any) -> JsonObject | None: ...
 
-    async def document_state(self, token: Any, *args: Any) -> Any: ...
+    async def observe_doc(self, token: Any, *args: Any) -> Observation[Any] | None: ...
 
     async def watch_doc(self, token: Any, *args: Any) -> Any: ...
 

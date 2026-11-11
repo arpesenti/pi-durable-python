@@ -24,12 +24,12 @@ from pi_durable.context import (
 )
 from pi_durable.env import (
     Err,
+    FileChange,
     FileError,
     Ok,
     Result,
     ShellExecOptions,
     ShellOutputInfo,
-    WatchChange,
     WatchTarget,
     get_or_throw,
 )
@@ -700,7 +700,7 @@ async def test_watch_refuses_and_errors_on_a_directory_budget(tmp_path: Path) ->
     assert refused.error.code == "invalid"
 
     _unwrap(await env.remove("tree/c", {"recursive": True}, BACKGROUND_CONTEXT))
-    changes: list[WatchChange] = []
+    changes: list[FileChange] = []
     watcher = _unwrap(
         await env.watch(
             [WatchTarget({"path": "tree", "recursive": True})], changes.append, BACKGROUND_CONTEXT
@@ -710,13 +710,17 @@ async def test_watch_refuses_and_errors_on_a_directory_budget(tmp_path: Path) ->
         _unwrap(await env.create_dir("tree/d", None, BACKGROUND_CONTEXT))
         deadline = asyncio.get_running_loop().time() + 3
         while (
-            not any("error" in change for change in changes) and asyncio.get_running_loop().time() < deadline
+            not any(change["kind"] == "failed" for change in changes)
+            and asyncio.get_running_loop().time() < deadline
         ):
             await asyncio.sleep(0.02)
         assert changes
+        # The reported change is tagged by ``kind``, with the budget error as its payload.
+        assert changes[-1]["kind"] == "failed"
         assert changes[-1]["error"].code == "invalid"
     finally:
-        await watcher.close(BACKGROUND_CONTEXT)
+        await watcher.stop(BACKGROUND_CONTEXT)
+        await watcher.stop(BACKGROUND_CONTEXT)
 
 
 async def test_shell_keeps_reading_descendant_output_while_a_spill_is_pending(

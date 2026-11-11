@@ -2,7 +2,8 @@
 
 Covers both conformance runs (fresh and across reopen) plus persistence and sequence allocation,
 table prefixes, metadata corruption, document history, detach-on-replay, transaction rollback,
-index usage, revision reclamation, WAL checkpointing, page reuse, and bounded storage size.
+index usage, revision reclamation, WAL checkpointing, page reuse, bounded storage size, and a read
+that starts while a batched call holds the transaction open.
 """
 
 from __future__ import annotations
@@ -12,11 +13,12 @@ import json
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from session_support import observe_commits
 from storage_support import expect
 
 from pi_durable.context import BACKGROUND_CONTEXT, Context
@@ -24,6 +26,7 @@ from pi_durable.errors import SessionFailed
 from pi_durable.ids import ROOT_CONVERSATION_ID, DocumentId, EntryId, Seq, TaskId
 from pi_durable.session.session import create_session
 from pi_durable.storage.sqlite import SqliteStorage
+from pi_durable.storage.sqlite.database import SqliteDatabase, SqliteExecutor, SqliteValue
 from pi_durable.storage.sqlite.posix import (
     PosixSqliteStorageOptions,
     open_posix_sqlite_database,
@@ -32,6 +35,7 @@ from pi_durable.storage.sqlite.posix import (
 from pi_durable.testing import (
     StorageConformanceCase,
     StorageConformanceOptions,
+    commit_writes,
     create_expect_assertions,
     create_storage_conformance,
 )
@@ -81,11 +85,13 @@ class ReopeningStorage:
         self._path = path
         self._closed = False
 
-    async def commit(self, writes: Sequence[StorageWrite], commit_context: Context) -> Seq:
+    async def commit_batches(
+        self, batches: Any, receive: Any, commit_context: Context
+    ) -> Any:
         if self._closed:
-            return await self._current.commit(writes, commit_context)
+            return await self._current.commit_batches(batches, receive, commit_context)
         try:
-            return await self._current.commit(writes, commit_context)
+            return await self._current.commit_batches(batches, receive, commit_context)
         finally:
             await self._current.close(context)
             self._current = await open_posix_sqlite_storage(str(self._path))
@@ -204,7 +210,8 @@ def _entry(id: int, conversation_id: Any, data: Any = None) -> dict[str, Any]:
 
 
 async def _create_root(storage: Storage) -> Seq:
-    return await storage.commit(
+    return await commit_writes(
+        storage,
         [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
     )
 
@@ -258,7 +265,8 @@ async def test_persists_records_sequence_allocation_and_global_id_allocation_acr
     assert await _create_root(storage) == 1
     entry_id = EntryId(await storage.mint_id())
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(entry_id, ROOT_CONVERSATION_ID)}], context
         )
         == 2
@@ -273,7 +281,8 @@ async def test_persists_records_sequence_allocation_and_global_id_allocation_acr
     }
     assert await reopened.mint_id() == entry_id + 1
     assert (
-        await reopened.commit(
+        await commit_writes(
+            reopened,
             [{"type": "task", "value": _pending_task(await reopened.mint_id())}], context
         )
         == 3
@@ -320,11 +329,13 @@ async def test_opens_a_database_facade_under_a_table_prefix() -> None:
         await open_posix_sqlite_database(str(path)), {"prefix": "second_"}
     )
     try:
-        await first.commit(
+        await commit_writes(
+            first,
             [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
         )
         assert await second.conversation(ROOT_CONVERSATION_ID, context) is None
-        await second.commit(
+        await commit_writes(
+            second,
             [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
         )
         assert await first.conversation(ROOT_CONVERSATION_ID, context) == {
@@ -366,7 +377,8 @@ async def test_rejects_a_document_whose_required_base_is_missing() -> None:
     storage, path = await _create_storage()
     await _create_root(storage)
     id = DocumentId(await storage.mint_id())
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -389,7 +401,8 @@ async def test_replays_detached_root_replacements_and_follow_up_edits_while_reje
     storage, path = await _create_storage()
     await _create_root(storage)
     id = DocumentId(await storage.mint_id())
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -403,7 +416,8 @@ async def test_replays_detached_root_replacements_and_follow_up_edits_while_reje
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -417,7 +431,8 @@ async def test_replays_detached_root_replacements_and_follow_up_edits_while_reje
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -435,7 +450,8 @@ async def test_replays_detached_root_replacements_and_follow_up_edits_while_reje
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -481,7 +497,8 @@ async def test_rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() 
     circular: dict[str, Any] = {}
     circular["self"] = circular
     with pytest.raises(ValueError, match="Circular reference"):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {"type": "entry", "value": _entry(transient_id, ROOT_CONVERSATION_ID)},
                 {
@@ -495,7 +512,8 @@ async def test_rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() 
     assert await storage.task(transient_task_id, context) is None
     committed_id = EntryId(await storage.mint_id())
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(committed_id, ROOT_CONVERSATION_ID)}], context
         )
         == 2
@@ -512,6 +530,103 @@ async def test_rolls_sql_rows_and_sequence_allocation_back_as_one_transaction() 
         database.close()
 
 
+class _GatedCheckHandle:
+    """A transaction handle whose global-ID reads stall on a gate, to catch a call mid-flight."""
+
+    def __init__(self, handle: SqliteExecutor, owner: _GatedCheckDatabase) -> None:
+        self._handle = handle
+        self._owner = owner
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._handle.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._handle.run(sql, *params)
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._handle.run_counted(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        if self._owner.armed and "record_type FROM" in sql:
+            return self._owner.stall(self._handle, sql, params)
+        return self._handle.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._handle.all(sql, *params)
+
+
+class _GatedCheckDatabase:
+    """A database facade that can hold one batch's checks open, as a slow disk's lock would."""
+
+    def __init__(self, delegate: SqliteDatabase) -> None:
+        self._delegate = delegate
+        self.armed = False
+        self.reached = asyncio.Event()
+        self.unblock = asyncio.Event()
+
+    async def stall(
+        self, handle: SqliteExecutor, sql: str, params: tuple[SqliteValue, ...]
+    ) -> dict[str, Any] | None:
+        self.reached.set()
+        await self.unblock.wait()
+        return await handle.get(sql, *params)
+
+    def exec(self, sql: str) -> Awaitable[None]:
+        return self._delegate.exec(sql)
+
+    def run(self, sql: str, *params: SqliteValue) -> Awaitable[None]:
+        return self._delegate.run(sql, *params)
+
+    def run_counted(self, sql: str, *params: SqliteValue) -> Awaitable[int]:
+        return self._delegate.run_counted(sql, *params)
+
+    def get(self, sql: str, *params: SqliteValue) -> Awaitable[dict[str, Any] | None]:
+        return self._delegate.get(sql, *params)
+
+    def all(self, sql: str, *params: SqliteValue) -> Awaitable[list[dict[str, Any]]]:
+        return self._delegate.all(sql, *params)
+
+    def transaction(self, callback: Callable[[SqliteExecutor], Awaitable[Any]]) -> Awaitable[Any]:
+        return self._delegate.transaction(lambda handle: callback(_GatedCheckHandle(handle, self)))
+
+    def close(self) -> Awaitable[None]:
+        return self._delegate.close()
+
+
+async def test_a_read_started_during_a_batch_call_observes_every_batch() -> None:
+    """One SQL transaction is one call: a reader concurrent with it sees none or all batches.
+
+    The shared suite's receipts are serial, so this is the contract's other half: a read begun
+    while the group is mid-transaction observes the last batch, never a prefix of the group.
+    """
+
+    directory = _temp_directory("pi-durable-sqlite-concurrent-")
+    path = directory / "storage.sqlite"
+    seed = await _open_storage(path)
+    await _create_root(seed)
+    entry_ids = [EntryId(await seed.mint_id()) for _ in range(3)]
+    await seed.close(context)
+
+    database = _GatedCheckDatabase(await open_posix_sqlite_database(str(path)))
+    storage = await SqliteStorage.open(database)
+    _open_storages.append(storage)
+    database.armed = True
+    batches: list[list[StorageWrite]] = [
+        [{"type": "entry", "value": _entry(id, ROOT_CONVERSATION_ID)}] for id in entry_ids
+    ]
+
+    committing = asyncio.create_task(storage.commit_batches(batches, lambda index, seq: None, context))
+    await database.reached.wait()
+    reading = asyncio.create_task(storage.entry(entry_ids[2], context))
+    await asyncio.sleep(0)
+    database.unblock.set()
+
+    assert await committing == {"stored": 3}
+    observed = await reading
+    assert observed is not None
+    assert observed["entry"]["id"] == entry_ids[2]
+
+
 async def test_reconstructs_recent_and_ancient_rewindable_points_after_reopen() -> None:
     storage, path = await _create_storage()
     await _create_root(storage)
@@ -523,7 +638,8 @@ async def test_reconstructs_recent_and_ancient_rewindable_points_after_reopen() 
         "history": "rewindable",
         "fork": "asOf",
     }
-    created_at = await storage.commit(
+    created_at = await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -536,7 +652,8 @@ async def test_reconstructs_recent_and_ancient_rewindable_points_after_reopen() 
     ancient_at = created_at
     recent_at = created_at
     for count in range(1, 41):
-        recent_at = await storage.commit(
+        recent_at = await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -640,7 +757,8 @@ async def test_reclaims_current_only_revisions_only_after_a_base_or_retirement()
     storage, path = await _create_storage()
     await _create_root(storage)
     id = DocumentId(await storage.mint_id())
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -651,7 +769,8 @@ async def test_reclaims_current_only_revisions_only_after_a_base_or_retirement()
         context,
     )
     for count in range(1, 11):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -677,7 +796,8 @@ async def test_reclaims_current_only_revisions_only_after_a_base_or_retirement()
         assert json.loads(row["content"]) == [["s", ["count"], 10]]
     finally:
         revisions.close()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -688,7 +808,8 @@ async def test_reclaims_current_only_revisions_only_after_a_base_or_retirement()
         context,
     )
     assert _revision_count(path, id) == 1
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -699,7 +820,7 @@ async def test_reclaims_current_only_revisions_only_after_a_base_or_retirement()
         context,
     )
     assert _revision_count(path, id) == 2
-    await storage.commit([{"type": "document.retire", "id": id}], context)
+    await commit_writes(storage, [{"type": "document.retire", "id": id}], context)
     assert _revision_count(path, id) == 0
 
 
@@ -713,14 +834,16 @@ async def test_waits_for_a_competing_writer_only_up_to_the_busy_timeout() -> Non
     try:
         blocker.execute("BEGIN IMMEDIATE")
         with pytest.raises(sqlite3.OperationalError, match="locked"):
-            await storage.commit(
+            await commit_writes(
+                storage,
                 [{"type": "entry", "value": _entry(entry_id, ROOT_CONVERSATION_ID)}], context
             )
         blocker.execute("ROLLBACK")
     finally:
         blocker.close()
     assert (
-        await storage.commit(
+        await commit_writes(
+            storage,
             [{"type": "entry", "value": _entry(entry_id, ROOT_CONVERSATION_ID)}], context
         )
         == 2
@@ -733,7 +856,8 @@ async def test_auto_checkpoints_wal_frames_and_truncates_the_wal_on_close() -> N
     storage = await _open_storage(path, {"wal_auto_checkpoint_pages": 1})
     await _create_root(storage)
     for index in range(20):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -763,7 +887,8 @@ async def test_reuses_pages_released_by_current_only_checkpoints() -> None:
     await _create_root(storage)
     id = DocumentId(await storage.mint_id())
     large = "x" * (512 * 1024)
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -773,7 +898,8 @@ async def test_reuses_pages_released_by_current_only_checkpoints() -> None:
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -792,7 +918,8 @@ async def test_reuses_pages_released_by_current_only_checkpoints() -> None:
     finally:
         before.close()
     assert free_after_delete > 0
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -818,7 +945,8 @@ async def test_keeps_representative_row_and_document_storage_bounded() -> None:
     storage, path = await _create_storage()
     await _create_root(storage)
     for index in range(100):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "entry",
@@ -832,7 +960,8 @@ async def test_keeps_representative_row_and_document_storage_bounded() -> None:
             context,
         )
     document_id = DocumentId(await storage.mint_id())
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -849,7 +978,8 @@ async def test_keeps_representative_row_and_document_storage_bounded() -> None:
         context,
     )
     for count in range(1, 101):
-        await storage.commit(
+        await commit_writes(
+            storage,
             [
                 {
                     "type": "document.change",
@@ -872,7 +1002,7 @@ async def test_storage_failure_fails_the_session_and_publishes_nothing() -> None
     storage, _path = await _create_storage()
     session = create_session(storage)
     publications: list[Any] = []
-    session.subscribe_commits(lambda publication, _context: publications.append(publication))
+    observe_commits(session, lambda publication, _context: publications.append(publication))
 
     async def create(tx: Any) -> Any:
         return await tx.create_conversation({"ownership": {"kind": "ownerless"}})
@@ -892,4 +1022,4 @@ async def test_storage_failure_fails_the_session_and_publishes_nothing() -> None
     with pytest.raises(SessionFailed):
         await session.commit(append, context)
     closed = await asyncio.wait_for(session.closed, 1)
-    assert closed["reason"] == "failed"
+    assert closed["kind"] == "failed"

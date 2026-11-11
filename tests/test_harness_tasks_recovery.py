@@ -742,12 +742,12 @@ def handover_task(
 
 
 async def start_handover(
-    log: list[str], gates: dict[str, Any], storage: Any = None
+    log: list[str], gates: dict[str, Any], storage: Any = None, version: int = 1
 ) -> dict[str, Any]:
     registry = create_registry()
-    old = add_task(registry, handover_task("old", 1, log, {"gates": gates}))
+    old = add_task(registry, handover_task("old", version, log, {"gates": gates}))
     opened = await open_tasks(storage or MemoryStorage(), [], {"registry": registry})
-    id = await _create_in(opened["harness"], handover_task("old", 1, log))
+    id = await _create_in(opened["harness"], handover_task("old", version, log))
     opened["harness"].resume()
     await eventually(lambda: len(log) == 1)
     return {**opened, "old": old, "id": id}
@@ -844,7 +844,7 @@ async def test_hands_over_to_a_newer_version_whose_migration_fails_and_stays_blo
     )
     gate.resolve()
     await eventually(lambda: len(opened["infos"]) == 1)
-    assert opened["infos"][0]["type"] == "migration_failed"
+    assert opened["infos"][0]["kind"] == "migration_failed"
     assert opened["infos"][0]["task"]["id"] == opened["id"]
     await flush()
     record = await opened["harness"].get_task(opened["id"], context)
@@ -869,11 +869,27 @@ async def test_keeps_running_under_the_old_definition_when_the_replacement_canno
     await opened["harness"].wait_for_task(opened["id"], context)
     assert log == ["old:a start", "old:a end", "old:b start", "old:b end", "old:c"]
     assert [
-        (info["type"], info["reason"], info["task"]["id"]) for info in opened["infos"]
+        (info["kind"], info["reason"], info["task"]["id"]) for info in opened["infos"]
     ] == [
         ("task_outdated", "missing_task", opened["id"]),
-        ("task_outdated", "incompatible_task", opened["id"]),
+        ("task_outdated", "migration_failed", opened["id"]),
     ]
+    await opened["harness"].close(context)
+
+
+async def test_reports_a_replacement_older_than_the_running_task_as_task_too_old() -> None:
+    log: list[str] = []
+    gate = deferred()
+    opened = await start_handover(log, {"a": gate.promise}, None, 2)
+    # The same extension name replaces the running definition with an older version.
+    add_task(opened["registry"], handover_task("older", 1, log))
+    gate.resolve()
+    await opened["harness"].wait_for_task(opened["id"], context)
+    assert log == ["old:a start", "old:a end", "old:b start", "old:b end", "old:c"]
+    assert [
+        (info["kind"], info["reason"], info["task"]["id"])
+        for info in opened["infos"]
+    ] == [("task_outdated", "task_too_old", opened["id"])]
     await opened["harness"].close(context)
 
 

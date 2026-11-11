@@ -8,7 +8,18 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Never, NotRequired, Protocol, TypeAlias, TypedDict, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Never,
+    NotRequired,
+    Protocol,
+    TypeAlias,
+    TypedDict,
+    TypeVar,
+    overload,
+)
 
 from ..context import AbortSignal, Context
 from ..documents import (
@@ -28,6 +39,9 @@ from ..documents import (
 from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonObject, JsonValue
 from ..types import (
+    CommitOptions,
+    ContinueDoneRecord,
+    ContinueUnansweredRecord,
     ConversationOwnership,
     Cursor,
     DocumentReader,
@@ -39,6 +53,7 @@ from ..types import (
     InputUnansweredRecord,
     MessageRecord,
     NextTaskState,
+    Observer,
     Page,
     SubmissionRecord,
     TaskOutcome,
@@ -51,6 +66,7 @@ from ..types import (
 
 if TYPE_CHECKING:
     from ..session.transaction import Transaction
+    from .view import ConversationWindow
 
 
 class ContextView(TypedDict):
@@ -160,7 +176,9 @@ class ToolExecutionApi(Protocol):
 
     def details(self, value: JsonValue, context: Context) -> Awaitable[None]: ...
 
-    def commit(self, change: Callable[..., Any], context: Context) -> Awaitable[Any]: ...
+    def commit(
+        self, change: Callable[..., Any], context: Context, options: CommitOptions | None = None
+    ) -> Awaitable[Any]: ...
 
     def memo(self, name: str, *args: Any) -> Awaitable[JsonValue | None]: ...
 
@@ -295,6 +313,8 @@ class AgentState(TypedDict, total=False):
     modelTools: list[str] | dict[str, list[str]]
     instructions: str
     cwd: str
+    maxTurns: int
+    """Tool rounds one run takes at most (``pi.live.run.turns``); unset, no limit."""
 
 
 class AgentChange(TypedDict, total=False):
@@ -307,6 +327,8 @@ class AgentChange(TypedDict, total=False):
     modelTools: Any
     instructions: str | None
     cwd: str | None
+    maxTurns: int | None
+    """``configure()`` raises unless it is an integer ``1`` or more (or ``None``)."""
 
 
 @dataclass(slots=True)
@@ -322,6 +344,9 @@ class Agent:
     sections: Sequence[PromptSection] = ()
     instructions: str | None = None
     cwd: str | None = None
+    max_turns: int | None = None
+    """Tool rounds one run takes at most: the round that reaches it runs its tools, then the run ends
+    ``unanswered`` with ``turn_limit``. Task-owned children and forks inherit it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +406,12 @@ AfterFailedRun = Literal["keep", "continue", "withdraw"]
 
 
 # ── Reports, timers, and wakeups ────────────────────────────────────────────
+#
+# 1.5.0 retags `ReportInfo` and `ReportFrom` from `type` to `kind`, and says what happened in new
+# words: `storage_failed` and `task_interrupted` join the kinds, and the host is handed one `Report`
+# — the fields of a `ReportInfo` beside the `error` — rather than an error and a description. The
+# ledger of what this release retags, and of the unions it leaves alone, is at the top of
+# `types.py`: `kind` is the one tag key here, and the `type` spelling #33 let readers accept is gone.
 
 
 class ReportTask(TypedDict):
@@ -394,30 +425,36 @@ class ReportTask(TypedDict):
 
 
 HostCallback = Literal["now", "settings", "registry", "env", "models", "setTimer", "onWake"]
-"""A host callback, by its ``HarnessOptions`` name."""
+"""A host callback, by its ``HarnessOptions`` name.
+
+The set is exhaustive over what the port can report a callback against. Upstream's ninth member,
+``telemetry``, is not carried: the port has no telemetry adapter for a published commit to throw
+in, so nothing can be reported against it (ADR 0003).
+"""
 
 
 def host_error(callback: HostCallback) -> ReportInfo:
     """The report info of a host callback that threw."""
 
-    return {"type": "host_error", "callback": callback}
+    return {"kind": "host_error", "callback": callback}
 
 
-LISTENER: ReportInfo = {"type": "listener_error"}
+LISTENER: ReportInfo = {"kind": "listener_error"}
 """The report info of a listener, which never fails what ran it."""
 
 
 DEFAULT_RESTART_LIMIT = 5
-"""Default ``settings.restart_limit``: restarts in a row before a task is parked."""
+"""Default ``settings.restart_limit``: restarts in a row after which a task ends instead of
+running again (``agent.ts:57``)."""
 
 DEFAULT_AFTER_FAILED_RUN: AfterFailedRun = "keep"
 """Default ``settings.after_failed_run``: a failed run leaves its queued inputs queued."""
 
 
-ReportType = Literal[
-    "session_failed",
+ReportKind = Literal[
+    "storage_failed",
     "task_faulted",
-    "task_parked",
+    "task_interrupted",
     "migration_failed",
     "task_outdated",
     "task_error",
@@ -425,34 +462,62 @@ ReportType = Literal[
     "host_error",
     "listener_error",
 ]
-"""What a report to ``on_report`` is about (spec §10.1)."""
+"""What a report to ``on_report`` is about (spec §10.1).
+
+``storage_failed`` is the error that failed the Session; ``task_interrupted`` says crashes ended a
+built-in task at the restart limit, or a run whose request kept being cut off.
+"""
 
 
-ReportReason = Literal["threw", "restart_limit", "missing_task", "incompatible_task"]
-"""Why a task faulted (``threw``, ``restart_limit``) or kept an outdated definition."""
+ReportReason = Literal[
+    "threw",
+    "restart_limit",
+    "interrupted",
+    "missing_task",
+    "task_too_old",
+    "migration_failed",
+]
+"""Why a task faulted (``threw``, ``restart_limit``), was interrupted by crashes (``restart_limit``,
+``interrupted``), or kept an outdated definition (``missing_task``, ``task_too_old``,
+``migration_failed``).
+"""
 
 
 class ReportInfo(TypedDict):
-    """What a report to ``HarnessOptions.on_report`` is about.
+    """What a report to ``HarnessOptions.on_report`` is about, tagged by ``kind`` (spec §10.1).
 
-    ``type`` says what happened. A task report carries ``task`` (its ID, kind, and conversation);
+    ``kind`` says what happened. A task report carries ``task`` (its ID, kind, and conversation);
     ``extension`` names the extension whose code failed, when known. ``reason`` explains a
-    ``task_faulted`` or ``task_outdated`` report, ``callback`` names the failing host callback, and
-    ``conversationId`` a wrapper failure outside a task.
+    ``task_faulted``, ``task_interrupted`` or ``task_outdated`` report, and ``restarts`` is the
+    task's restart count when an interruption ended it. ``callback`` names the failing host
+    callback, and ``conversationId`` a wrapper failure outside a task.
     """
 
-    type: ReportType
+    kind: ReportKind
     task: NotRequired[ReportTask]
     extension: NotRequired[str]
     reason: NotRequired[ReportReason]
+    restarts: NotRequired[int]
+    """The task's ``restarts`` when crashes ended it: a ``task_interrupted`` report only."""
+
     callback: NotRequired[HostCallback]
     conversationId: NotRequired[ConversationId]
 
 
-class ReportFrom(TypedDict, total=False):
-    """Whose code a task's ``runtime.report()`` is about when not the task's own."""
+class Report(ReportInfo):
+    """One report to ``HarnessOptions.on_report``: what it is about, and the error (spec §10.1).
 
-    type: Literal["extension", "host"]
+    A host learns of a failure that does not fail its calling operation, and of the Session's own
+    failure, through this one object: the fields of a :class:`ReportInfo` beside the ``error``.
+    """
+
+    error: BaseException
+
+
+class ReportFrom(TypedDict, total=False):
+    """Whose code a task's ``runtime.report()`` is about when not the task's own, tagged by ``kind``."""
+
+    kind: Literal["extension", "host"]
     extension: str
     callback: HostCallback
 
@@ -493,19 +558,54 @@ class CompactionResult(TypedDict, total=False):
 
 
 class ProgressPolicy(TypedDict, total=False):
-    """How often running progress is committed."""
+    """How often running progress is committed, and how long it may wait in memory before it is stored.
+
+    Progress commits are deferred (`CommitPersistence`): watches see each at once, and Storage gets them
+    together, at the run's next phase boundary or after ``persist_within_ms`` (``types.ts:589-601``).
+    """
 
     partial_interval_ms: int
     output_interval_ms: int
+    persist_within_ms: int
 
 
 class GenerationHooks(TypedDict, total=False):
     """Hooks of the built-in generation task."""
 
     beforeRequest: Callable[..., Any]
+    beforeProviderRequest: Callable[..., Any]
+    """``(request, api, context)`` where ``request`` is ``{"model", "payload"}`` and ``payload`` is
+    the body the provider is about to send: after it is built, before it is sent. A returned
+    ``{"payload"}`` replaces the body for that request only, and the chain runs again whenever the
+    body is rebuilt — a new attempt, and a close's resend of the same one."""
     afterResponse: Callable[..., Any]
     onYield: Callable[..., Any]
     afterTools: Callable[..., Any]
+    afterRun: Callable[..., Any]
+
+
+class RunSummary(TypedDict):
+    """How a run ended, for ``afterRun`` hooks.
+
+    Read the run's history with ``api.entries({ minEntryId: first, maxEntryId: last })``.
+    """
+
+    reason: Literal["answer", "terminate"]
+    """A final answer, or a tool round whose every call asked to ``terminate``."""
+    first: EntryId
+    """The run's first entry (``LiveRun.first``); the answer itself for a run that has none."""
+    answer: EntryId
+    """The answer, or the terminating round's tool-calling answer, whose results follow it."""
+    last: EntryId
+    """The run's last entry: the answer; for a ``terminate`` round its newest result, or the reset
+    of its handoff."""
+
+
+class RunEndTask(TypedDict):
+    """A task an ``afterRun`` hook asks for, built by :func:`run_end_task`."""
+
+    task: Any
+    input: JsonValue
 
 
 class CompactionHooks(TypedDict, total=False):
@@ -637,6 +737,7 @@ class TaskRuntime(Protocol):
         self,
         change: Callable[..., NextTaskState | None | Awaitable[NextTaskState | None]],
         context: Context,
+        options: CommitOptions | None = None,
     ) -> None: ...
 
     async def memo(self, name: str, *args: Any) -> JsonValue | None: ...
@@ -654,6 +755,16 @@ class TaskRuntime(Protocol):
     async def outcomes(self, ids: Sequence[TaskId], context: Context) -> list[TaskOutcome]: ...
 
     async def entry(self, *args: Any) -> EntryRecord | None: ...
+
+    async def entries(
+        self,
+        query: EntryQuery,
+        limit: int,
+        cursor: Cursor | None,
+        context: Context,
+    ) -> Page[EntryRecord, Cursor]:
+        """The task's conversation's committed raw history, as :meth:`Conversation.entries` pages it."""
+        ...
 
     async def context(self, conversation_id: ConversationId, context: Context, *args: Any) -> ContextView: ...
 
@@ -719,6 +830,8 @@ class InputSubmissionDraft(TypedDict, total=False):
     requestId: str
     when_busy: Literal["steer", "followUp", "reject"]
     whenBusy: Literal["steer", "followUp", "reject"]
+    when_idle: Literal["reject"]
+    whenIdle: Literal["reject"]
 
 
 class WriteSubmissionDraft(TypedDict, total=False):
@@ -730,11 +843,30 @@ class WriteSubmissionDraft(TypedDict, total=False):
     requestId: str
 
 
-SubmissionDraft: TypeAlias = InputSubmissionDraft | WriteSubmissionDraft
-"""Either an input or a passive entry write."""
+class ContinueSubmissionDraft(TypedDict, total=False):
+    """Start a run on the context as it is, without a user message.
+
+    Only when idle: a busy conversation rejects it with :class:`ConversationBusy`, and it never
+    queues. Items kept in ``pi.inbox`` are placed first and join the run.
+    """
+
+    type: Literal["continue"]
+    request_id: str
+    requestId: str
+
+
+SubmissionDraft: TypeAlias = (
+    InputSubmissionDraft | WriteSubmissionDraft | ContinueSubmissionDraft
+)
+"""An input, a passive entry write, or a continue."""
 
 SettledSubmissionRecord: TypeAlias = (
-    InputDoneRecord | InputUnansweredRecord | WriteDoneRecord | WriteUnansweredRecord
+    InputDoneRecord
+    | InputUnansweredRecord
+    | WriteDoneRecord
+    | WriteUnansweredRecord
+    | ContinueDoneRecord
+    | ContinueUnansweredRecord
 )
 """A submission that reached ``done`` or ``unanswered``."""
 
@@ -753,7 +885,13 @@ class ConversationHandle(Protocol):
 
     id: ConversationId
 
-    async def submit(self, submission: Any, context: Context) -> Any: ...
+    # The same two forms as ``Conversation.submit()``: a draft with a context, or a transaction with
+    # a draft, which admits the submission in the caller's own commit.
+    @overload
+    async def submit(self, submission: SubmissionDraft, context: Context) -> Submission: ...
+
+    @overload
+    async def submit(self, tx: Transaction, submission: SubmissionDraft) -> SubmissionId: ...
 
     async def abort(self, context: Context, options: Mapping[str, Any] | None = None) -> None: ...
 
@@ -765,7 +903,13 @@ class Conversation(Protocol):
 
     id: ConversationId
 
+    # The overloads pair a draft with a context, and a transaction with a draft: the second admits
+    # the submission in the caller's own commit, stored or lost with it.
+    @overload
     async def submit(self, submission: SubmissionDraft, context: Context) -> Submission: ...
+
+    @overload
+    async def submit(self, tx: Transaction, submission: SubmissionDraft) -> SubmissionId: ...
 
     async def agent(self, context: Context) -> Agent: ...
 
@@ -799,13 +943,17 @@ class Conversation(Protocol):
 
     async def wait_for_idle(self, context: Context) -> None: ...
 
-    async def view_state(self, context: Context) -> Any: ...
+    async def watch(self, context: Context, window: ConversationWindow | None = None) -> Any: ...
 
-    async def watch(self, context: Context) -> Any: ...
-
+    async def observe(
+        self,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> Any: ...
 
 ConversationWatch: TypeAlias = WatchHandle[Any]
-"""A serialized exact-frame watch of one conversation's view."""
+"""A serialized coalesced watch of one conversation's view."""
 
 
 class Submission(Protocol):
@@ -839,7 +987,15 @@ class HarnessOptions(TypedDict, total=False):
     on_wake: Callable[[Wake], Any]
     """Replaces the timer for sleeping tasks; a host arms its own wakeup and calls ``resume()``."""
 
-    on_report: Callable[..., Any]
+    on_report: Callable[[Report], Any]
+    """Receives one :class:`Report` per failure that does not fail its caller, and for the error that
+    fails the Session: the ``ReportInfo`` fields tagged by ``kind``, beside ``error``.
+    """
+
+    read_only: bool
+    """Open the Session as a viewer of what another process drives: every commit with writes, and every
+    call that would run tasks, is refused with :class:`ReadOnlySession`.
+    """
 
 
 T = TypeVar("T")
@@ -865,6 +1021,7 @@ __all__ = [
     "ConversationHandle",
     "ConversationInit",
     "ConversationRetryPolicy",
+    "ContinueSubmissionDraft",
     "ConversationStreamOptions",
     "DocFamilyToken",
     "DEFAULT_AFTER_FAILED_RUN",
@@ -873,6 +1030,8 @@ __all__ = [
     "EnvTarget",
     "Extension",
     "GenerationHooks",
+    "RunEndTask",
+    "RunSummary",
     "HarnessInspection",
     "HarnessOptions",
     "HarnessSettings",
@@ -892,11 +1051,12 @@ __all__ = [
     "PromptSection",
     "QueueMode",
     "Registry",
+    "Report",
     "ReportFrom",
     "ReportInfo",
+    "ReportKind",
     "ReportReason",
     "ReportTask",
-    "ReportType",
     "RegistryReader",
     "RegistrySnapshot",
     "RewindableConversationDocFamilyToken",

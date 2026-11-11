@@ -16,15 +16,18 @@ from chat_support import (
     chat_setup,
     faux_tool_call,
     live_of,
+    only_failure,
     open_chat,
     slow_message,
     text_of,
     unanswered,
+    unanswered_reached,
     usage,
 )
 from harness_support import add_section
-from session_support import ControlledStorage, context, document_changes
+from session_support import ControlledStorage, context, document_changes, observe_commits
 from task_support import eventually
+from tool_support import add_hooks
 
 from pi_durable import (
     AssistantEntry,
@@ -43,7 +46,7 @@ from pi_durable import (
 from pi_durable.context import AbortSignal
 from pi_durable.harness.agent import resolve_settings
 from pi_durable.harness.registry import create_registry
-from pi_durable.harness.types import HarnessSettings, RegistrySnapshot
+from pi_durable.harness.types import HarnessSettings, RegistrySnapshot, Report
 
 ERROR_503 = assistant_message((), stop_reason="error", error_message="503 Service Unavailable")
 
@@ -74,7 +77,7 @@ def live_publications(harness: Any) -> list[dict[str, Any]]:
             if change["record"]["kind"] == "pi.live" and change["value"] is not None:
                 values.append(change["value"])
 
-    harness.subscribe_commits(observe)
+    observe_commits(harness, observe)
     return values
 
 
@@ -112,6 +115,9 @@ async def test_answers_an_input_and_settles_its_submission() -> None:
 async def test_stores_partials_as_deltas_and_a_complete_base_once_nothing_is_in_flight() -> None:
     setup = chat_setup()
     setup.faux.set_responses([slow_message(assistant_message("w" * 200), chunks=8, interval=0.03)])
+    # Store deferred partials well within the stream, so some reach Storage before the answer
+    # (`harness-generation.test.ts:122-123`).
+    setup.settings["progress"] = {"persist_within_ms": 100}
     storage = ControlledStorage()
     opened = await open_chat(storage, setup)
     harness, root = opened["harness"], opened["root"]
@@ -149,7 +155,8 @@ async def test_still_ends_a_run_whose_input_something_else_already_settled() -> 
     assert await harness.abort_task(task_id, context) == "marked"
     assert (await harness.wait_for_task(task_id, context))["state"]["outcome"] == {"status": "aborted"}
     assert (await submission.status(context))["reason"] == "withdrawn"
-    assert await live(harness, root) == {}
+    # A run ends without an answer even when its inputs were settled already.
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     await harness.close(context)
 
 
@@ -182,8 +189,17 @@ async def test_fails_with_no_model_when_no_model_is_configured_or_the_model_is_u
             },
         },
     }
-    assert await live(harness, root) == {}
-    assert await live(harness, plain) == {}
+    only_failure(
+        await live(harness, root),
+        tasks["items"][0]["id"],
+        [unknown["id"]],
+        "no_model",
+        "Model faux/missing is not available",
+    )
+    plain_failure = (await live(harness, plain)).get("runFailure")
+    assert isinstance(plain_failure, dict)
+    assert plain_failure["reason"] == "no_model"
+    assert plain_failure["detail"] == "No model is configured"
     await harness.close(context)
 
 
@@ -333,7 +349,7 @@ async def test_converts_the_committed_partial_when_aborted_during_streaming() ->
     partial_text = text_of(partial)
     assert converted_text is not None and partial_text is not None
     assert converted_text.startswith(partial_text)
-    assert await live(harness, root) == {}
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     assert (await harness.wait_for_task(task_id, context))["state"]["outcome"] == {"status": "aborted"}
     await harness.close(context)
 
@@ -367,7 +383,7 @@ async def test_cancels_a_deferred_response_when_aborted_during_polling() -> None
     assert (await submission.wait(context))["status"] == "unanswered"
     assert (await submission.wait(context))["reason"] == "aborted"
     assert len(setup.faux.cancelled_deferred) == 1
-    assert await live(harness, root) == {}
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     await harness.close(context)
 
 
@@ -387,9 +403,9 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
     setup.faux.cancel_deferred = cancel_failed  # type: ignore[method-assign]
     infos: list[dict[str, Any]] = []
 
-    def on_report(error: BaseException, info: dict[str, Any] | None = None) -> None:
-        setup.reports.append(error)
-        infos.append(dict(info or {}))
+    def on_report(report: Report) -> None:
+        setup.reports.append(report["error"])
+        infos.append({key: value for key, value in report.items() if key != "error"})
 
     harness = await Harness.open(
         MemoryStorage(),
@@ -415,9 +431,9 @@ async def test_reports_a_failed_deferred_cancellation_and_still_ends_the_run_abo
     assert any(str(error) == "cancel failed" for error in setup.reports)
     # Cancelling a deferred response is a host callback, not the task's own failure.
     failed = next(info for info in infos if info.get("callback") == "models")
-    assert failed["type"] == "host_error"
+    assert failed["kind"] == "host_error"
     assert failed["task"]["kind"] == "pi.generation"
-    assert await live(harness, root) == {}
+    only_failure(await live(harness, root), task_id, [submission.id], "aborted")
     await harness.close(context)
 
 
@@ -588,7 +604,11 @@ async def test_resolves_settings_over_the_builtin_defaults() -> None:
         "keep_recent_tokens": 20_000,
         "background_tokens": 32_768,
     }
-    assert resolved.progress == {"partial_interval_ms": 100, "output_interval_ms": 100}
+    assert resolved.progress == {
+        "partial_interval_ms": 100,
+        "output_interval_ms": 100,
+        "persist_within_ms": 1000,
+    }
     assert resolved.tool_execution == "parallel"
     assert resolved.steering_mode == "one-at-a-time"
     assert resolved.follow_up_mode == "one-at-a-time"
@@ -604,7 +624,11 @@ async def test_resolves_settings_over_the_builtin_defaults() -> None:
     assert resolve_settings({"progress": {"output_interval_ms": 500}}).progress == {
         "partial_interval_ms": 100,
         "output_interval_ms": 500,
+        "persist_within_ms": 1000,
     }
+    # Not a number of milliseconds, 0 or more: the default (`harness-generation.test.ts:571-573`).
+    assert resolve_settings({"progress": {"persist_within_ms": -1}}).progress["persist_within_ms"] == 1000
+    assert resolve_settings({"progress": {"persist_within_ms": 0}}).progress["persist_within_ms"] == 0
 
 
 async def test_commits_partials_no_more_often_than_the_partial_interval() -> None:
@@ -789,8 +813,14 @@ async def test_faults_a_run_task_settling_its_inputs_and_converting_the_committe
     assert entries[1]["model"][0]["role"] == "assistant"
     assert entries[1]["model"][0]["stopReason"] == "aborted"
     assert text_of(entries[1]["model"][0]) == "partial"
-    assert await live(harness, root) == {}
     tasks = await root.commit(lambda tx: tx.scan_tasks({"conversationId": root.id}, 10), context)
+    only_failure(
+        await live(harness, root),
+        tasks["items"][0]["id"],
+        [submission.id],
+        "faulted",
+        "non-JSON function",
+    )
     assert tasks["items"][0]["state"]["status"] == "terminal"
     assert tasks["items"][0]["state"]["outcome"]["status"] == "faulted"
     await harness.close(context)
@@ -816,7 +846,8 @@ async def test_orphans_a_blocked_run_task_with_full_run_cleanup() -> None:
         definition = GenerationTask.definition
         newer = type(definition)(
             name=definition.name,
-            version=2,
+            # Newer than this process registers, for example after a downgrade.
+            version=definition.version + 1,
             initial=definition.initial,
             phases=definition.phases,
             abort=definition.abort,
@@ -844,7 +875,15 @@ async def test_orphans_a_blocked_run_task_with_full_run_cleanup() -> None:
     submission = await harness.submission(ids["submissionId"], context)
     assert (await submission.status(context))["status"] == "unanswered"
     assert (await submission.status(context))["reason"] == "task_too_old"
-    assert await live(harness, root) == {}
+    # A run started before `first` was recorded keeps no `runFailure.first`.
+    only_failure(
+        await live(harness, root),
+        ids["taskId"],
+        [ids["submissionId"]],
+        "orphaned",
+        "task_too_old",
+        with_first=False,
+    )
     await harness.close(context)
 
 
@@ -931,6 +970,187 @@ async def test_runs_before_request_and_after_response_hooks_for_every_attempt() 
         [{"role": "user", "content": "rewritten", "timestamp": 1}],
     ]
     assert responses == ["stop", "stop"]
+    await harness.close(context)
+
+
+async def test_replaces_the_provider_payload_for_that_request_after_before_request() -> None:
+    """``beforeProviderRequest`` sees the body as built, from the messages ``beforeRequest`` fixed.
+
+    It is the provider's body that is replaced: the replacement reaches the provider for that
+    request only, and the conversation keeps the committed messages. The two chains are distinct —
+    by the time ``beforeProviderRequest`` runs the messages ``beforeRequest`` replaced are already
+    fixed into the body, and its own replacement feeds back into neither the messages nor the
+    conversation.
+    """
+
+    setup = chat_setup()
+    setup.faux.set_responses([assistant_message("ok")])
+    seen: list[dict[str, Any]] = []
+
+    def before_request(request: Any, _api: Any, _context: Any) -> Any:
+        return {"messages": [{"role": "user", "content": "rewritten", "timestamp": 1}]}
+
+    def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
+        seen.append(dict(request))
+        payload = request["payload"]
+        return {
+            "payload": {
+                **payload,
+                "messages": [
+                    *payload["messages"],
+                    {"role": "user", "content": "for-the-provider", "timestamp": 2},
+                ],
+            }
+        }
+
+    add_hooks(
+        setup.registry,
+        GenerationTask,
+        {"beforeRequest": before_request, "beforeProviderRequest": before_provider_request},
+    )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "one"}, context)).wait(context)
+    # After the body was built: one request, shaped ``{model, payload}``, whose payload holds the
+    # messages ``beforeRequest`` fixed, not the committed "one".
+    assert len(seen) == 1
+    assert set(seen[0]) == {"model", "payload"}
+    assert seen[0]["model"] is setup.faux.models[0]
+    assert [message["content"] for message in seen[0]["payload"]["messages"]] == ["rewritten"]
+    # Before it was sent: the provider received the replacement.
+    sent = setup.faux.requests[0][0]
+    assert [message["content"] for message in sent["messages"]] == ["rewritten", "for-the-provider"]
+    # For that request only: the conversation kept the committed message, and the answer follows it.
+    entries = await all_entries(root)
+    assert [entry["kind"] for entry in entries] == ["pi.user", "pi.assistant"]
+    assert entries[0]["model"][0]["content"] == "one"
+    assert text_of(entries[1]["model"][0]) == "ok"
+    await harness.close(context)
+
+
+async def test_before_provider_request_hooks_chain_in_extension_order_and_a_throw_is_reported() -> None:
+    """The composition the table says: a replacement chain, an ordinary throw reported, the run on.
+
+    Each handler sees the previous one's payload; a handler that throws is reported and the chain
+    continues; a handler that declines leaves the payload alone, and the provider gets it as the
+    chain left it.
+    """
+
+    setup = chat_setup()
+    setup.faux.set_responses([assistant_message("ok")])
+    last_seen: list[dict[str, Any]] = []
+
+    def first(request: Any, _api: Any, _context: Any) -> Any:
+        assert [message["content"] for message in request["payload"]["messages"]] == ["hi"]
+        return {"payload": {"messages": [{"role": "user", "content": "first", "timestamp": 1}]}}
+
+    def boom(_request: Any, _api: Any, _context: Any) -> Any:
+        raise RuntimeError("boom")
+
+    def last(request: Any, _api: Any, _context: Any) -> Any:
+        last_seen.append(request["payload"])
+
+    for name, handler in (("first", first), ("boom", boom), ("last", last)):
+        setup.registry.install(
+            define_extension(
+                {"name": name, "hooks": [hook(GenerationTask, {"beforeProviderRequest": handler})]}
+            )
+        )
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "hi"}, context)).wait(context)
+    # Extension order, a replacement chain: ``last`` ran after the throw and saw ``first``'s
+    # replacement, not the body ``first`` was handed.
+    assert len(last_seen) == 1
+    assert [message["content"] for message in last_seen[0]["messages"]] == ["first"]
+    # The throw was reported and the run continued; ``last`` declined, so the provider got the
+    # payload the chain left it.
+    assert setup.faux.requests[0][0] == last_seen[0]
+    assert any(str(error) == "boom" for error in setup.reports)
+    assert [message["content"] for message in setup.faux.requests[0][0]["messages"]] == ["first"]
+    await harness.close(context)
+
+
+async def test_a_close_resend_of_the_same_attempt_sees_the_rebuilt_provider_payload() -> None:
+    """The chain runs again whenever the body is rebuilt, and a replacement does not leak into it.
+
+    A close hands the in-flight attempt back uncharged, so the next host resends it as the same
+    attempt. The body is rebuilt from the committed messages, and the chain runs over the rebuilt
+    body: the first request's replacement is not what the second request sees.
+    """
+
+    setup = chat_setup()
+    hanging = unanswered_reached()
+    setup.faux.set_responses([hanging["step"], assistant_message("the answer")])
+    seen: list[list[str]] = []
+
+    def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
+        seen.append([message["content"] for message in request["payload"]["messages"]])
+        return {
+            "payload": {
+                **request["payload"],
+                "messages": [{"role": "user", "content": "replaced", "timestamp": 1}],
+            }
+        }
+
+    add_hooks(setup.registry, GenerationTask, {"beforeProviderRequest": before_provider_request})
+    storage = ControlledStorage()
+    opened = await open_chat(storage, setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    id = (await root.submit({"type": "input", "content": "hi"}, context)).id
+    await hanging["reached"].promise
+    task_id = (await live(harness, root))["run"]["taskId"]
+    record = await harness.get_task(task_id, context)
+    assert record["state"]["status"] == "running"
+    assert record["state"]["checkpoint"]["phase"] == "request"
+    assert record["state"]["checkpoint"]["attempt"] == 1
+    assert len(seen) == 1
+    await harness.close(context)
+
+    reopened = await open_chat(storage.reopen(), setup)
+    record = await reopened["harness"].get_task(task_id, context)
+    # A close is not a crash: the same attempt, uncharged, is sent again.
+    assert "restarts" not in record
+    assert record["state"]["status"] == "pending"
+    assert record["state"]["checkpoint"]["phase"] == "request"
+    assert record["state"]["checkpoint"]["attempt"] == 1
+    reopened["harness"].resume()
+    assert (await (await reopened["harness"].submission(id, context)).wait(context))["status"] == "done"
+    # The second request over the same attempt saw the rebuilt body — the committed messages, not
+    # the first request's replacement — and was replaced again.
+    assert seen == [["hi"], ["hi"]]
+    sent = [request[0]["messages"][0]["content"] for request in setup.faux.requests]
+    assert sent == ["replaced", "replaced"]
+    await reopened["harness"].close(context)
+
+
+async def test_compaction_requests_do_not_run_the_before_provider_request_hook() -> None:
+    """It is the generation's payload: a compaction's provider request runs without it."""
+
+    setup = chat_setup()
+    # Little recent context is kept, so the summary request is not declined for having nothing to cut.
+    setup.settings["compaction"] = {"enabled": False, "keep_recent_tokens": 10}
+    setup.faux.set_responses([assistant_message("a1"), assistant_message("a2"), assistant_message("summary")])
+    seen: list[Any] = []
+
+    def before_provider_request(request: Any, _api: Any, _context: Any) -> Any:
+        seen.append(request)
+
+    add_hooks(setup.registry, GenerationTask, {"beforeProviderRequest": before_provider_request})
+    opened = await open_chat(MemoryStorage(), setup)
+    harness, root = opened["harness"], opened["root"]
+    harness.resume()
+    await (await root.submit({"type": "input", "content": "u1 " * 200}, context)).wait(context)
+    await (await root.submit({"type": "input", "content": "u2 " * 200}, context)).wait(context)
+    assert len(seen) == 2
+    compaction = await root.compact(None, context)
+    await harness.wait_for_task(compaction, context)
+    # The summary's request reached the provider without the hook.
+    assert len(seen) == 2
+    assert len(setup.faux.requests) == 3
     await harness.close(context)
 
 

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from functools import partial
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, overload
 
 from ..context import Context, with_abort_signal, without_abort_signal
 from ..entries import ResetEntry
@@ -15,9 +14,12 @@ from ..session.transaction import Transaction, TransactionScope
 from ..timers import host_timers
 from ..types import (
     ROOT_CONVERSATION_ID,
+    CommitOptions,
     ConversationOwnership,
     ConversationRecord,
+    EntryDraft,
     EntryRecord,
+    Observer,
     Page,
     Storage,
     SubmissionRecord,
@@ -27,7 +29,7 @@ from ..types import (
 from .agent import AgentDoc, configure, create_agent, resolve_agent, resolve_settings
 from .compaction import create_compaction
 from .inbox import InboxDoc, QueueModes, withdraw_queued_inputs
-from .live import LiveDoc, settle_scheduler_outcome, start_generation
+from .live import LIMITS_RESTARTS, LiveDoc, settle_scheduler_outcome, start_generation
 from .provider import ProviderDoc
 from .registry import BUILTIN_TASKS
 from .scheduler import TaskScheduler
@@ -41,18 +43,27 @@ from .types import (
     HarnessInspection,
     RegistryReader,
     RegistrySnapshot,
+    Report,
     ReportInfo,
     SettledSubmissionRecord,
     SettledTask,
     Submission,
+    SubmissionDraft,
     Wake,
+    WriteSubmissionDraft,
     host_error,
 )
 from .usage import UsageDoc, UsageState, add_usage_state
-from .util import closed_error, scan_all
-from .view import ConversationViews
+from .util import closed_error, conversation_entries, scan_all
+from .view import ConversationViews, ConversationWindow
 
 _SCAN_PAGE_SIZE = 256
+
+
+def _is_draft(first: Any) -> bool:
+    """Whether the first argument of a ``submit`` overload is a submission draft, not a transaction."""
+
+    return isinstance(first, Mapping) and "type" in first
 
 
 def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
@@ -64,54 +75,38 @@ def _ownership(options: Mapping[str, Any]) -> ConversationOwnership:
     return cast(ConversationOwnership, ownership)
 
 
-def _report_arity(on_report: Callable[..., Any]) -> int:
-    """How many positional arguments a host ``on_report`` takes: it may take just the error."""
-
-    try:
-        parameters = list(inspect.signature(on_report).parameters.values())
-    except (TypeError, ValueError):
-        return 2
-    if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
-        return 2
-    positional = [
-        parameter
-        for parameter in parameters
-        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    return min(len(positional), 2)
-
-
 def _safe_report(
-    on_report: Callable[..., Any] | None,
+    on_report: Callable[[Report], Any] | None,
 ) -> Callable[[BaseException, ReportInfo | None], None]:
     """``on_report`` that cannot fail: it is the last place an error goes, so its own throw is dropped."""
 
-    arity = _report_arity(on_report) if on_report is not None else 2
-
     def report(error: BaseException, info: ReportInfo | None = None) -> None:
+        # The host's sink is handed one report object: the info it was given, tagged by ``kind``.
         values = info if info is not None else LISTENER
 
         def call() -> Any:
             if on_report is None:
                 return None
-            return on_report(error) if arity == 1 else on_report(error, values)
+            return on_report(cast(Report, {**values, "error": error}))
 
         contained(call, lambda _error: None)
 
     return report
 
 
-def safe_now(now: Callable[[], int] | None, report: Callable[..., None]) -> Callable[[], int]:
+def safe_now(
+    now: Callable[[], int] | None,
+    report: Callable[[BaseException, ReportInfo], None],
+) -> Callable[[], int]:
     """The host clock, falling back to the wall clock when it throws.
 
-    A broken clock must not stop commits: the first throw is reported, with its ``host_error`` info
-    when the sink takes one, and later throws are not.
+    A broken clock must not stop commits: the first throw is reported as its ``host_error``, and
+    later throws are not, because the clock is read in every task change.
     """
 
     if now is None:
         return _now_ms
     reported = False
-    arity = _report_arity(report)
 
     def clock() -> int:
         nonlocal reported
@@ -121,10 +116,7 @@ def safe_now(now: Callable[[], int] | None, report: Callable[..., None]) -> Call
             # Set first: a report handler that reads the clock again must not report again.
             if not reported:
                 reported = True
-                if arity == 1:
-                    report(error)
-                else:
-                    report(error, host_error("now"))
+                report(error, host_error("now"))
             return _now_ms()
 
     return clock
@@ -143,18 +135,29 @@ class BoundConversation:
     def _bind(self, context: Context) -> Context:
         return _bind_context(self._binding, context)
 
-    async def submit(self, submission: Any, context: Context) -> Any:
+    @overload
+    async def submit(self, first: SubmissionDraft, second: Context) -> BoundSubmission: ...
+
+    @overload
+    async def submit(self, first: Transaction, second: SubmissionDraft) -> SubmissionId: ...
+
+    async def submit(self, first: Any, second: Any) -> Any:
         cast(Callable[[], None], self._binding["check"])()
-        # An invocation-bound handle accepts only input submissions; tools use ordinary transaction
-        # writes for passive entries (spec section 7.3).
-        if not isinstance(submission, Mapping):
+        # The overloads pair a draft with a context, and anything else (a transaction) with a draft.
+        if not _is_draft(first):
+            # The caller's commit carries its own context, so the invocation's abort is checked here.
+            signal = self._binding["signal"]
+            if signal is not None:
+                signal.raise_if_aborted()
+            return await self._harness.admit(first, self.id, second)
+        # An invocation-bound handle admits input and continue submissions; a passive write keeps
+        # its own refusal, because a tool writes entries through the transaction (spec section 7.3).
+        kind = first.get("type")
+        if kind is None and "content" not in first:
             raise TypeError("A conversation handle accepts only input submissions")
-        kind = submission.get("type")
-        if kind is not None and kind != "input":
+        if kind is not None and kind not in ("input", "continue"):
             raise TypeError("A conversation handle accepts only input submissions")
-        if kind is None and "content" not in submission:
-            raise TypeError("A conversation handle accepts only input submissions")
-        admitted = await self._harness.submit(self.id, submission, self._bind(context))
+        admitted = await self._harness.submit(self.id, first, self._bind(second))
         return BoundSubmission(admitted, self._binding)
 
     async def abort(self, context: Context, options: Mapping[str, Any] | None = None) -> None:
@@ -212,11 +215,24 @@ class ConversationHandleImpl:
 
         await self._harness.commit(apply, context)
 
-    async def submit(self, submission: Any, context: Context) -> Any:
-        return await self._harness.submit(self.id, submission, context)
+    @overload
+    async def submit(self, first: SubmissionDraft, second: Context) -> Submission: ...
 
-    async def commit(self, change: Callable[[Transaction], Any], context: Context) -> Any:
-        return await self._harness.commit_with(change, context, TransactionScope(conversation_id=self.id))
+    @overload
+    async def submit(self, first: Transaction, second: SubmissionDraft) -> SubmissionId: ...
+
+    async def submit(self, first: Any, second: Any) -> Any:
+        # The overloads pair a draft with a context, and anything else (a transaction) with a draft.
+        if _is_draft(first):
+            return await self._harness.submit(self.id, first, second)
+        return await self._harness.admit(first, self.id, second)
+
+    async def commit(
+        self, change: Callable[[Transaction], Any], context: Context, options: CommitOptions | None = None
+    ) -> Any:
+        return await self._harness.commit_with(
+            change, context, TransactionScope(conversation_id=self.id), options
+        )
 
     async def context(self, context: Context, options: Mapping[str, Any] | None = None) -> ContextView:
         return await self._harness.context(self.id, context, (options or {}).get("at"))
@@ -228,9 +244,9 @@ class ConversationHandleImpl:
         cursor: Any,
         context: Context,
     ) -> Page[EntryRecord, Any]:
-        bounded = {"conversationId": self.id, **dict(query)}
+        scan = conversation_entries(self.id, query)
         return await self._harness.read_on_line(
-            lambda: self._harness.storage.scan_entries(cast(Any, bounded), limit, cursor, context)
+            lambda line: line.scan_entries(scan, limit, cursor, context)
         )
 
     async def fork(self, at: EntryId, options: Mapping[str, Any], context: Context) -> ConversationHandleImpl:
@@ -260,14 +276,19 @@ class ConversationHandleImpl:
         entry: dict[str, Any] = {"kind": ResetEntry.kind, "head": "self"}
         if handoff is not None:
             entry["model"] = [{"role": "user", "content": handoff, "timestamp": self._harness.now}]
-        await self.submit({"type": "write", "entry": entry}, context)
+        draft: WriteSubmissionDraft = {"type": "write", "entry": cast(EntryDraft, entry)}
+        await self.submit(draft, context)
 
-    async def view_state(self, context: Context) -> Any:
-        return await self._harness._views.state(self.id, context)
+    async def watch(self, context: Context, window: ConversationWindow | None = None) -> Any:
+        return await self._harness._views.watch(self.id, context, window)
 
-    async def watch(self, context: Context) -> Any:
-        return await self._harness._views.watch(self.id, context)
-
+    async def observe(
+        self,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> Any:
+        return await self._harness._views.observe(self.id, observer, context, window)
 
 class Harness(SessionImpl):
     """Durable agent harness over one Session."""
@@ -277,11 +298,18 @@ class Harness(SessionImpl):
         now = safe_now(options.get("now"), report)
         settings_option = options.get("settings")
         host_settings = _current_settings(settings_option)
+        read_only = options.get("read_only", options.get("readOnly")) is True
         super().__init__(
             raw_storage,
             now,
             lambda: _settings_value(host_settings(), "document_retention_ms"),
             options.get("set_timer", options.get("setTimer")),
+            read_only,
+            # Read at each use, as all settings are, but only this field: it is read on every commit
+            # (`harness.ts:222-230`).
+            lambda: _settings_value(
+                _settings_value(host_settings(), "progress"), "persist_within_ms"
+            ),
         )
         self._options = dict(options)
         self._report_sink = report
@@ -303,12 +331,14 @@ class Harness(SessionImpl):
                 lambda error: report(error, host_error("setTimer")),
             ),
             write_at_close=self.write_at_close,
+            limits_restarts=lambda kind: kind in LIMITS_RESTARTS,
             settle_outcome=lambda tx, record, outcome: self._settle_outcome(tx, record, cast(Any, outcome)),
             withdraw_inputs=self._withdraw_inputs,
             conversation=lambda id, binding, call_context: self._bound_conversation(
                 id, binding, call_context
             ),
             context=without_abort_signal(context),
+            read_only=read_only,
         )
         self._graph = TaskGraphView(
             self,
@@ -341,15 +371,11 @@ class Harness(SessionImpl):
             signal.raise_if_aborted()
         snapshot = cast(RegistryReader, options["registry"]).snapshot()
         missing = [
-            task.definition.name
-            for task in BUILTIN_TASKS
-            if snapshot.task(task.definition.name) is None
+            task.definition.name for task in BUILTIN_TASKS if snapshot.task(task.definition.name) is None
         ]
         if missing:
             names = ", ".join(missing)
-            raise RuntimeError(
-                f"Registry lacks built-in tasks {names}; create it with create_registry()"
-            )
+            raise RuntimeError(f"Registry lacks built-in tasks {names}; create it with create_registry()")
         harness = cls(storage, options, context)
         try:
             await harness._tasks.open(context)
@@ -410,7 +436,7 @@ class Harness(SessionImpl):
         def report(error: BaseException, extension: str) -> None:
             self.report(
                 error,
-                {"type": "extension_error", "conversationId": id, "extension": extension},
+                {"kind": "extension_error", "conversationId": id, "extension": extension},
             )
 
         return resolve_agent(state, registry, settings, report)
@@ -438,14 +464,8 @@ class Harness(SessionImpl):
         self.assert_usable()
         return self._tasks.wake()
 
-    async def retry_task(self, id: TaskId, context: Context) -> None:
-        """Run a task parked by ``settings.restart_limit`` again."""
-
-        self.assert_usable()
-        await self._tasks.retry(id, context)
-
     async def get_task(self, id: TaskId, context: Context) -> TaskRecord | None:
-        return await self.read_on_line(lambda: self.storage.task(id, context))
+        return await self.read_on_line(lambda line: line.task(id, context))
 
     @property
     def scheduler_index_sizes(self) -> dict[str, int]:
@@ -453,8 +473,14 @@ class Harness(SessionImpl):
 
         return self._tasks.index_sizes
 
+    @property
+    def scheduler_idle_state(self) -> dict[str, int]:
+        """Internal, for tests: the kept contexts' idle state and its disagreements with a full recompute."""
+
+        return self._tasks.idle_state
+
     async def inspect(self, context: Context) -> HarnessInspection:
-        async def read() -> HarnessInspection:
+        async def read(_line: Storage) -> HarnessInspection:
             scheduling, tasks = await self._tasks.inspect(
                 cast(RegistryReader, self._options["registry"]).snapshot()
             )
@@ -500,7 +526,7 @@ class Harness(SessionImpl):
 
     async def conversation(self, id: ConversationId, context: Context) -> ConversationHandleImpl | None:
         self.assert_usable()
-        record = await self.read_on_line(lambda: self.storage.conversation(id, context))
+        record = await self.read_on_line(lambda line: line.conversation(id, context))
         return None if record is None else ConversationHandleImpl(record["id"], self)
 
     async def create_conversation(
@@ -558,10 +584,15 @@ class Harness(SessionImpl):
 
     # ── Submissions ────────────────────────────────────────────────────────
 
-    async def submit(
-        self, conversation_id: ConversationId, submission: Any, context: Context
-    ) -> Submission:
+    async def submit(self, conversation_id: ConversationId, submission: Any, context: Context) -> Submission:
         return await self._submissions.submit(conversation_id, submission, context)
+
+    async def admit(
+        self, tx: Transaction, conversation_id: ConversationId, draft: Any
+    ) -> SubmissionId:
+        """Admit a submission inside the caller's commit ``tx``, with the rules of ``submit()``."""
+
+        return await self._submissions.admit(tx, conversation_id, draft)
 
     async def submission(self, id: SubmissionId, context: Context) -> Submission | None:
         return await self._submissions.get(id, context)
@@ -572,12 +603,22 @@ class Harness(SessionImpl):
         return await self._submissions.abort(id, context, conversation_id)
 
     async def _start_run(
-        self, tx: Transaction, conversation_id: ConversationId, live: Any, inputs: list[Any]
+        self,
+        tx: Transaction,
+        conversation_id: ConversationId,
+        live: Any,
+        inputs: list[Any],
+        first: EntryId | None = None,
     ) -> None:
         registry = cast(RegistryReader, self._options["registry"]).snapshot()
-        await start_generation(tx, conversation_id, live, inputs, registry)
+        await start_generation(tx, conversation_id, live, inputs, registry, first)
 
     # ── Internal scheduler callbacks ───────────────────────────────────────
+
+    def membership_keys(self, tx: Transaction) -> Any:
+        """The ownership memberships a commit's task changes write, from the scheduler's index."""
+
+        return self._tasks.membership_keys(tx)
 
     async def _settle_outcome(self, tx: Transaction, record: TaskRecord, outcome: TaskOutcome) -> None:
         await settle_scheduler_outcome(tx, record, cast(Any, outcome))
@@ -593,7 +634,7 @@ class Harness(SessionImpl):
         binding: Mapping[str, Any],
         context: Context,
     ) -> ConversationHandle | None:
-        record = await self.read_on_line(lambda: self.storage.conversation(id, context))
+        record = await self.read_on_line(lambda line: line.conversation(id, context))
         return None if record is None else BoundConversation(id, self, binding)
 
     # ── Not yet ported ─────────────────────────────────────────────────────
@@ -602,8 +643,8 @@ class Harness(SessionImpl):
         """Sum every conversation's committed ``pi.usage`` into the Session total."""
 
         conversations = await self.read_on_line(
-            lambda: scan_all(
-                lambda cursor: self.storage.scan_conversations({}, _SCAN_PAGE_SIZE, cursor, context)
+            lambda line: scan_all(
+                lambda cursor: line.scan_conversations({}, _SCAN_PAGE_SIZE, cursor, context)
             )
         )
         total = cast(UsageState, UsageDoc.definition.initial())
@@ -613,18 +654,34 @@ class Harness(SessionImpl):
                 add_usage_state(total, state)
         return total
 
-    async def task_graph(self, context: Context) -> Any:
-        """Return the task-graph mount as a disposable read-only state."""
+    async def observe_conversation(
+        self,
+        id: ConversationId,
+        observer: Observer,
+        context: Context,
+        window: ConversationWindow | None = None,
+    ) -> Any:
+        """Attach a synchronous observer of one conversation's view, with a window of its own
+        (spec §9.3).
+
+        The attachment is atomic on the Session line: the observation's value is the current
+        revision and every later change reaches the observer in line order, unfolded.
+        """
 
         self.assert_usable()
-        return await self._graph.state(context)
+        return await self._views.observe(id, observer, context, window)
+
+    async def observe_task_graph(self, observer: Observer, context: Context) -> Any:
+        """Attach a synchronous observer of the Session-wide task-graph mount (spec §9.4)."""
+
+        self.assert_usable()
+        return await self._graph.observe(observer, context)
 
     async def watch_task_graph(self, context: Context) -> Any:
-        """Return the task-graph mount through its serialized exact-frame watch."""
+        """Return the task-graph mount through its serialized coalesced watch."""
 
         self.assert_usable()
         return await self._graph.watch(context)
-
 
 
 def _bind_context(binding: Mapping[str, Any], context: Context) -> Context:

@@ -27,6 +27,8 @@ from ..ids import (
 )
 from ..json import JsonObject, JsonValue, copy_json, freeze_json
 from ..types import (
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
@@ -234,14 +236,47 @@ class PreparedMemoryCommit:
 class MemoryStorage:
     """Detached in-memory reference implementation of :class:`~pi_durable.types.Storage`."""
 
+    # No ``publishing`` member at all (see ``PublishingStorage``): memory is durable the moment a
+    # batch applies, so nothing owns a scope to take a publication inside and the Session publishes
+    # directly (ADR 0003).
+
     def __init__(self) -> None:
         self._state = _State()
         self._next_id = 2
         self._next_seq = 1
         self._closed = False
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
-        return self.prepare_commit(writes).apply()
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        """Apply ``batches`` one by one, each checked against the state the earlier ones left.
+
+        ``prepare_commit`` only checks and detaches, so a batch it refuses changed nothing and the
+        batches before it stand. Memory is durable at once, so the receipts follow the last batch;
+        they are delivered even when a later batch's application throws, because what was applied
+        before it is stored.
+        """
+
+        self._assert_open()
+        seqs: list[Seq] = []
+        refused: list[BaseException] = []
+        try:
+            for writes in batches:
+                try:
+                    prepared = self.prepare_commit(writes)
+                except Exception as error:
+                    refused.append(error)
+                    break
+                seqs.append(prepared.apply())
+        finally:
+            for index, seq in enumerate(seqs):
+                receive(index, seq)
+        if refused:
+            return {"stored": len(seqs), "refused": refused[0]}
+        return {"stored": len(seqs)}
 
     def prepare_commit(
         self,

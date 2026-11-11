@@ -195,7 +195,11 @@ def test_holds_installed_task_definitions_and_removes_them_on_uninstall() -> Non
 
 def test_keeps_the_default_of_a_progress_interval_given_as_undefined() -> None:
     settings = resolve_settings({"progress": {"partial_interval_ms": None, "output_interval_ms": 250}})
-    assert settings.progress == {"partial_interval_ms": 100, "output_interval_ms": 250}
+    assert settings.progress == {
+        "partial_interval_ms": 100,
+        "output_interval_ms": 250,
+        "persist_within_ms": 1000,
+    }
 
 
 def test_resolves_settings_defaults_and_merges_object_fields() -> None:

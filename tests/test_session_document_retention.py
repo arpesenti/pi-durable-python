@@ -9,22 +9,23 @@ event streams with documents kept and evicted right after use.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any, cast
 
 import pytest
 from chat_support import assistant_message, chat_setup, faux_tool_call, open_chat
+from live_support import view_history
 from session_support import (
     ControlledStorage,
     Deferred,
+    Mirror,
     context,
     create_conversation,
     eventually,
 )
 from tool_support import add_tool, tool
 
-from pi_durable import MemoryStorage, define_doc, define_doc_family, watch_events
+from pi_durable import MemoryStorage, define_doc, define_doc_family
 from pi_durable.ids import ConversationId
 from pi_durable.session import session as session_module
 from pi_durable.session.session import SessionImpl, set_default_document_retention
@@ -121,7 +122,7 @@ def open_session(
 async def settle_line(session: SessionImpl) -> None:
     """Let the line run what is queued on it: an eviction job, then return."""
 
-    await session.read_on_line(_noop)
+    await session.read_on_line(lambda _line: _noop())
 
 
 async def bump(session: SessionImpl, conversation_id: ConversationId, by: int = 1) -> None:
@@ -182,17 +183,21 @@ async def test_never_evicts_an_observed_document_and_evicts_it_once_the_last_det
     conversation_id = await create_conversation(session)
     await bump(session, conversation_id)
     watch = await session.watch_doc(CounterDoc, conversation_id, context)
-    state = await session.document_state(CounterDoc, conversation_id, context)
-    assert watch is not None and state is not None
+    mirror = Mirror()
+    observation = await session.observe_doc(CounterDoc, conversation_id, mirror, context)
+    assert watch is not None and observation is not None
+    mirror.value = observation.value
     seen: list[int] = []
-    watch.start(
-        lambda value, _ops, _context: seen.append(cast(int, value["count"]) if value else -1)
-    )
+    def counted(call: Any, _context: Any) -> None:
+        value = call["value"]
+        seen.append(cast(int, value["count"]) if value else -1)
+
+    watch.start(counted)
     clock.now += 1_000_000
     await bump(session, conversation_id)
     await settle_line(session)
     # Still cached: a read long after its retention passed loads nothing from Storage.
-    assert state.value is not None and state.value["count"] == 2
+    assert mirror.value is not None and mirror.value["count"] == 2
     await eventually(lambda: contains(seen, 2))
     reads = storage.document_read_count
     clock.now += 1_000_000
@@ -204,8 +209,8 @@ async def test_never_evicts_an_observed_document_and_evicts_it_once_the_last_det
     clock.now += 1_000_000
     await bump(session, conversation_id)
     await settle_line(session)
-    assert state.value is not None and state.value["count"] == 3
-    state.dispose()
+    assert mirror.value is not None and mirror.value["count"] == 3
+    observation.detach()
     clock.now += 1_000_000
     await session.commit(noop_commit, context)
     await session.commit(lambda tx: tx.doc(SessionCounterDoc), context)
@@ -244,13 +249,14 @@ async def test_writes_after_a_reload_continue_the_stored_deltas_and_bases() -> N
     storage, session, _clock = open_session(0)
     conversation_id = await create_conversation(session)
     writes: list[list[Any]] = []
-    original = storage.commit
+    original = storage.commit_batches
 
-    async def record(batch: Any, commit_context: Any) -> Any:
-        writes.append(list(batch))
-        return await original(batch, commit_context)
+    async def record(batches: Any, receive: Any, commit_context: Any) -> Any:
+        for batch in batches:
+            writes.append(list(batch))
+        return await original(batches, receive, commit_context)
 
-    storage.commit = record  # type: ignore[assignment]
+    storage.commit_batches = record  # type: ignore[method-assign]
     for _ in range(5):
         await bump(session, conversation_id)
         await settle_line(session)
@@ -382,22 +388,27 @@ async def test_evicts_promptly_once_the_retention_is_shortened() -> None:
     await session.close(context)
 
 
-async def test_does_not_keep_a_replacement_cached_for_an_observer_of_the_retired_incarnation() -> None:
+async def test_keeps_no_value_of_a_document_retired_for_good_while_an_observer_is_attached() -> None:
     _storage, session, _clock = open_session(0)
     conversation_id = await create_conversation(session)
     await bump(session, conversation_id)
-    state = await session.document_state(CounterDoc, conversation_id, context)
-    assert state is not None
+    mirror = Mirror()
+    observation = await session.observe_doc(CounterDoc, conversation_id, mirror, context)
+    assert observation is not None
+    mirror.value = observation.value
 
     async def retire(tx: Any) -> None:
         await tx.retire_doc(CounterDoc, conversation_id)
 
     await session.commit(retire, context)
-    assert state.value is None
-    await bump(session, conversation_id, 5)
+    # A retirement is a change with the last value and no operations, not an end (spec §9.1).
+    assert mirror.calls == [
+        {"kind": "value", "value": {"count": 1}, "ops": [], "retired": True}
+    ]
+    assert mirror.value == {"count": 1}
+    # The retired incarnation pins nothing, so the observer attached to it keeps no value cached.
     await eventually(lambda: settled_empty(session))
-    assert await session.snapshot(CounterDoc, conversation_id, context) == {"count": 5}
-    state.dispose()
+    observation.detach()
     await session.close(context)
 
 
@@ -408,7 +419,7 @@ async def test_leaves_no_pin_behind_when_an_observers_load_loses_a_race_with_clo
     await eventually(lambda: settled_empty(session))
     gate = storage.hold_find_document()
     attaching = asyncio.ensure_future(
-        session.document_state(CounterDoc, conversation_id, context)
+        session.observe_doc(CounterDoc, conversation_id, Mirror(), context)
     )
     await gate.entered.wait()
     closing = asyncio.ensure_future(session.close(context))
@@ -427,10 +438,11 @@ async def test_evicts_on_its_timer_without_a_commit_and_tolerates_a_detach_calle
     session = SessionImpl(cast(Storage, storage), None, lambda: 20)
     conversation_id = await create_conversation(session)
     await bump(session, conversation_id)
-    state = await session.document_state(CounterDoc, conversation_id, context)
-    assert state is not None
-    state.dispose()
-    state.dispose()
+    mirror = Mirror()
+    observation = await session.observe_doc(CounterDoc, conversation_id, mirror, context)
+    assert observation is not None
+    observation.detach()
+    observation.detach()
     async def cache_empty() -> bool:
         return session.document_cache_sizes["cached"] == 0
 
@@ -546,12 +558,13 @@ async def test_keeps_a_reloaded_newer_version_cached_while_an_older_observer_is_
     )
     _storage, session, _clock = open_session(0)
     await session.commit(lambda tx: tx.doc(V1), context)
-    state = await session.document_state(V1, context)
-    assert state is not None
+    mirror = Mirror()
+    observation = await session.observe_doc(V1, mirror, context)
+    assert observation is not None
     assert await session.snapshot(V2, context) == {"count": 3, "v2": True}
     await settle_line(session)
     assert session.document_cache_sizes["cached"] == 1
-    state.dispose()
+    observation.detach()
     await eventually(lambda: settled_empty(session))
     await session.close(context)
 
@@ -597,7 +610,7 @@ async def test_follows_a_harness_settings_change_at_the_next_use() -> None:
         await harness.snapshot(CounterDoc, root.id, context)
 
         async def settled() -> bool:
-            await harness.read_on_line(lambda: asyncio.sleep(0))
+            await harness.read_on_line(lambda _line: asyncio.sleep(0))
             return harness.document_cache_sizes["cached"] == 0
 
         await eventually(settled)
@@ -606,7 +619,7 @@ async def test_follows_a_harness_settings_change_at_the_next_use() -> None:
         set_default_document_retention(previous)
 
 
-async def test_gives_the_same_events_with_documents_evicted_right_after_use_as_with_documents_kept() -> (
+async def test_gives_the_same_views_with_documents_evicted_right_after_use_as_with_documents_kept() -> (
     None
 ):
     async def run(document_retention_ms: int) -> list[str]:
@@ -634,19 +647,28 @@ async def test_gives_the_same_events_with_documents_evicted_right_after_use_as_w
         )
         opened = await open_chat(MemoryStorage(), setup)
         harness, root = opened["harness"], opened["root"]
-        events: list[Any] = []
-        stream = await watch_events(harness, root.id, context)
-        stream.start(lambda batch, _context: events.extend(batch))
+        history = await view_history(harness, root.id)
         await (await root.submit({"type": "input", "content": "go"}, context)).wait(context)
         await harness.wait_for_idle(context)
-        await stream.stop()
+        history["detach"]()
         await harness.close(context)
-        # Ids and times differ between runs; the sequence of event types and tool outputs must not.
+        # Ids and times differ between runs; the sequence of entries, run states, and tool outputs must not.
         return [
-            f"update:{json.dumps(event['output'], sort_keys=True)}"
-            if event["type"] == "tool_execution_update"
-            else event["type"]
-            for event in events
+            " ".join(
+                [
+                    ",".join(entry["kind"] for entry in view["entries"]),
+                    f"run:{bool(state.get('run'))}",
+                    f"generation:{bool(state.get('generation'))}",
+                    *(
+                        f"{slot['callId']}:{slot['status']}:{slot.get('output', '')}"
+                        for slot in state.get("tools") or ()
+                    ),
+                ]
+            )
+            for view, state in zip(history["views"], history["live"](), strict=True)
         ]
 
-    assert await run(0) == await run(600_000)
+    kept = await run(600_000)
+    # The comparison only means something when the run actually showed work to a consumer.
+    assert len(kept) > 1
+    assert await run(0) == kept

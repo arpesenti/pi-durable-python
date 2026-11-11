@@ -22,8 +22,10 @@ from pi_durable.context import AbortController
 from pi_durable.harness.define import define_extension
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
+from pi_durable.harness.types import Report
 from pi_durable.ids import ConversationId, TaskId
 from pi_durable.tasks import define_task
+from pi_durable.testing import commit_writes
 
 
 def one_step(name: str, run: Any = None) -> Any:
@@ -63,7 +65,8 @@ async def storage_open(storage: Any) -> bool:
 async def seed_running_task(storage: Any) -> None:
     conversation_id = ConversationId(await storage.mint_id())
     id = TaskId(await storage.mint_id())
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {"type": "conversation", "value": {"id": conversation_id}},
             {
@@ -109,7 +112,7 @@ async def test_open_closes_without_a_cancelled_caller_context_and_rethrows() -> 
 
 async def test_rethrows_the_open_error_and_reports_it_once_though_close_fails() -> None:
     failure = RuntimeError("disk full")
-    reports: list[BaseException] = []
+    reports: list[Report] = []
 
     class FailingClose(ControlledStorage):
         async def close(self, close_context: Any) -> None:
@@ -128,7 +131,7 @@ async def test_rethrows_the_open_error_and_reports_it_once_though_close_fails() 
     )
     with pytest.raises(Exception, match="disk full"):
         await opening
-    assert reports == [failure]
+    assert reports == [{"kind": "storage_failed", "error": failure}]
 
 
 async def test_joins_a_task_handler_that_ignores_its_signal_before_closing_storage() -> None:
@@ -256,7 +259,7 @@ async def test_runs_what_the_registry_holds_at_resume() -> None:
     installed = define("v1")
     first["registry"].install(define_extension({"name": "late", "tasks": [installed]}))
     inspection = await first["harness"].inspect(context)
-    assert inspection["tasks"][0]["state"] == {"kind": "ready", "migrates": False}
+    assert inspection["tasks"][0]["state"] == {"kind": "pending", "migrates": False}
     first["registry"].uninstall(define_extension({"name": "late"}))
     replacement = define("v2")
     first["registry"].install(define_extension({"name": "late", "tasks": [replacement]}))

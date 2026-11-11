@@ -6,6 +6,7 @@ Benchmark helpers are deliberately excluded (see ``PARITY.md``).
 """
 
 from .assertions import create_expect_assertions
+from .commit_writes import commit_writes
 from .env_conformance import create_env_conformance
 from .runner import register_env_conformance, register_storage_conformance
 from .storage_conformance import create_storage_conformance
@@ -33,6 +34,7 @@ __all__ = [
     "StorageConformanceOptions",
     "StorageConformanceProvider",
     "StorageConformanceRunner",
+    "commit_writes",
     "create_env_conformance",
     "create_expect_assertions",
     "create_storage_conformance",

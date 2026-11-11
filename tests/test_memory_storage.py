@@ -1,26 +1,30 @@
-"""Translated v1.3.0 ``memory-storage`` suite.
+"""Translated v1.5.0 ``memory-storage`` suite.
 
 Every storage conformance case runs against a fresh ``MemoryStorage`` through the public
-``create_storage_conformance`` seam; the prepared-commit case is the suite's own local case.
+``create_storage_conformance`` seam; the prepared-commit case, the aliasing case, and the case
+that delivers the receipts of the batches applied before one whose application throws are the
+suite's own local cases.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 import pytest
 from storage_support import expect
 
-from pi_durable import MemoryStorage
+from pi_durable import MemoryStorage, PreparedMemoryCommit
 from pi_durable.context import BACKGROUND_CONTEXT as context
-from pi_durable.ids import ROOT_CONVERSATION_ID, EntryId
+from pi_durable.ids import ROOT_CONVERSATION_ID, ConversationId, EntryId, Seq
 from pi_durable.testing import (
     StorageConformanceCase,
     StorageConformanceOptions,
+    commit_writes,
     create_expect_assertions,
     create_storage_conformance,
 )
+from pi_durable.types import StorageWrite
 
 
 async def _with_memory_storage(use: Callable[[Any], Awaitable[None]]) -> None:
@@ -41,7 +45,8 @@ async def test_storage_conformance(case: StorageConformanceCase) -> None:
 
 async def test_does_not_expose_retained_state_through_a_prepared_commit() -> None:
     storage = MemoryStorage()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
     )
     entry_id = EntryId(2)
@@ -74,13 +79,15 @@ async def test_applies_operation_payloads_without_aliasing_them_into_the_documen
     """A payload set or spliced by one operation is addressable by later operations."""
 
     storage = MemoryStorage()
-    await storage.commit(
+    await commit_writes(
+        storage,
         [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
     )
     document_id = await storage.mint_id()
     payload = {"nested": {"count": 1}}
     appended = [{"value": 1}]
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.create",
@@ -94,7 +101,8 @@ async def test_applies_operation_payloads_without_aliasing_them_into_the_documen
         ],
         context,
     )
-    await storage.commit(
+    await commit_writes(
+        storage,
         [
             {
                 "type": "document.change",
@@ -122,3 +130,60 @@ async def test_applies_operation_payloads_without_aliasing_them_into_the_documen
         "payload": {"nested": {"count": 2}},
         "items": [{"value": 3}],
     }
+
+
+def _entry(id: int, conversation_id: ConversationId, kind: str = "message") -> Any:
+    return {"id": id, "conversationId": conversation_id, "kind": kind}
+
+
+class _FailingApply(MemoryStorage):
+    """A memory storage whose prepared commit for one sequence throws when it is applied."""
+
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__()
+        self.fail_at: Seq | None = None
+        self._failure = failure
+
+    def prepare_commit(
+        self, writes: Sequence[StorageWrite], seq: Seq | None = None
+    ) -> PreparedMemoryCommit:
+        prepared = super().prepare_commit(writes, seq)
+        if prepared.seq != self.fail_at:
+            return prepared
+
+        def apply() -> Seq:
+            raise self._failure
+
+        return PreparedMemoryCommit(prepared.seq, prepared.writes, apply)
+
+
+async def test_delivers_the_receipts_of_the_batches_applied_before_one_whose_apply_throws() -> None:
+    """What was applied before the failure is stored, so its receipts stand and the call rejects."""
+
+    failure = RuntimeError("apply failed")
+    storage = _FailingApply(failure)
+    root_seq = await commit_writes(
+        storage, [{"type": "conversation", "value": {"id": ROOT_CONVERSATION_ID}}], context
+    )
+    first_id = EntryId(await storage.mint_id())
+    second_id = EntryId(await storage.mint_id())
+    storage.fail_at = Seq(root_seq + 2)
+    receipts: list[tuple[int, Seq]] = []
+
+    def receive(index: int, seq: Seq) -> None:
+        receipts.append((index, seq))
+
+    batches: list[list[StorageWrite]] = [
+        [{"type": "entry", "value": _entry(first_id, ROOT_CONVERSATION_ID)}],
+        [{"type": "entry", "value": _entry(second_id, ROOT_CONVERSATION_ID)}],
+    ]
+
+    with pytest.raises(RuntimeError) as raised:
+        await storage.commit_batches(batches, receive, context)
+
+    assert raised.value is failure
+    assert receipts == [(0, root_seq + 1)]
+    first = await storage.entry(first_id, context)
+    assert first is not None
+    assert first["commitSeq"] == root_seq + 1
+    assert await storage.entry(second_id, context) is None

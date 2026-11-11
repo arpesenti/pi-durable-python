@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
 from ..context import (
     AbortController,
@@ -19,15 +19,18 @@ from ..context import (
     with_abort_signal,
     without_abort_signal,
 )
-from ..errors import error_message, is_failure
+from ..errors import ReadOnlySession, error_message, is_failure
 from ..ids import ConversationId, TaskId
 from ..json import JsonValue, copy_json
+from ..session.keys import INTENT_KEY, ROOTS_KEY, owned_key, task_key
 from ..session.session import SessionImpl
 from ..session.transaction import Transaction
 from ..timers import Timers
 from ..types import (
-    CommitPublication,
+    CommitOptions,
+    EntryRecord,
     NextTaskState,
+    ObservedCommit,
     RunningTask,
     Storage,
     StorageWrite,
@@ -35,7 +38,13 @@ from ..types import (
     TaskRecord,
 )
 from .agent import DEFAULT_RESTART_LIMIT, agent_hooks, last_extension
-from .context import read_context_from
+from .context import (
+    ContextRange,
+    advance_range,
+    demote_missed,
+    range_entry,
+    read_context_from,
+)
 from .types import (
     LISTENER,
     Agent,
@@ -43,7 +52,9 @@ from .types import (
     ConversationHandle,
     RegistryReader,
     RegistrySnapshot,
+    ReportFrom,
     ReportInfo,
+    ReportReason,
     ReportTask,
     Settings,
     SettledTask,
@@ -51,13 +62,31 @@ from .types import (
     Wake,
     host_error,
 )
-from .util import Waiters, closed_error, optional_extension, rejected, resolved, scan_all
+from .util import (
+    Waiters,
+    closed_error,
+    conversation_entries,
+    optional_extension,
+    rejected,
+    resolved,
+    scan_all,
+)
 
 _SCAN_PAGE_SIZE = 256
 LIVE_STATUSES = ("pending", "running", "waiting", "sleeping", "completing")
 
-BlockedReason = Literal["missing_task", "task_too_old", "migration_failed", "restart_limit"]
-"""Why a task cannot be reserved: no definition can take it, or it is parked by the restart limit."""
+BlockedReason = Literal["missing_task", "task_too_old", "migration_failed"]
+"""Why a task cannot be reserved: no registered definition can take it."""
+
+
+class _KeptContext(TypedDict):
+    """One conversation's kept context range and the idle period that will drop it."""
+
+    range: ContextRange
+    #: The Harness time it was first seen idle, ``None`` while the conversation is busy.
+    idle_since: int | None
+    #: When that idle period ends: fixed when it started, so reading settings again cannot move it.
+    expires_at: int | None
 
 AnyTaskRecord = TaskRecord
 RunnableTaskRecord = TaskRecord
@@ -147,9 +176,7 @@ def report_task(task: Any) -> ReportTask:
         return {
             "id": cast(TaskId, task.get("id", task.get("taskId"))),
             "kind": cast(str, task["kind"]),
-            "conversationId": cast(
-                ConversationId, task.get("conversationId", task.get("conversation_id"))
-            ),
+            "conversationId": cast(ConversationId, task.get("conversationId", task.get("conversation_id"))),
         }
     return {
         "id": cast(TaskId, task.task_id),
@@ -176,6 +203,18 @@ def failed_outcome(record: Mapping[str, Any]) -> bool:
 def cancellation_intent(record: Mapping[str, Any]) -> bool:
     return record["state"]["status"] != "terminal" and (
         record.get("abortRequested") is True or failed_outcome(record)
+    )
+
+
+def intent_changes(previous: Mapping[str, Any] | None, next: Mapping[str, Any]) -> bool:
+    """Whether a staged record starts, changes, or clears cancellation intent, so a commit that writes
+    one also writes the intent set a decision region reads."""
+
+    return (
+        bool((previous or {}).get("abortRequested")) is not bool(next.get("abortRequested"))
+        or (previous or {}).get("abortReason") != next.get("abortReason")
+        or (previous is not None and failed_outcome(previous)) != failed_outcome(next)
+        or (previous is not None and cancellation_intent(previous)) != cancellation_intent(next)
     )
 
 
@@ -293,10 +332,79 @@ def _missing_migration(record: Mapping[str, Any], definition: Any) -> Exception:
     )
 
 
+#: Terminal states a built-in task commits because it was cut off ``settings.restart_limit`` times, when
+#: their outcome does not say so (a failure with ``detail`` ``{reason: restart_limit}`` does), with the
+#: message the scheduler reports them ``task_interrupted`` with. Keyed by the identity of the state the
+#: phase returns, which is held so no later state can answer to the key: nothing is added to what is
+#: stored (``scheduler.ts:3008`` keeps this in a ``WeakMap``, which a dict cannot key).
+_ended_by_crashes: dict[int, tuple[str, dict[str, Any]]] = {}
+
+
+def ended_by_crashes(state: dict[str, Any], message: str) -> dict[str, Any]:
+    """``state``, marked as ending its task for crashes (spec §5.4).
+
+    The scheduler reports such a terminal state ``task_interrupted`` with ``message`` whatever its
+    outcome: a run that already answered ends ``completed``, without a failure, and still says crashes
+    ended it. The mark rides the object the phase returns, never what it stores.
+    """
+
+    _ended_by_crashes[id(state)] = (message, state)
+    return state
+
+
+def ended_by_crashes_message(state: Mapping[str, Any]) -> str | None:
+    """The message ``state`` was marked with, if it was: a state is read once, so the mark goes with it."""
+
+    marked = _ended_by_crashes.pop(id(state), None)
+    if marked is None or marked[1] is not state:
+        return None
+    return marked[0]
+
+
+def interruption_of(error: Mapping[str, Any]) -> Literal["restart_limit", "interrupted"] | None:
+    """Why a failed outcome's error says crashes ended the task (``detail.reason``), if it does."""
+
+    detail = error.get("detail")
+    if not isinstance(detail, Mapping):
+        return None
+    reason = detail.get("reason")
+    return reason if reason in ("restart_limit", "interrupted") else None
+
+
+def interrupted_report(state: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What a terminal state says crashes ended the task for, if anything: its message, reason, and
+    the task's restart count; ``None`` when the state says nothing of crashes.
+    """
+
+    if state["status"] != "terminal":
+        return None
+    restarts = int(record.get("restarts") or 0)
+    outcome = cast(Mapping[str, Any], state["outcome"])
+    if outcome["status"] == "failed":
+        error = cast(Mapping[str, Any], outcome["error"])
+        reason = interruption_of(error)
+        if reason is not None:
+            return {"message": str(error["message"]), "reason": reason, "restarts": restarts}
+    marked = ended_by_crashes_message(state)
+    if marked is not None:
+        return {"message": marked, "reason": "restart_limit", "restarts": restarts}
+    return None
+
+
+def _outdated_reason(task: AnyTask | None, record: Mapping[str, Any]) -> ReportReason:
+    """Why the replacement definition cannot take a running task: it is gone, older than the task,
+    or newer without a migration (spec §10.1, the reason of a ``task_outdated`` report).
+    """
+
+    if task is None:
+        return "missing_task"
+    return "task_too_old" if task.definition.version < record["version"] else "migration_failed"
+
+
 class _OldDefinitionError(RuntimeError):
     """A task that keeps running under its old definition; ``cause`` names why it could not hand over."""
 
-    def __init__(self, task_id: TaskId, kind: str, cause: str) -> None:
+    def __init__(self, task_id: TaskId, kind: str, cause: ReportReason) -> None:
         super().__init__(f"Task {task_id} keeps running under its old {kind} definition")
         self.cause = cause
 
@@ -343,11 +451,14 @@ class TaskScheduler:
         on_wake: Callable[[Wake], Any] | None,
         timers: Timers,
         write_at_close: Callable[[Callable[[], Sequence[StorageWrite]]], Awaitable[None]],
+        limits_restarts: Callable[[str], bool],
         settle_outcome: Callable[[Transaction, AnyTaskRecord, Mapping[str, Any]], Awaitable[None]],
         withdraw_inputs: Callable[[Transaction, ConversationId, str], Awaitable[None]],
         conversation: Callable[[ConversationId, Any, Context], Awaitable[ConversationHandle | None]],
         context: Context,
+        read_only: bool = False,
     ) -> None:
+        self._read_only = read_only
         self._session = session
         self._storage = storage
         self._registry = registry
@@ -359,13 +470,31 @@ class TaskScheduler:
         self._on_wake = on_wake
         self._timers = timers
         self._write_at_close = write_at_close
+        self._limits_restarts = limits_restarts
         self._report = report
         self._settle_outcome = settle_outcome
         self._withdraw_inputs = withdraw_inputs
         self._conversation = conversation
         self._context = context
         self._live: dict[TaskId, AnyTaskRecord] = {}
-        self._contexts: dict[ConversationId, dict[str, Any]] = {}
+        # Context range last read through a task runtime, per conversation: a later read, by any of
+        # its tasks, scans only newer entries. ``idle_since`` is the Harness time it was first seen
+        # idle and ``expires_at`` when that idleness ends. Derived and never persisted; dropped at
+        # the first idle check after ``settings.context_retention_ms`` of idleness, and at close.
+        self._contexts: dict[ConversationId, _KeptContext] = {}
+        # The idle kept contexts by ``idle_since``, oldest first: the expiry order, so neither an
+        # expiry nor finding the next one scans ``_contexts``. Kept sorted also when the Harness
+        # clock goes back (see :meth:`_mark_idle`).
+        self._idle_order: dict[ConversationId, int] = {}
+        # At least the newest ``idle_since`` in ``_idle_order`` (drops do not lower it): an older one
+        # added means the clock went back.
+        self._idle_newest: float = float("-inf")
+        #: A chain load resolved what :meth:`_idle` treats as unknown for a live task whose chain is
+        #: not loaded, which can make a scope idle without a task change below it; the next idle
+        #: check then covers every scope.
+        self._unknowns_changed = False
+        #: Idle checks that covered every scope (``idle_state``, a test diagnostic).
+        self._full_idle_checks = 0
         self._expiry: dict[str, Any] | None = None
         self._invocations: dict[TaskId, _Invocation] = {}
         self._task_waiters: Waiters[TaskId, SettledTask] = Waiters()
@@ -374,6 +503,9 @@ class TaskScheduler:
         self._edges: dict[ConversationId, TaskId | None] = {}
         self._settled: dict[TaskId, dict[str, Any]] = {}
         self._drop_queue: set[Node] = set()
+        # Nodes chain loads installed for jobs whose commits are not published yet, with how many such
+        # jobs: the sweep keeps them, as work a pending commit creates below them needs them.
+        self._pins: dict[Node, int] = {}
         self._below: dict[Node, set[Node]] = {}
         self._roots: set[ConversationId] = set()
         self._unloaded: set[TaskId] = set()
@@ -393,8 +525,6 @@ class TaskScheduler:
         self._blocked_listeners: set[Callable[[], None]] = set()
         # A registry snapshot that threw for the task graph was reported; it is read per record.
         self._snapshot_reported = False
-        # Tasks a pass left out as parked; each pass checks them again, as restart_limit may have risen.
-        self._parked_tasks: set[TaskId] = set()
         self._reconcile_scheduled = False
         # Reconcile passes underway with work; their commits finalize held outcomes and mark cascades.
         self._reconciling_work = 0
@@ -405,18 +535,77 @@ class TaskScheduler:
         self._closing = False
         self._dirty = False
         self._draining = False
+        # The keys the decision region underway reads (``_region``); set only while one runs.
+        self._reading: set[str] | None = None
         self._expiry_handle: asyncio.TimerHandle | None = None
         self._detached: set[asyncio.Task[Any]] = set()
+
+    # ── Decision regions ───────────────────────────────────────────────────
+
+    async def _region(
+        self,
+        decide: Callable[[], Any],
+        refresh: Callable[[], Awaitable[Any]] | None = None,
+    ) -> Any:
+        """Run ``decide``, a decision region (group-commit document §6).
+
+        ``decide`` is synchronous: it reads scheduler memory, records the keys it reads through
+        :meth:`_record`, and stages nothing. When one of them has an unpublished writer its result,
+        or its error, is dropped: once that writer publishes, ``refresh`` reloads the chains the
+        region walks and it runs again. Only a region that read nothing unpublished is applied. A
+        job that waits holds the line, so the unpublished writes only shrink and the runs converge.
+        """
+
+        while True:
+            keys: set[str] = set()
+            self._reading = keys
+            value: Any = None
+            failure: BaseException | None = None
+            try:
+                value = decide()
+            except BaseException as error:
+                if not is_failure(error):
+                    raise
+                failure = error
+            finally:
+                self._reading = None
+            gates = [gate for gate in (self._session.touch(key) for key in keys) if gate is not None]
+            if not gates:
+                if failure is not None:
+                    raise failure
+                return value
+            await asyncio.gather(*gates)
+            if refresh is not None:
+                await refresh()
+
+    def _record(self, key: str) -> None:
+        """In a decision region, note that it reads ``key``; anywhere else, nothing."""
+
+        if self._reading is not None:
+            self._reading.add(key)
+
+    def _live_record(self, id: TaskId) -> AnyTaskRecord | None:
+        """A live task's committed record, read by a decision region."""
+
+        self._record(task_key(id))
+        return self._live.get(id)
+
+    async def _reload_scopes(self) -> None:
+        """Load the chains a region walks, again after it waited: what was published may list new work."""
+
+        await self._load_scopes(False)
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     async def open(self, context: Context) -> None:
         """Load live tasks and change surviving ``running`` tasks back to ``pending``, counting the restart.
 
-        A task that reaches the restart limit this way is parked and reported.
+        Dispatches nothing: a task cut off ``settings.restart_limit`` times ends when it is next
+        reserved, by its own kind or by the scheduler. Read-only, it only loads them: a ``running``
+        task stays as committed, running in another process.
         """
 
-        self._session.observe_commits(self._observe)
+        self._session.observe_stored_commits(self._observe)
         self._session.subscribe_close(self._seal)
 
         def registry_changed() -> None:
@@ -424,8 +613,6 @@ class TaskScheduler:
             self._kick()
 
         self._unsubscribe_registry = self._registry.subscribe(registry_changed)
-        limit = self._restart_limit()
-        parked: list[AnyTaskRecord] = []
 
         async def load(tx: Transaction) -> None:
             scans: list[list[AnyTaskRecord]] = []
@@ -440,6 +627,8 @@ class TaskScheduler:
             for records in scans:
                 for record in records:
                     self._track(None, record)
+                    if self._read_only:
+                        continue
                     if record.get("abandonOnRestart") is True:
                         self._abandoned.add(record["id"])
                     if record["state"]["status"] == "running":
@@ -450,22 +639,12 @@ class TaskScheduler:
                         )
                         # The count survives the write: with_state drops it only for an outcome.
                         tx.set_task(cast(AnyTaskRecord, {**pending, "restarts": restarts}))
-                        if restarts >= limit and not record.get("abortRequested"):
-                            parked.append(record)
                     if record["state"]["status"] == "waiting" and record["state"]["policy"] == "failFast":
                         self._fail_fast_checks.add(record["id"])
 
         await self._session.commit_with(load, context)
-        for record in parked:
-            restarts = int(record.get("restarts") or 0) + 1
-            error = RuntimeError(
-                f"Task {record['id']} ({record['kind']}) was cut off {restarts} times without "
-                "progress; it is parked until retry_task()"
-            )
-            self._report(
-                error,
-                {"type": "task_parked", **self._about_task(record)},
-            )
+        if self._read_only:
+            return
         # Derive abort marks a crash left unapplied below cancelled owners, and finalize held outcomes.
         self._cascade_pending = True
         self._schedule_reconcile()
@@ -477,30 +656,15 @@ class TaskScheduler:
         A host wakeup, such as an alarm, calls this. Idempotent; the kick does nothing once closing.
         """
 
+        if self._read_only:
+            raise ReadOnlySession("running tasks")
         self._enabled = True
         self._wake_due()
         self._kick()
 
-    async def retry(self, id: TaskId, context: Context) -> None:
-        """Run a task parked by the restart limit again: clear its count and enable scheduling.
-
-        Does nothing for a task that is not parked; rejects for an unknown one.
-        """
-
-        async def clear(tx: Transaction) -> None:
-            current = await tx.task(id)
-            if current is None:
-                raise ValueError(f"Task {id} does not exist")
-            status = current["state"]["status"]
-            if status in ("terminal", "completing") or not self._parked(current):
-                return
-            tx.set_task(progressed(current))
-
-        await self._session.commit_with(clear, context)
-        self.resume()
-
     def blocked_reason(self, record: Mapping[str, Any]) -> BlockedReason | None:
-        """Why a live task cannot run here, if it cannot: its definition, or the restart limit.
+        """Why a live task cannot run here, if it cannot: its definition is missing, too old, or failed
+        to migrate.
 
         A running task, an abort-marked one, and one holding its outcome are never blocked.
         """
@@ -511,8 +675,6 @@ class TaskScheduler:
         # An abort request runs its handler or orphans the task; a `restart` mark waits for the definition.
         if record.get("abortRequested") and record.get("abortReason") is None:
             return None
-        if self._parked(record):
-            return "restart_limit"
         try:
             snapshot = self._registry.snapshot()
         except Exception as error:
@@ -536,6 +698,9 @@ class TaskScheduler:
     def wake(self) -> Wake:
         """When the Session next needs a process: ``active`` now, and ``at`` for the earliest sleep."""
 
+        # A read-only Harness runs nothing, so it never needs a process.
+        if self._read_only:
+            return {"active": False}
         now = self._now()
         # A reconcile pass with work to do is work too: it finalizes held outcomes and marks cascades,
         # at open as recovery. A process that dies before it lands must be woken again.
@@ -561,8 +726,6 @@ class TaskScheduler:
             # A sleep not yet due is not active; a due one may run, so it falls through.
             if status == "sleeping" and not record.get("abortRequested") and state["until"] > now:
                 continue
-            if self._parked(record):
-                continue
             # An abort invocation waits for the live work below it, which counts itself.
             if record.get("abortRequested") and self._waiting_on(record, True):
                 continue
@@ -574,9 +737,7 @@ class TaskScheduler:
                     except Exception as error:
                         snapshot_failed = True
                         self._report(error, REGISTRY)
-                if snapshot is not None and "reason" in self._fit(
-                    record, snapshot.task(record["kind"])
-                ):
+                if snapshot is not None and "reason" in self._fit(record, snapshot.task(record["kind"])):
                     continue
             return {"active": True} if at is None else {"active": True, "at": at}
         return {"active": False} if at is None else {"active": False, "at": at}
@@ -616,9 +777,7 @@ class TaskScheduler:
                 record = self._live.get(invocation.task_id)
                 if record is None or record["state"]["status"] != "running":
                     continue
-                value = with_state(
-                    record, {"status": "pending", "checkpoint": record["state"]["checkpoint"]}
-                )
+                value = with_state(record, {"status": "pending", "checkpoint": record["state"]["checkpoint"]})
                 batch.append({"type": "task", "value": value})
             return batch
 
@@ -646,7 +805,7 @@ class TaskScheduler:
                 return {"result": "marked"}
             if invocation is None and current["state"]["status"] != "completing":
                 await self._load_scopes(False)
-                if not self._has_owned_live(id):
+                if not await self._region(lambda: self._has_owned_live(id), self._reload_scopes):
                     resolution = self._resolve(cast(RunnableTaskRecord, current), self._registry.snapshot())
                     if resolution["kind"] == "blocked":
                         await self._terminate(
@@ -671,12 +830,13 @@ class TaskScheduler:
     async def wait_for_task(self, id: TaskId, context: Context) -> SettledTask:
         """Resolve with the terminal receipt; cancelling ``context`` cancels only this wait."""
 
-        async def find() -> Any:
+        async def find(line: Storage) -> Any:
             if self._closing:
                 raise closed_error(self._session)
-            if id in self._live:
+            # Checked and registered on the line, so no terminal publication falls between them.
+            if await self._region(lambda: self._live_record(id) is not None):
                 return {"promise": self._task_waiters.add(id, context)}
-            record = await self._storage.task(id, context)
+            record = await line.task(id, context)
             if record is None:
                 raise ValueError(f"Task {id} does not exist")
             return {"promise": resolved(cast(SettledTask, record))}
@@ -724,10 +884,65 @@ class TaskScheduler:
 
     # ── Scheduling ─────────────────────────────────────────────────────────
 
-    def _observe(self, publication: CommitPublication, context: Context) -> None:
+    def _advance_contexts(self, publication: ObservedCommit) -> None:
+        """Extend each kept context range with the entries a stored commit appended to its conversation.
+
+        Entries are published in ID order, so a later read of that conversation needs no Storage scan.
+        """
+
+        if not self._contexts:
+            return
+        appended: dict[ConversationId, list[Any]] = {}
+        for change in publication["changes"]:
+            if change["type"] != "entry":
+                continue
+            conversation_id = change["value"]["conversationId"]
+            if conversation_id not in self._contexts:
+                continue
+            appended.setdefault(conversation_id, []).append(change["value"])
+        for conversation_id, entries in appended.items():
+            kept = self._contexts[conversation_id]
+            # An idle range past its retention is dropped here too: entry-only commits do not run
+            # ``_settle_idle()``, and a host may decline the expiry timer. ``expires_at`` was fixed when
+            # it went idle, so no settings are read here.
+            if (
+                kept["idle_since"] is not None
+                and kept["expires_at"] is not None
+                and kept["expires_at"] <= self._now()
+            ):
+                self._drop_context(conversation_id)
+                continue
+            extended = advance_range(kept["range"], entries)
+            if extended is None:
+                self._drop_context(conversation_id)
+            else:
+                kept["range"] = extended
+
+    def _add_scopes_above(self, record: AnyTaskRecord, scopes: set[ConversationId]) -> bool:
+        """Add the conversations above ``record`` to ``scopes``: those whose idleness a change of it can
+        change. False when a node on the way up is not known; a conversation already in ``scopes`` has
+        everything above it there too.
+        """
+
+        for step in self._above(parent_of(record)):
+            if "unknown" in step:
+                return False
+            if "conversation" not in step:
+                continue
+            conversation = step["conversation"]
+            if conversation in scopes:
+                return True
+            scopes.add(conversation)
+        return True
+
+    def _observe(self, publication: ObservedCommit, context: Context) -> None:
+        self._advance_contexts(publication)
         updated: list[AnyTaskRecord] = []
         failed: list[TaskId] = []
         changed = False
+        # The conversations whose idleness the commit's task changes can change; None when a chain is
+        # not known.
+        dirty: set[ConversationId] | None = set()
         for change in publication["changes"]:
             if change["type"] == "conversation" and change["value"]["id"] not in self._edges:
                 owner = change["value"].get("owner")
@@ -741,6 +956,11 @@ class TaskScheduler:
             if failed_outcome(record) and (previous is None or not failed_outcome(previous)):
                 failed.append(record["id"])
             self._track(previous, record)
+            # Idleness counts live tasks, so only a task that became live or ended can change it.
+            # Collected before ``_sweep()``, which may forget the chain of a task that ended.
+            liveness = previous is None or record["state"]["status"] == "terminal"
+            if liveness and dirty is not None and not self._add_scopes_above(record, dirty):
+                dirty = None
             if record["state"]["status"] == "terminal":
                 self._failed_migrations.pop(record["id"], None)
                 self._fail_fast_checks.discard(record["id"])
@@ -801,7 +1021,7 @@ class TaskScheduler:
         self._sweep()
         if not changed:
             return
-        self._settle_idle()
+        self._settle_idle(dirty)
         self._kick()
 
     def _context_retention_ms(self) -> int:
@@ -811,37 +1031,105 @@ class TaskScheduler:
             self._report(error, SETTINGS)
             return 0
 
-    def _settle_idle(self) -> None:
-        for conversation_id in self._idle_waiters.keys():
-            if self._idle(conversation_id):
-                self._idle_waiters.resolve(conversation_id, None)
-        now = self._now()
-        retention = self._context_retention_ms()
-        for conversation_id, kept in list(self._contexts.items()):
-            if kept["idle_since"] is not None and now - kept["idle_since"] >= retention:
-                del self._contexts[conversation_id]
-            elif not self._idle(conversation_id):
-                kept["idle_since"] = None
-            elif retention > 0:
-                if kept["idle_since"] is None:
-                    kept["idle_since"] = now
-            else:
-                del self._contexts[conversation_id]
-        self._schedule_expiry()
+    def _settle_idle(self, scopes: set[ConversationId] | None) -> None:
+        """After task changes below the conversations in ``scopes`` (every conversation when None).
 
-    def _schedule_expiry(self) -> None:
-        """Run ``_settle_idle()`` when the earliest idle context expires, on a background timer.
-
-        Where the host declines one, none is kept: task changes alone check expiry.
+        Resolve their idle waiters and the Harness-wide ones, drop the kept contexts whose idle period
+        passed the retention, then start or end the idle periods of the kept contexts in ``scopes``. A
+        task change can change the idleness only of the conversations above it, so no check visits every
+        conversation.
         """
 
+        all_scopes = scopes is None or self._unknowns_changed
+        self._unknowns_changed = False
+        if all_scopes:
+            self._full_idle_checks += 1
+        self._resolve_idle_waiters(None if all_scopes else scopes)
+        now = self._now()
         retention = self._context_retention_ms()
-        at: int | None = None
-        for kept in self._contexts.values():
-            if kept["idle_since"] is not None:
-                candidate = kept["idle_since"] + retention
-                if at is None or candidate < at:
-                    at = candidate
+        # Expired first: a context past its retention is dropped even when this commit makes it busy again.
+        self._expire_contexts(now, retention)
+        visited = list(self._contexts) if all_scopes else list(scopes or ())
+        for conversation_id in visited:
+            kept = self._contexts.get(conversation_id)
+            if kept is None:
+                continue
+            if not self._idle(conversation_id):
+                if kept["idle_since"] is None:
+                    continue
+                kept["idle_since"] = None
+                self._idle_order.pop(conversation_id, None)
+            elif retention <= 0:
+                self._drop_context(conversation_id)
+            elif kept["idle_since"] is None:
+                kept["idle_since"] = now
+                kept["expires_at"] = now + retention
+                self._mark_idle(conversation_id, now)
+        self._schedule_expiry()
+
+    def _resolve_idle_waiters(self, scopes: set[ConversationId] | None) -> None:
+        """Resolve the idle waiters of the conversations in ``scopes`` (all when None) and the
+        Harness-wide ones.
+        """
+
+        for conversation_id in self._idle_waiters.keys():
+            if conversation_id is not None and scopes is not None and conversation_id not in scopes:
+                continue
+            if self._idle(conversation_id):
+                self._idle_waiters.resolve(conversation_id, None)
+
+    def _expire_contexts(self, now: int, retention: int) -> None:
+        """Drop the kept contexts idle for at least ``retention``, oldest first, with the retention
+        setting of now; with no retention, every idle one, also those whose idle period a clock that went
+        back makes start after now.
+        """
+
+        for conversation_id, idle_since in list(self._idle_order.items()):
+            if retention > 0 and now - idle_since < retention:
+                return
+            self._drop_context(conversation_id)
+
+    def _mark_idle(self, conversation_id: ConversationId, idle_since: int) -> None:
+        """Start the idle period of a kept context in the expiry order.
+
+        An idle period older than the newest one kept, which a clock that went back starts, sorts the
+        order again, and the newest is taken from what is kept then.
+        """
+
+        self._idle_order.pop(conversation_id, None)
+        self._idle_order[conversation_id] = idle_since
+        if len(self._idle_order) == 1 or idle_since >= self._idle_newest:
+            self._idle_newest = idle_since
+            return
+        ordered = sorted(self._idle_order.items(), key=lambda item: item[1])
+        self._idle_order.clear()
+        for conversation, since in ordered:
+            self._idle_order[conversation] = since
+        self._idle_newest = ordered[-1][1]
+
+    def _drop_context(self, conversation_id: ConversationId) -> None:
+        """Forget a kept context, idle or not, and its place in the expiry order."""
+
+        self._contexts.pop(conversation_id, None)
+        self._idle_order.pop(conversation_id, None)
+
+    def _live_unloaded(self) -> bool:
+        """Whether a live task's chain is not loaded yet: one :meth:`_idle` counts as inside every scope
+        it may be in.
+        """
+
+        return any(id in self._live for id in self._unloaded)
+
+    def _schedule_expiry(self) -> None:
+        """Drop the expired contexts when the earliest idle context expires, on a background timer.
+
+        Where the host declines one, as the default does in Cloudflare Workers, none is kept: a pending
+        timer could keep a Durable Object from being evicted, and eviction frees the contexts. There,
+        task changes alone check expiry.
+        """
+
+        oldest = next(iter(self._idle_order.values()), None)
+        at = None if oldest is None else oldest + self._context_retention_ms()
         if self._expiry is not None and self._expiry["at"] == at:
             return
         if self._expiry is not None:
@@ -855,11 +1143,19 @@ class TaskScheduler:
             self._expiry = {"at": at, "disarm": disarm}
 
     def _expire(self) -> None:
+        """The earliest idle context's expiry, on the background timer: drop what passed the retention
+        and arm the next.
+        """
+
         self._expiry = None
         self._expiry_handle = None
-        self._settle_idle()
+        self._expire_contexts(self._now(), self._context_retention_ms())
+        self._schedule_expiry()
+
     def _schedule_reconcile(self) -> None:
-        if self._reconcile_scheduled or self._closing:
+        # A read-only reconcile could only fail: what it writes is refused, and its own commits
+        # fail the Session.
+        if self._reconcile_scheduled or self._closing or self._read_only:
             return
         self._reconcile_scheduled = True
         asyncio.get_running_loop().call_soon(lambda: self._spawn(self._reconcile()))
@@ -878,35 +1174,7 @@ class TaskScheduler:
             if self._closing:
                 return
             queued = await self._load_scopes(cascade)
-            marks: dict[TaskId, dict[str, Any]] = {}
-
-            def mark(record: Mapping[str, Any], reason: str | None) -> None:
-                staged = marks.get(record["id"])
-                if staged is not None and staged["reason"] is None:
-                    return
-                if record.get("abortRequested") and (record.get("abortReason") is None or reason is not None):
-                    return
-                marks[record["id"]] = {"record": record, "reason": reason}
-
-            for id in list(self._intent):
-                owner = self._live.get(id)
-                if owner is None:
-                    continue
-                restart = owner.get("abortReason") == "restart" and not failed_outcome(owner)
-                for step in self._walk_down(id, enter=lambda below: below not in self._intent):
-                    live = step["live"]
-                    if live is not None and not step["node"]["background"]:
-                        mark(live, "restart" if restart else None)
-            for id in checks:
-                waiter = self._live.get(id)
-                if waiter is None or waiter["state"]["status"] != "waiting":
-                    continue
-                if not await self._any_failed(waiter["state"]["on"]):
-                    continue
-                for member in waiter["state"]["on"]:
-                    record = self._live.get(member)
-                    if record is not None and not failed_outcome(record):
-                        mark(record, None)
+            marks = await self._marks(checks)
             for mark_value in marks.values():
                 tx.set_task(with_abort_mark(mark_value["record"], mark_value["reason"]))
             for id in queued:
@@ -915,27 +1183,100 @@ class TaskScheduler:
             await self._finalize(tx)
 
         try:
-            await self._session.commit_with(apply, self._context)
+            await self._session.commit_internal(apply, self._context)
         except Exception as error:
             self._fail_session(error)
         if work:
             self._reconciling_work -= 1
         self._schedule_wake()
-        self._settle_idle()
+        # Its commit's task changes were settled at their publication; a waiter that asked for this
+        # pass checks again, and what its chain loads resolved can make any scope idle.
+        if self._unknowns_changed:
+            self._settle_idle(None)
+            return
+        self._resolve_idle_waiters(None)
+        # A pass checks expiry too, for hosts that decline the expiry timer.
+        self._expire_contexts(self._now(), self._context_retention_ms())
+        self._schedule_expiry()
+
+    async def _marks(self, checks: Sequence[TaskId]) -> dict[TaskId, dict[str, Any]]:
+        """The abort marks one reconcile pass stages, planned in a decision region.
+
+        A mark rewrites the whole record, so the record it copies is read as a task record, keyed:
+        a commit of the task that is not published yet makes the region wait and run again, rather
+        than stage a mark over a stale checkpoint.
+        """
+
+        ended: dict[TaskId, AnyTaskRecord | None] = {}
+        while True:
+            plan = await self._region(lambda: self._plan_marks(checks, ended), self._reload_scopes)
+            if "missing" in plan:
+                for id in plan["missing"]:
+                    ended[id] = await self._storage.task(id, self._context)
+                continue
+            return cast(dict[TaskId, dict[str, Any]], plan["marks"])
+
+    def _plan_marks(
+        self, checks: Sequence[TaskId], ended: Mapping[TaskId, AnyTaskRecord | None]
+    ) -> dict[str, Any]:
+        """``_marks``' decision region; the ``failFast`` members it needs from Storage first, when
+        ``ended`` lacks them.
+        """
+
+        marks: dict[TaskId, dict[str, Any]] = {}
+
+        def mark(found: Mapping[str, Any], reason: str | None) -> None:
+            record = self._live_record(found["id"])
+            if record is None:
+                return
+            staged = marks.get(record["id"])
+            if staged is not None and staged["reason"] is None:
+                return
+            if record.get("abortRequested") and (record.get("abortReason") is None or reason is not None):
+                return
+            marks[record["id"]] = {"record": record, "reason": reason}
+
+        self._record(INTENT_KEY)
+        for id in list(self._intent):
+            owner = self._live_record(id)
+            if owner is None:
+                continue
+            # Only an owner abandoned after a restart, and nothing else, passes its reason on.
+            restart = owner.get("abortReason") == "restart" and not failed_outcome(owner)
+            for step in self._walk_down(id, enter=lambda below: below not in self._intent):
+                live = step["live"]
+                if live is not None and not step["node"]["background"]:
+                    mark(live, "restart" if restart else None)
+        missing: list[TaskId] = []
+        for id in checks:
+            waiter = self._live_record(id)
+            if waiter is None or waiter["state"]["status"] != "waiting":
+                continue
+            failed = False
+            for member in waiter["state"]["on"]:
+                record = self._live_record(member)
+                if record is None:
+                    if member not in ended:
+                        missing.append(member)
+                        continue
+                    record = ended[member]
+                if record is not None and failed_outcome(record):
+                    failed = True
+            if not failed:
+                continue
+            # Every other live task: the failed one keeps its own outcome.
+            for member in waiter["state"]["on"]:
+                record = self._live_record(member)
+                if record is not None and not failed_outcome(record):
+                    mark(record, None)
+        if missing:
+            return {"missing": missing}
+        return {"marks": marks}
 
     def _reconcile_work(self) -> bool:
         """Whether a reconcile pass would have work: a cascade, held outcomes, or ``failFast`` waits."""
 
         return bool(self._cascade_pending or self._finalize_checks or self._fail_fast_checks)
-
-    async def _any_failed(self, ids: Sequence[TaskId]) -> bool:
-        for id in ids:
-            record = self._live.get(id)
-            if record is None:
-                record = await self._storage.task(id, self._context)
-            if record is not None and failed_outcome(record):
-                return True
-        return False
 
     async def _finalize(self, tx: Transaction) -> None:
         round_ids = list(self._finalize_checks)
@@ -981,37 +1322,56 @@ class TaskScheduler:
 
     async def _load_chain(self, start: Up, overlay: dict[str, Any] | None = None) -> None:
         passed: list[TaskId] = []
+        installed = False
         at: Up | None = start
-        while at is not None:
-            if "task" in at:
-                id = at["task"]
-                node = self._live.get(id) or self._settled.get(id)
-                if node is None and overlay is not None and id in overlay["tasks"]:
-                    break
-                if node is not None and id not in self._unloaded:
-                    break
-                if node is None:
-                    record = await self._storage.task(id, self._context)
-                    if record is None:
-                        return
-                    node = node_of(record)
-                    if record["state"]["status"] == "terminal":
-                        self._settle(id, node)
-                    self._schedule_reconcile()
-                passed.append(id)
-                at = parent_of(node)
-            else:
-                conversation = at["conversation"]
-                if overlay is not None and conversation in overlay["edges"]:
-                    edge = overlay["edges"][conversation]
-                elif conversation in self._edges:
-                    edge = self._edges[conversation]
+        try:
+            while at is not None:
+                if "task" in at:
+                    id = at["task"]
+                    node = self._live.get(id) or self._settled.get(id)
+                    if node is None and overlay is not None and id in overlay["tasks"]:
+                        break
+                    if node is not None and id not in self._unloaded:
+                        break
+                    if node is None:
+                        record = await self._storage.task(id, self._context)
+                        if record is None:
+                            return
+                        node = node_of(record)
+                        if record["state"]["status"] == "terminal":
+                            self._settle(id, node)
+                            self._pin(id)
+                            installed = True
+                        # A loaded node can reveal a cancelling owner: the next reconcile derives marks again.
+                        self._schedule_reconcile()
+                    passed.append(id)
+                    at = parent_of(node)
                 else:
-                    record = await self._storage.conversation(conversation, self._context)
-                    edge = record["owner"]["taskId"] if record is not None and "owner" in record else None
-                    self._set_edge(conversation, edge)
-                    self._schedule_reconcile()
-                at = None if edge is None else {"task": edge}
+                    conversation = at["conversation"]
+                    if overlay is not None and conversation in overlay["edges"]:
+                        edge = overlay["edges"][conversation]
+                    elif conversation in self._edges:
+                        edge = self._edges[conversation]
+                    else:
+                        record = await self._storage.conversation(conversation, self._context)
+                        edge = (
+                            record["owner"]["taskId"] if record is not None and "owner" in record else None
+                        )
+                        self._set_edge(conversation, edge)
+                        self._pin(conversation_node(conversation))
+                        installed = True
+                        # A loaded node can reveal a cancelling owner: the next reconcile derives marks again.
+                        self._schedule_reconcile()
+                    at = None if edge is None else {"task": edge}
+        finally:
+            # ``_idle()`` counts a live task whose chain is not loaded as inside every scope it may be
+            # in: what this load resolved, also when it stopped early, can make such a scope idle without
+            # a task change below it.
+            if any(id in self._live for id in passed) or (installed and self._live_unloaded()):
+                self._unknowns_changed = True
+                # A waiter such a task held is checked again at the pass's end, also when this load was
+                # not a reconcile's.
+                self._schedule_reconcile()
         for id in passed:
             self._unloaded.discard(id)
 
@@ -1040,7 +1400,7 @@ class TaskScheduler:
         self._sweep_scheduled = True
         loop = asyncio.get_running_loop()
 
-        async def sweep() -> None:
+        async def sweep(_line: Storage) -> None:
             self._sweep_scheduled = False
             self._sweep()
 
@@ -1052,9 +1412,28 @@ class TaskScheduler:
 
         loop.call_soon(lambda: self._spawn(queued()))
 
+    def _pin(self, node: Node) -> None:
+        """Keep ``node``, which a chain load of the job on the line installed, until that job's commit
+        is published or fails: work it creates below the node needs it, and the sweep would drop it as
+        unneeded before then.
+        """
+
+        self._pins[node] = self._pins.get(node, 0) + 1
+
+        def release() -> None:
+            count = self._pins[node] - 1
+            if count > 0:
+                self._pins[node] = count
+                return
+            del self._pins[node]
+            self._drop_if_unneeded(node)
+
+        self._session.on_job_end(release)
+
     def _sweep(self) -> None:
         for node in list(self._drop_queue):
-            if node in self._below:
+            # Queued again once its pins go.
+            if node in self._below or node in self._pins:
                 continue
             if isinstance(node, str):
                 conversation = conversation_of(node)
@@ -1157,6 +1536,7 @@ class TaskScheduler:
         self, node: dict[str, Any], overlay: dict[str, Any] | None = None
     ) -> AnyTaskRecord | None:
         current = node
+        self._record(INTENT_KEY)
         while not current["background"]:
             owner = current.get("owner")
             if owner is None:
@@ -1250,6 +1630,7 @@ class TaskScheduler:
         pending: list[Node] = [start]
         while pending:
             at = pending.pop()
+            self._record(owned_key(at))
             children_sets = (self._below.get(at), None if links is None else links.get(at))
             for children in children_sets:
                 for child in children or ():
@@ -1296,6 +1677,7 @@ class TaskScheduler:
         return bool(self._owned_live(owner, overlay=overlay, first=True, done=done))
 
     def _in_scope(self, start: Up, scope: Scope, cross_background: bool = False) -> bool | None:
+        self._record(INTENT_KEY)
         for step in self._above(start):
             if "unknown" in step:
                 return None
@@ -1310,6 +1692,7 @@ class TaskScheduler:
         return self._cancelling_owner(start) is not None
 
     def _cancelling_owner(self, start: Up) -> AnyTaskRecord | None:
+        self._record(INTENT_KEY)
         if not self._intent:
             return None
         for step in self._above(start):
@@ -1338,6 +1721,9 @@ class TaskScheduler:
         self._task_waiters.reject_all(error)
         self._idle_waiters.reject_all(error)
         self._contexts.clear()
+        self._idle_order.clear()
+        self._idle_newest = float("-inf")
+        self._unknowns_changed = False
         if self._expiry_handle is not None:
             self._expiry_handle.cancel()
             self._expiry_handle = None
@@ -1351,7 +1737,7 @@ class TaskScheduler:
     def _schedule_wake(self) -> None:
         """Recompute the wake off the Session line: arm the built-in timer, or tell ``on_wake``."""
 
-        if self._wake_scheduled or self._closing:
+        if self._wake_scheduled or self._closing or self._read_only:
             return
         self._wake_scheduled = True
 
@@ -1405,16 +1791,6 @@ class TaskScheduler:
             if record is not None and not self._not_due(record):
                 self._runnable.add(id)
 
-    def _parked(self, record: Mapping[str, Any]) -> bool:
-        """A task cut off ``restart_limit`` times in a row; an abort mark still runs its abort handler."""
-
-        restarts = record.get("restarts")
-        return bool(
-            not record.get("abortRequested")
-            and restarts is not None
-            and restarts >= self._restart_limit()
-        )
-
     def _about_task(self, task: Any) -> dict[str, Any]:
         """What a report about a task's own code says of it: the task, and the extension that installed
         the definition whose code ran (the current one's when the task does not name one)."""
@@ -1433,22 +1809,6 @@ class TaskScheduler:
                 # A registry that throws is reported where it is read for scheduling.
                 extension = None
         return {"task": report, **optional_extension(extension)}
-
-    def _unpark_raised(self) -> None:
-        """Make parked tasks a raised ``restart_limit`` no longer parks candidates again."""
-
-        unparked = False
-        for id in list(self._parked_tasks):
-            record = self._live.get(id)
-            if record is not None and self._parked(record):
-                continue
-            self._parked_tasks.discard(id)
-            if record is None:
-                continue
-            self._runnable.add(id)
-            unparked = True
-        if unparked:
-            asyncio.get_running_loop().call_soon(self._notify_blocked)
 
     def _restart_limit(self) -> int | float:
         """``settings.restart_limit``, or the default when the host's settings throw."""
@@ -1535,42 +1895,28 @@ class TaskScheduler:
             # Every pass picks up sleeps whose time has come: a pass started by any change may be
             # the first to run after a deadline.
             self._wake_due()
-            self._unpark_raised()
+            # The candidates are chosen in a decision region: a record an earlier admitted commit
+            # replaced is reread once that commit publishes, so nothing is reserved on a stale one.
+            plan = await self._region(self._plan_reservation, self._reload_scopes)
+            for id in plan["dropped"]:
+                self._runnable.discard(id)
+            if plan["cascade"]:
+                self._cascade_pending = True
+                self._schedule_reconcile()
             snapshot: RegistrySnapshot | None = None
-            limit = self._restart_limit()
-            for id in list(self._runnable):
-                record = self._live.get(id)
-                if record is None or record["state"]["status"] == "completing" or id in self._invocations:
-                    self._runnable.discard(id)
-                    continue
-                if self._waiting_on(record, True):
-                    self._runnable.discard(id)
-                    continue
-                # It returns at the first pass after its time comes, which the timer, resume(), or
-                # any change starts.
-                if self._not_due(record):
-                    self._runnable.discard(id)
-                    continue
-                # It returns when retry() clears its restart count, or after restart_limit rose.
-                if self._parked(record):
-                    self._runnable.discard(id)
-                    if id not in self._parked_tasks:
-                        # Newly parked without a commit, as after a lowered limit.
-                        asyncio.get_running_loop().call_soon(self._notify_blocked)
-                    self._parked_tasks.add(id)
-                    continue
-                runnable = record
+            for record in plan["ready"]:
+                id = record["id"]
                 mode: Literal["run", "abort"] = "abort" if record.get("abortRequested") else "run"
-                if mode == "run" and not record["background"] and self._below_cancelled(parent_of(record)):
-                    self._cascade_pending = True
-                    self._schedule_reconcile()
-                    continue
-                # An abort handler cut off restart_limit times would run forever; nothing is left to
-                # park it for.
-                if mode == "abort" and int(record.get("restarts") or 0) >= limit:
+                # Work cut off restart_limit times in a row would run forever: an abort handler, or a
+                # phase of a kind that does not end itself at the limit, ends the task ``faulted``
+                # instead. The settings are read only for a task that was cut off at all.
+                restarts = record.get("restarts")
+                cut_off = restarts is not None and restarts >= self._restart_limit()
+                if cut_off and (mode == "abort" or not self._limits_restarts(record["kind"])):
                     message = (
-                        f"Abort handler of task {id} ({record['kind']}) was cut off "
-                        f"{record['restarts']} times"
+                        f"Abort handler of task {id} ({record['kind']}) was cut off {restarts} times"
+                        if mode == "abort"
+                        else f"Task {id} ({record['kind']}) was cut off {restarts} times without progress"
                     )
                     await self._terminate(
                         tx,
@@ -1584,7 +1930,7 @@ class TaskScheduler:
                     continue
                 if snapshot is None:
                     snapshot = self._registry.snapshot()
-                resolution = self._resolve(runnable, snapshot)
+                resolution = self._resolve(cast(RunnableTaskRecord, record), snapshot)
                 if resolution["kind"] == "blocked":
                     if mode == "abort" and record.get("abortReason") is None:
                         await self._terminate(
@@ -1593,7 +1939,7 @@ class TaskScheduler:
                             {"status": "orphaned", "reason": resolution["reason"]},
                         )
                     continue
-                if resolution["record"] is not runnable or record["state"]["status"] != "running":
+                if resolution["record"] is not record or record["state"]["status"] != "running":
                     tx.set_task(
                         with_state(
                             resolution["record"],
@@ -1601,15 +1947,13 @@ class TaskScheduler:
                         )
                     )
                 self._runnable.discard(id)
-                invocation = self._create_invocation(
-                    record, mode, installer_of(snapshot, resolution["task"])
-                )
+                invocation = self._create_invocation(record, mode, installer_of(snapshot, resolution["task"]))
                 reservations.append(
                     {"invocation": invocation, "task": resolution["task"], "snapshot": snapshot}
                 )
 
         try:
-            await self._session.commit_with(reserve, self._context)
+            await self._session.commit_internal(reserve, self._context)
         except Exception:
             for reservation in reservations:
                 self._invocations.pop(reservation["invocation"].task_id, None)
@@ -1620,7 +1964,7 @@ class TaskScheduler:
             self._report(
                 RuntimeError(entry["message"]),
                 {
-                    "type": "task_faulted",
+                    "kind": "task_faulted",
                     **self._about_task(entry["record"]),
                     "reason": "restart_limit",
                 },
@@ -1630,6 +1974,136 @@ class TaskScheduler:
         if abandoned:
             self._dirty = True
         return reservations
+
+    def membership_keys(self, tx: Transaction) -> Any:
+        """The ownership memberships a commit's task and conversation changes write (group-commit
+        document §4.2), asked at its admission on the line, so a walk a pending commit would change waits.
+
+        For each task created or made terminal: every node from its parent up to and including the
+        nearest live task, or the root conversation, and the roots too when the walk reached one, as a
+        pending end may unlist the root a creation finds listed. For each conversation created under a
+        task: that task. And the intent set when a change sets, upgrades, or clears a mark or a held or
+        ended outcome other than ``completed``. Loads the chains it walks; the nodes it installs stay
+        until the commit is published.
+        """
+
+        tasks = tx.staged_tasks()
+        conversations = tx.staged_conversations()
+        if not tasks and all(record.get("owner") is None for record in conversations):
+            return []
+        return self._membership_keys(tx, tasks, conversations)
+
+    async def _membership_keys(
+        self,
+        tx: Transaction,
+        tasks: list[AnyTaskRecord],
+        conversations: list[dict[str, Any]],
+    ) -> list[str]:
+        keys: set[str] = set()
+        overlay = _overlay_of(tx)
+        created = set(tx.created_task_ids())
+        reached: dict[str, ConversationId | None] = {}
+        for record in tasks:
+            if intent_changes(self._live.get(record["id"]), record):
+                keys.add(INTENT_KEY)
+            if record["id"] not in created and record["state"]["status"] != "terminal":
+                continue
+            await self._load_chain(parent_of(record), overlay)
+            if await self._chain_keys(parent_node(record), overlay, keys, reached) is not None:
+                keys.add(ROOTS_KEY)
+        for conversation in conversations:
+            owner = (conversation.get("owner") or {}).get("taskId")
+            if owner is None:
+                continue
+            await self._load_chain({"task": owner}, overlay)
+            await self._chain_keys(owner, overlay, keys, reached)
+        return list(keys)
+
+    async def _chain_keys(
+        self,
+        start: Node,
+        overlay: dict[str, Any],
+        keys: set[str],
+        reached: dict[str, ConversationId | None],
+    ) -> ConversationId | None:
+        """Add the memberships from ``start`` up to and including the nearest live task, or the root
+        conversation, which it returns.
+
+        ``reached`` keeps, per node walked, where its walk ended, so a chain several tasks of a commit
+        share is walked once. Whether an ancestor is live can change under a pending commit, so it is
+        read after a touch of the ancestor's record: a pending end must not stop the chain early.
+        Ownership fields are immutable, so they are not keyed.
+        """
+
+        walked: list[str] = []
+        root: ConversationId | None = None
+        node: Node | None = start
+        while node is not None:
+            key = owned_key(node)
+            if key in reached:
+                # Walked up from here already, for another task of the commit.
+                root = reached[key]
+                break
+            keys.add(key)
+            walked.append(key)
+            if isinstance(node, str):
+                conversation = conversation_of(node)
+                edges = overlay.get("edges")
+                if edges is not None and conversation in edges:
+                    node = edges[conversation]
+                elif conversation in self._edges:
+                    node = self._edges[conversation]
+                else:
+                    break
+                if node is None:
+                    root = conversation
+                continue
+            staged = overlay["tasks"].get(cast(TaskId, node))
+            record = staged if staged is not None else self._live.get(cast(TaskId, node))
+            if staged is None:
+                gate = self._session.touch(task_key(cast(TaskId, node)))
+                if gate is not None:
+                    await gate
+                    # It may have ended meanwhile, and its node been swept: load the chain above it again.
+                    await self._load_chain({"task": cast(TaskId, node)}, overlay)
+                    record = self._live.get(cast(TaskId, node))
+            if record is not None and record["state"]["status"] != "terminal":
+                break
+            above: dict[str, Any] | None = record or self._settled.get(cast(TaskId, node))
+            node = None if above is None else parent_node(above)
+        for walked_key in walked:
+            reached[walked_key] = root
+        return root
+
+    def _plan_reservation(self) -> dict[str, Any]:
+        """A reservation pass's decision region: the candidates it drops, and the records to reserve.
+
+        Iterating the candidates is not keyed: a pass that misses a task a pending commit makes
+        runnable only delays it. A record it does read is keyed, so a reservation never stands on a
+        record an admitted commit has replaced.
+        """
+
+        dropped: list[TaskId] = []
+        ready: list[AnyTaskRecord] = []
+        cascade = False
+        for id in list(self._runnable):
+            if id in self._invocations:
+                dropped.append(id)
+                continue
+            record = self._live_record(id)
+            if record is None or record["state"]["status"] == "completing":
+                dropped.append(id)
+                continue
+            # It returns once what it waits for ends, its record changes, or the work below it ends.
+            if self._waiting_on(record, True) or self._not_due(record):
+                dropped.append(id)
+                continue
+            if not record.get("abortRequested") and not record["background"]:
+                if self._below_cancelled(parent_of(record)):
+                    cascade = True
+                    continue
+            ready.append(record)
+        return {"dropped": dropped, "cascade": cascade, "ready": ready}
 
     def _waiting_on(self, record: Mapping[str, Any], first: bool = False) -> list[TaskId]:
         if record.get("abortRequested"):
@@ -1669,7 +2143,7 @@ class TaskScheduler:
             self._report(
                 error,
                 {
-                    "type": "migration_failed",
+                    "kind": "migration_failed",
                     **self._about_task({**record, "extension": extension}),
                 },
             )
@@ -1700,6 +2174,39 @@ class TaskScheduler:
             "roots": len(self._roots),
             "unloaded": len(self._unloaded),
             "drop_queue": len(self._drop_queue),
+            "pins": len(self._pins),
+        }
+
+    @property
+    def idle_state(self) -> dict[str, int]:
+        """The kept contexts' idle state, for tests (a diagnostic, computed on demand).
+
+        How many are kept and how many are idle, how many disagree with a full recompute (an idle
+        period without :meth:`_idle`, or :meth:`_idle` without one; an expiry order that differs from
+        the idle periods, or is not sorted), and how many idle checks covered every scope.
+        """
+
+        mismatches = 0
+        idle = 0
+        for conversation_id, kept in self._contexts.items():
+            idle_since = kept["idle_since"]
+            if idle_since is not None:
+                idle += 1
+            if (idle_since is not None) != self._idle(conversation_id):
+                mismatches += 1
+            if self._idle_order.get(conversation_id) != idle_since:
+                mismatches += 1
+        previous: float = float("-inf")
+        for conversation_id, idle_since in self._idle_order.items():
+            kept_since = self._contexts.get(conversation_id, {}).get("idle_since")
+            if idle_since < previous or kept_since != idle_since:
+                mismatches += 1
+            previous = idle_since
+        return {
+            "contexts": len(self._contexts),
+            "idleContexts": idle,
+            "idleMismatches": mismatches,
+            "fullIdleChecks": self._full_idle_checks,
         }
 
     async def inspect(self, snapshot: RegistrySnapshot) -> tuple[str, list[TaskInspection]]:
@@ -1724,8 +2231,6 @@ class TaskScheduler:
             return {"kind": "waiting", "on": on}
         if self._not_due(record):
             return {"kind": "sleeping", "until": record["state"]["until"]}
-        if self._parked(record):
-            return {"kind": "blocked", "reason": "restart_limit"}
         fit = self._fit(record, snapshot.task(record["kind"]))
         if "reason" in fit:
             return {"kind": "blocked", **fit}
@@ -1735,7 +2240,7 @@ class TaskScheduler:
                 "reason": "migration_failed",
                 "error": _missing_migration(record, fit["task"].definition),
             }
-        return {"kind": "ready", "migrates": fit["migrates"]}
+        return {"kind": "pending", "migrates": fit["migrates"]}
 
     def _create_invocation(
         self, record: Mapping[str, Any], mode: Literal["run", "abort"], extension: str | None = None
@@ -1756,7 +2261,7 @@ class TaskScheduler:
             except BaseException as error:
                 if not is_failure(error):
                     raise
-                self._report(error, {"type": "task_error", **self._about_task(invocation)})
+                self._report(error, {"kind": "task_error", **self._about_task(invocation)})
             finally:
                 self._end(invocation)
                 invocation.finish()
@@ -1781,9 +2286,8 @@ class TaskScheduler:
         while True:
             current = await self._step(
                 invocation,
-                lambda tx, current, previous=previous: self._decide(
-                    tx, current, previous, state, invocation.context
-                ),
+                lambda current, previous=previous: self._rules(current, previous),
+                lambda tx, current: self._progress(tx, current, state, invocation.context),
             )
             if current is None or self._closing:
                 return
@@ -1805,49 +2309,62 @@ class TaskScheduler:
                     if not is_failure(error):
                         raise
 
-    def _decide(
-        self,
-        tx: Transaction,
-        current: ErasedRunningTask,
-        previous: dict[str, Any] | None,
-        state: dict[str, Any],
-        context: Context | None = None,
-    ) -> Any:
+    def _rules(self, current: ErasedRunningTask, previous: dict[str, Any] | None) -> dict[str, Any]:
+        """Precedence rules for a run invocation, the decision region of its step (spec section 5.4).
+
+        Rules 1 (no longer running) and 2 (a closing Harness) are applied by :meth:`_step`; progress
+        (rule 5) is applied there too, as it takes a registry snapshot and writes a handover.
+        """
+
+        # 3. an abort mark ends it; a fresh abort invocation starts once its owned work is gone.
         if current.get("abortRequested"):
-            return False
+            return {"plan": "end"}
+        # An owner's cancellation intent ends it too, before its cascade marks it.
         if not current["background"] and self._below_cancelled(parent_of(current)):
-            self._cascade_pending = True
-            self._schedule_reconcile()
-            return False
+            return {"plan": "cascade"}
         if previous is None:
-            return True
-        if previous.get("failure") is not None:
-            return {"fault": previous["failure"]["error"]}
+            return {"plan": "continue"}
+        # 4. an uncaught error.
+        failure = previous.get("failure")
+        if failure is not None:
+            return {"plan": "fault", "error": failure["error"]}
+        # 6. no durable progress.
         if json_equal(current["state"]["checkpoint"], previous["checkpoint"]):
             message = (
                 f"Task {current['kind']} phase {previous['checkpoint']['phase']} "
                 "returned without durable progress"
             )
-            return {"fault": RuntimeError(message)}
+            return {"plan": "fault", "error": RuntimeError(message)}
+        return {"plan": "progress"}
+
+    def _progress(
+        self,
+        tx: Transaction,
+        current: ErasedRunningTask,
+        state: dict[str, Any],
+        context: Context | None = None,
+    ) -> bool:
+        """Rule 5, progress: whether the invocation continues under the phase's definition."""
+
         state["snapshot"] = self._registry.snapshot()
         following = state["snapshot"].task(current["kind"])
-        if following is not state["task"]:
-            cause = "missing_task" if following is None else "incompatible_task"
-            if following is not None and can_reserve(following, current):
-                tx.set_task(
-                    with_state(current, {"status": "pending", "checkpoint": current["state"]["checkpoint"]})
-                )
-                return False
-            if state["reported"] is None or state["reported"]["task"] is not following:
-                state["reported"] = {"task": following}
-                self._report(
-                    _OldDefinitionError(current["id"], current["kind"], cause),
-                    {
-                        "type": "task_outdated",
-                        **self._about_task(current),
-                        "reason": cause,
-                    },
-                )
+        if following is state["task"]:
+            return True
+        if following is not None and can_reserve(following, current):
+            tx.set_task(
+                with_state(current, {"status": "pending", "checkpoint": current["state"]["checkpoint"]})
+            )
+            return False
+        if state["reported"] is None or state["reported"]["task"] is not following:
+            state["reported"] = {"task": following}
+            self._report(
+                _OldDefinitionError(current["id"], current["kind"], _outdated_reason(following, current)),
+                {
+                    "kind": "task_outdated",
+                    **self._about_task(current),
+                    "reason": _outdated_reason(following, current),
+                },
+            )
         return True
 
     async def _run_abort(self, reservation: dict[str, Any]) -> None:
@@ -1871,30 +2388,48 @@ class TaskScheduler:
         message = f"Abort handler of task {invocation.task_id} returned without a terminal outcome"
         await self._step(
             invocation,
-            lambda _tx, _current: {"fault": failure if failure is not None else RuntimeError(message)},
+            lambda _current: {
+                "plan": "fault",
+                "error": failure if failure is not None else RuntimeError(message),
+            },
         )
 
     async def _step(
         self,
         invocation: _Invocation,
-        decide: Callable[[Transaction, ErasedRunningTask], Any],
+        rules: Callable[[ErasedRunningTask], dict[str, Any]],
+        progress: Callable[[Transaction, ErasedRunningTask], bool] | None = None,
     ) -> ErasedRunningTask | None:
+        """One decision on the Session line before a phase, in a recorded region.
+
+        The rules and the running record are read in :meth:`_region`, so a decision never stands on
+        a record an earlier admitted commit has replaced; what it decided is then applied, once.
+        """
+
         fault: dict[str, Any] = {}
 
+        def plan() -> tuple[ErasedRunningTask | None, dict[str, Any]]:
+            found = self._live_record(invocation.task_id)
+            if found is None or found["state"]["status"] != "running" or self._closing:
+                return None, {"plan": "end"}
+            current = cast(ErasedRunningTask, found)
+            return current, rules(current)
+
         async def step(tx: Transaction) -> ErasedRunningTask | None:
-            found = self._live.get(invocation.task_id)
-            current = (
-                cast(ErasedRunningTask, found)
-                if found is not None and found["state"]["status"] == "running"
-                else None
-            )
-            decision = decide(tx, current) if current is not None and not self._closing else False
-            if decision is True:
+            current, step_plan = await self._region(plan)
+            kind = step_plan["plan"]
+            if kind == "continue":
                 return current
+            if kind == "progress" and progress is not None and progress(tx, cast(ErasedRunningTask, current)):
+                return current
+            # Ending happens inside the step, before a fault's Harness cleanup.
             self._end(invocation)
-            if decision is not False:
-                fault["error"] = decision["fault"]
-                message = error_message(decision["fault"])
+            if kind == "cascade":
+                self._cascade_pending = True
+                self._schedule_reconcile()
+            if kind == "fault":
+                fault["error"] = step_plan["error"]
+                message = error_message(step_plan["error"])
                 await self._terminate(
                     tx,
                     cast(AnyTaskRecord, current),
@@ -1905,7 +2440,7 @@ class TaskScheduler:
         try:
             # The step writes the scheduler's own decision; the invocation's signal must not cancel it,
             # since the fault or the terminal record has to land.
-            continued = await self._session.commit_with(step, without_abort_signal(invocation.context))
+            continued = await self._session.commit_internal(step, without_abort_signal(invocation.context))
         except BaseException as error:
             self._end(invocation)
             if not is_failure(error):
@@ -1916,13 +2451,15 @@ class TaskScheduler:
         if "error" in fault:
             self._report(
                 fault["error"],
-                {"type": "task_faulted", **self._about_task(invocation), "reason": "threw"},
+                {"kind": "task_faulted", **self._about_task(invocation), "reason": "threw"},
             )
         return continued
 
     async def _terminate(self, tx: Transaction, record: AnyTaskRecord, outcome: Mapping[str, Any]) -> None:
         await self._load_scopes(False)
-        if self._has_owned_live(record["id"], _overlay_of(tx)):
+        if await self._region(
+            lambda: self._has_owned_live(record["id"], _overlay_of(tx)), self._reload_scopes
+        ):
             tx.set_task(with_state(record, {"status": "completing", "outcome": outcome}))
             return
         tx.set_task(with_state(record, {"status": "terminal", "outcome": outcome}))
@@ -1944,7 +2481,9 @@ class TaskScheduler:
             await self._load_scopes(False)
             for record in overlay["tasks"].values():
                 await self._load_chain(parent_of(record), overlay)
-            if self._has_owned_live(current["id"], overlay):
+            if await self._region(
+                lambda: self._has_owned_live(current["id"], overlay), self._reload_scopes
+            ):
                 tx.set_task(
                     with_state(progressed(current), {"status": "completing", "outcome": following["outcome"]})
                 )
@@ -1964,33 +2503,80 @@ class TaskScheduler:
     ) -> None:
         if invocation.mode == "abort":
             raise RuntimeError(f"Abort handler of task {current['id']} cannot wait")
-        overlay = _overlay_of(tx)
-        targets: list[TaskId] = []
-        for id in on:
-            member = (
-                overlay["tasks"].get(id)
-                or self._live.get(id)
-                or (await self._storage.task(id, self._context))
+        # Owned work is found by walks down, which need the chains of every live task loaded.
+        await self._load_scopes(False)
+        # Tasks in ``on`` that are not live, read from Storage: terminal, or missing.
+        ended: dict[TaskId, AnyTaskRecord | None] = {}
+        while True:
+            checked = await self._region(
+                lambda: self._check_wait(current, on, policy, _overlay_of(tx), ended),
+                self._reload_scopes,
             )
+            if checked is None:
+                return
+            if "missing" in checked:
+                for id in checked["missing"]:
+                    ended[id] = await self._storage.task(id, self._context)
+                continue
+            raise checked["error"]
+
+    def _check_wait(
+        self,
+        current: ErasedRunningTask,
+        on: Sequence[TaskId],
+        policy: str,
+        overlay: dict[str, Any],
+        ended: Mapping[TaskId, AnyTaskRecord | None],
+    ) -> dict[str, Any] | None:
+        """``_validate_wait``'s decision region: why the wait is refused, ``None`` when it may be
+        stored, or the tasks in ``on`` it needs from Storage first, when ``ended`` lacks them.
+
+        Each record it reads is read through :meth:`_live_record`, so a wait admitted behind another
+        task's unpublished wait waits for that publication and decides again: the second of two
+        opposite waits is refused rather than stored, which is what keeps the wait-for graph acyclic.
+        """
+
+        targets: list[TaskId] = []
+        missing: list[TaskId] = []
+        for id in on:
+            member = overlay["tasks"].get(id) or self._live_record(id)
             if member is None:
-                raise ValueError(f"Task {id} does not exist")
+                if id not in ended:
+                    missing.append(id)
+                    continue
+                stored = ended[id]
+                if stored is None:
+                    return {"error": ValueError(f"Task {id} does not exist")}
+                member = stored
             if policy == "failFast" and member.get("owner") != current["id"]:
-                raise ValueError(
-                    f"Task {current['id']} can wait failFast only on tasks it owns; {id} is not one"
-                )
+                return {
+                    "error": ValueError(
+                        f"Task {current['id']} can wait failFast only on tasks it owns; {id} is not one"
+                    )
+                }
+            # A live child already holds the waiter (task-owned tasks are never background): waiting
+            # on it adds no edge. A terminal task has no edges.
             if member["state"]["status"] != "terminal" and member.get("owner") != current["id"]:
                 targets.append(id)
+        if missing:
+            return {"missing": missing}
         if not targets:
-            return
-        cycle = await self._wait_cycle(current["id"], targets, overlay)
-        if cycle is not None:
-            path = " -> ".join(str(id) for id in [current["id"], *cycle])
-            raise ValueError(f"Task {current['id']} cannot wait on {cycle[0]}: {path} is a wait cycle")
+            return None
+        cycle = self._wait_cycle(current["id"], targets, overlay)
+        if cycle is None:
+            return None
+        path = " -> ".join(str(id) for id in [current["id"], *cycle])
+        return {
+            "error": ValueError(
+                f"Task {current['id']} cannot wait on {cycle[0]}: {path} is a wait cycle"
+            )
+        }
 
-    async def _wait_cycle(
-        self, task: TaskId, on: Sequence[TaskId], overlay: dict[str, Any]
-    ) -> list[TaskId] | None:
-        await self._load_scopes(False)
+    def _wait_cycle(self, task: TaskId, on: Sequence[TaskId], overlay: dict[str, Any]) -> list[TaskId] | None:
+        """The path from a member of ``on`` back to ``task``, if the wait would close a cycle (spec
+        section 5.1). Part of a decision region: every record it reads is read keyed.
+        """
+
         from_map: dict[TaskId, TaskId | None] = {}
         walked: set[TaskId] = set()
         pending: list[TaskId] = []
@@ -2015,7 +2601,7 @@ class TaskScheduler:
             id = pending.pop()
             if id == task:
                 return path(id)
-            record = overlay["tasks"].get(id) or self._live.get(id)
+            record = overlay["tasks"].get(id) or self._live_record(id)
             if record is None or record["state"]["status"] == "terminal":
                 continue
             if record["state"]["status"] == "waiting" and not record.get("abortRequested"):
@@ -2050,6 +2636,9 @@ class TaskScheduler:
 
     def _idle(self, conversation_id: ConversationId | None) -> bool:
         scope: Scope = {"roots": True} if conversation_id is None else {"conversation": conversation_id}
+        # In a decision region, global idle reads the roots it starts from.
+        if conversation_id is None:
+            self._record(ROOTS_KEY)
         for id in self._unloaded:
             record = self._live.get(id)
             if (
@@ -2090,7 +2679,7 @@ class _HookRunner:
                 self._scheduler._report(
                     error,
                     {
-                        "type": "extension_error",
+                        "kind": "extension_error",
                         "extension": entry["extension"],
                         "task": report_task(self._invocation),
                     },
@@ -2147,18 +2736,40 @@ class _Runtime:
     def hooks(self) -> _HookRunner:
         return _HookRunner(self._scheduler, self._invocation, self._phase)
 
-    def commit(self, change: Callable[..., Any], context: Context) -> asyncio.Future[None]:
+    def commit(
+        self,
+        change: Callable[..., Any],
+        context: Context,
+        options: CommitOptions | None = None,
+    ) -> asyncio.Future[None]:
         async def run() -> None:
+            interrupted: dict[str, Any] | None = None
+
             async def apply(tx: Transaction, current: ErasedRunningTask) -> None:
+                nonlocal interrupted
                 result = _invoke_change(change, tx, current)
                 if hasattr(result, "__await__"):
                     following = await cast(Awaitable[Any], result)
                 else:
                     following = result
-                if following is not None:
-                    await self._scheduler._commit_state(tx, self._invocation, current, following)
+                if following is None:
+                    return
+                # A task that ends for crashes says so (`task_interrupted`), so a host keeps a
+                # crash-loop signal; what it says is read before the state is written.
+                interrupted = interrupted_report(following, current)
+                await self._scheduler._commit_state(tx, self._invocation, current, following)
 
-            await self._gated(apply, context)
+            await self._gated(apply, context, options)
+            if interrupted is not None:
+                self._scheduler._report(
+                    RuntimeError(interrupted["message"]),
+                    {
+                        "kind": "task_interrupted",
+                        **self._scheduler._about_task(self._invocation),
+                        "reason": interrupted["reason"],
+                        "restarts": interrupted["restarts"],
+                    },
+                )
 
         commit = asyncio.ensure_future(run())
         self._invocation.commits.add(commit)
@@ -2249,7 +2860,7 @@ class _Runtime:
     async def get_task(self, id: TaskId, context: Context) -> TaskRecord | None:
         self._check()
         return await self._read(
-            lambda: self._scheduler._session.read_on_line(lambda: self._scheduler._storage.task(id, context)),
+            lambda: self._scheduler._session.read_on_line(lambda line: line.task(id, context)),
             context,
         )
 
@@ -2264,7 +2875,7 @@ class _Runtime:
     async def owned_tasks(self, context: Context) -> list[TaskRecord]:
         self._check()
 
-        async def read() -> list[TaskRecord]:
+        async def read(_line: Storage) -> list[TaskRecord]:
             if self._invocation.ended:
                 raise _ended_error(self._invocation)
             if context.abort_signal is not None:
@@ -2291,9 +2902,7 @@ class _Runtime:
         bound = with_abort_signal(self._invocation.controller.signal, context)
 
         async def abort() -> None:
-            record = await self._scheduler._session.read_on_line(
-                lambda: self._scheduler._storage.task(id, bound)
-            )
+            record = await self._scheduler._session.read_on_line(lambda line: line.task(id, bound))
             if record is None or record.get("owner") != self._invocation.task_id:
                 raise ValueError(f"Task {id} is not owned by task {self._invocation.task_id}")
             if record["state"]["status"] == "terminal":
@@ -2306,10 +2915,10 @@ class _Runtime:
     async def outcomes(self, ids: Sequence[TaskId], context: Context) -> list[TaskOutcome]:
         self._check()
 
-        async def read() -> list[TaskOutcome]:
+        async def read(line: Storage) -> list[TaskOutcome]:
             outcomes: list[TaskOutcome] = []
             for id in ids:
-                record = await self._scheduler._storage.task(id, context)
+                record = await line.task(id, context)
                 state = None if record is None else record["state"]
                 if state is None or state["status"] != "terminal":
                     raise ValueError(f"Task {id} is not terminal")
@@ -2341,13 +2950,32 @@ class _Runtime:
             token, id, context = args[0], args[1], args[2]
 
         async def read() -> Any:
-            found = await self._scheduler._session.read_on_line(
-                lambda: self._scheduler._storage.entry(self._invocation.conversation_id, id, context)
-            )
-            entry = None if found is None else found["entry"]
+            # An entry of the conversation's kept context range is committed and visible: no Storage read.
+            kept = self._scheduler._contexts.get(self._invocation.conversation_id)
+            entry: EntryRecord | None = None if kept is None else range_entry(kept["range"], id)
+            if entry is None:
+                lookup = await self._scheduler._session.read_on_line(
+                    lambda line: line.entry(self._invocation.conversation_id, id, context)
+                )
+                entry = None if lookup is None else lookup["entry"]
             if token is None or entry is None or entry.get("kind") == token.kind:
                 return entry
             return None
+
+        return await self._read(read, context)
+
+    async def entries(
+        self, query: Mapping[str, Any], limit: int, cursor: Any, context: Context
+    ) -> Any:
+        # The task's conversation's committed raw history, fork-aware. The scan is the one
+        # ``Conversation.entries()`` builds, and the read takes the Session line like every other
+        # runtime read, so it settles on committed state only (upstream ``scheduler.ts:2828-2834``).
+        scan = conversation_entries(self._invocation.conversation_id, query)
+
+        async def read() -> Any:
+            return await self._scheduler._session.read_on_line(
+                lambda line: line.scan_entries(scan, limit, cursor, context)
+            )
 
         return await self._read(read, context)
 
@@ -2366,6 +2994,13 @@ class _Runtime:
                 at,
                 None if kept is None else kept["range"],
             )
+            # Checked again here, before the install below: a commit published since the read returned
+            # was not seen by ``_advance_contexts()``, so a range that missed it must not be advanced.
+            if context_range is not None:
+                context_range = demote_missed(
+                    context_range,
+                    self._scheduler._session.known_latest_entry_id(conversation_id),
+                )
             current = self._scheduler._contexts.get(conversation_id)
             if (
                 context_range is not None
@@ -2373,20 +3008,38 @@ class _Runtime:
                 and not self._invocation.ended
                 and (current is None or current["range"]["bounds"]["tail"] <= context_range["bounds"]["tail"])
             ):
+                # A read of another, idle conversation starts or continues its retention period.
                 if not self._scheduler._idle(conversation_id):
                     self._scheduler._contexts[conversation_id] = {
                         "range": context_range,
                         "idle_since": None,
+                        "expires_at": None,
                     }
+                    self._scheduler._idle_order.pop(conversation_id, None)
                 elif self._scheduler._context_retention_ms() > 0:
+                    # An idle period already started keeps its expiry and its place; a new one starts now.
+                    idle_since = (
+                        current["idle_since"]
+                        if current is not None and current["idle_since"] is not None
+                        else self._scheduler._now()
+                    )
+                    continues = (
+                        current is not None
+                        and current["idle_since"] is not None
+                        and current.get("expires_at") is not None
+                    )
+                    expires_at = (
+                        current["expires_at"]
+                        if continues and current is not None
+                        else idle_since + self._scheduler._context_retention_ms()
+                    )
                     self._scheduler._contexts[conversation_id] = {
                         "range": context_range,
-                        "idle_since": (
-                            current["idle_since"]
-                            if current is not None and current["idle_since"] is not None
-                            else self._scheduler._now()
-                        ),
+                        "idle_since": idle_since,
+                        "expires_at": expires_at,
                     }
+                    if current is None or current["idle_since"] is None:
+                        self._scheduler._mark_idle(conversation_id, idle_since)
                     self._scheduler._schedule_expiry()
             return view
 
@@ -2396,21 +3049,22 @@ class _Runtime:
         self._check()
         return self._scheduler._now()
 
-    def report(self, error: BaseException, from_: Mapping[str, Any] | None = None) -> None:
+    def report(self, error: BaseException, from_: ReportFrom | None = None) -> None:
         self._check()
         # The task's own failure names the task's extension; any other names whose code failed.
+        # The tag decides which, and ``kind`` is the only tag a source carries.
         task = report_task(self._invocation)
         if from_ is None:
-            info: ReportInfo = {"type": "task_error", **self._scheduler._about_task(self._invocation)}
-        elif from_.get("type") == "extension":
+            info: ReportInfo = {"kind": "task_error", **self._scheduler._about_task(self._invocation)}
+        elif from_["kind"] == "extension":
             info = {
-                "type": "extension_error",
+                "kind": "extension_error",
                 "task": task,
-                **optional_extension(cast(str | None, from_.get("extension"))),
+                **optional_extension(from_.get("extension")),
             }
         else:
             info = {
-                "type": "host_error",
+                "kind": "host_error",
                 "callback": cast(Any, from_.get("callback")),
                 "task": task,
             }
@@ -2425,6 +3079,7 @@ class _Runtime:
         self,
         change: Callable[[Transaction, ErasedRunningTask], Awaitable[Any] | Any],
         context: Context,
+        options: CommitOptions | None = None,
     ) -> Any:
         if self._invocation.ended:
             raise _ended_error(self._invocation)
@@ -2434,14 +3089,21 @@ class _Runtime:
                 raise _ended_error(self._invocation)
             if self._scheduler._closing:
                 raise closed_error(self._scheduler._session)
-            found = self._scheduler._live.get(self._invocation.task_id)
-            if found is None:
-                raise ValueError(f"Task {self._invocation.task_id} is terminal")
-            if found["state"]["status"] != "running":
-                raise ValueError(f"Task {self._invocation.task_id} is {found['state']['status']}")
-            current = cast(ErasedRunningTask, found)
-            if self._invocation.mode == "run" and current.get("abortRequested"):
-                raise ValueError(f"Task {self._invocation.task_id} has a durable abort mark")
+
+            def current_record() -> ErasedRunningTask:
+                found = self._scheduler._live_record(self._invocation.task_id)
+                if found is None:
+                    raise ValueError(f"Task {self._invocation.task_id} is terminal")
+                if found["state"]["status"] != "running":
+                    raise ValueError(f"Task {self._invocation.task_id} is {found['state']['status']}")
+                if self._invocation.mode == "run" and found.get("abortRequested"):
+                    raise ValueError(f"Task {self._invocation.task_id} has a durable abort mark")
+                return cast(ErasedRunningTask, found)
+
+            current = await self._scheduler._region(current_record)
+            # The step that ends the invocation may have run while the region waited.
+            if self._invocation.ended:
+                raise _ended_error(self._invocation)
             result = change(tx, current)
             if hasattr(result, "__await__"):
                 result = await cast(Awaitable[Any], result)
@@ -2453,7 +3115,8 @@ class _Runtime:
             return await self._scheduler._session.commit_with(
                 apply,
                 context,
-                TransactionScope(
+                options=options,
+                scope=TransactionScope(
                     conversation_id=self._invocation.conversation_id,
                     task_id=self._invocation.task_id,
                 ),
@@ -2516,6 +3179,7 @@ __all__ = [
     "cancellation_intent",
     "conversation_node",
     "conversation_of",
+    "ended_by_crashes",
     "failed_outcome",
     "json_equal",
     "memo_of",

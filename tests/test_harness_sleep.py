@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from session_support import context, flush
+from session_support import attached_graph, context, flush
 from task_support import aborted, aborted_with, completed, eventually, open_tasks
 
 from pi_durable import MemoryStorage, define_extension, define_task
@@ -49,7 +49,7 @@ class _Runs:
         self.after = 0
 
 
-def _nap_task(delay: int, runs: _Runs | None = None) -> Any:
+def _nap_task(delay: int, runs: _Runs | None = None, name: str = "test.nap") -> Any:
     """Sleeps ``delay`` ms on the Harness clock, then completes with the time it resumed at."""
 
     state = runs if runs is not None else _Runs()
@@ -67,7 +67,7 @@ def _nap_task(delay: int, runs: _Runs | None = None) -> Any:
 
     return define_task(
         {
-            "name": "test.nap",
+            "name": name,
             "version": 1,
             "initial": lambda _input: {"phase": "start"},
             "phases": {"start": start, "after": after},
@@ -128,7 +128,7 @@ async def test_sleeps_without_an_invocation_and_resumes_at_its_checkpoint_once_d
         MemoryStorage(), [Nap], {"now": lambda: clock[0], "on_wake": wakes.append}
     )
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     id = await _start_nap(harness, Nap)
     harness.resume()
     await eventually(_sleeping(harness, id))
@@ -389,6 +389,53 @@ async def test_arms_no_timer_for_sleeps_with_on_wake() -> None:
     assert harness.wake() == {"active": True}
     harness.resume()
     assert (await harness.wait_for_task(id, context))["state"]["outcome"]["status"] == "completed"
+    await harness.close(context)
+
+
+async def test_settles_a_commit_that_changes_the_wake_while_the_host_is_inside_on_wake() -> None:
+    """Port-authored case for spec §5.6's "in a microtask the line never waits for".
+
+    Upstream's ``harness-sleep`` suite has no case of its own for that clause: upstream's and the
+    port's ``onWake`` callbacks are both synchronous, so in this port's single-process loop the
+    proof is an ordering one. The host is handed the wake while the line is still settling the commit
+    that changes it: the host sees the first nap's deadline only while the second nap's sleep commit
+    is unsettled, and the changed value arrives only once that commit has settled. The unchanged
+    value is not repeated.
+    """
+
+    clock = [1_000]
+    wakes: list[dict[str, Any]] = []
+    nap_a = _nap_task(1_000, name="test.nap-a")
+    nap_b = _nap_task(500, name="test.nap-b")
+    opened = await open_tasks(
+        MemoryStorage(), [nap_a, nap_b], {"now": lambda: clock[0], "on_wake": wakes.append}
+    )
+    harness = opened["harness"]
+    id_a = await _start_nap(harness, nap_a)
+    harness.resume()
+    id_b = await _start_nap(harness, nap_b)
+    await eventually(lambda: any(wake.get("at") == 2_000 for wake in wakes))
+    await eventually(lambda: any(wake.get("at") == 1_500 for wake in wakes))
+    first_2000 = next(i for i, wake in enumerate(wakes) if wake.get("at") == 2_000)
+    first_1500 = next(i for i, wake in enumerate(wakes) if wake.get("at") == 1_500)
+    # The host saw the first nap's deadline while the second nap's sleep commit was still on the line;
+    # the changed value arrives only once it has settled. No wake hop blocks the line, so both the
+    # delivery and the commit's settling ran off it.
+    assert first_2000 < first_1500
+    assert all(old != new for old, new in zip(wakes, wakes[1:], strict=False))
+    assert opened["reports"] == []
+    clock[0] = 1_500
+    harness.resume()
+    assert (await harness.wait_for_task(id_b, context))["state"]["outcome"] == {
+        "status": "completed",
+        "result": 1_500,
+    }
+    clock[0] = 2_000
+    harness.resume()
+    assert (await harness.wait_for_task(id_a, context))["state"]["outcome"] == {
+        "status": "completed",
+        "result": 2_000,
+    }
     await harness.close(context)
 
 

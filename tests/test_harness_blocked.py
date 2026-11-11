@@ -1,12 +1,14 @@
-"""Translated v1.4.0 ``harness-blocked`` suite: the crash-loop guard and parked tasks (spec §5.4).
+"""Translated upstream ``harness-blocked`` suite: the crash-loop guard (spec §5.4).
 
 Open counts every surviving ``running`` task as cut off and writes it back as ``pending`` with
 ``restarts`` one higher; a state the task commits that differs from its current one is progress and
 clears the count, while a close writes the tasks it stopped back as ``pending`` uncounted. At
-``settings.restart_limit`` the task is parked: blocked with reason ``restart_limit``, reported once
-as ``task_parked``, not active in ``wake()``, and run again by ``Harness.retry_task()``. An abort
-mark restarts the count and still runs the handler; an abort handler cut off that many times ends
-the task ``faulted``. The task graph publishes why a task cannot run and follows registry changes.
+``settings.restart_limit`` a task of a kind that does not end itself at the limit -- any extension's
+kind -- is ended ``faulted`` by the reservation that would have run it again, with one
+``task_faulted`` report carrying ``reason: "restart_limit"``; the built-in kinds end themselves with
+their own outcome, asserted in their own suites. An abort mark restarts the count and still runs the
+handler; an abort handler cut off that many times ends the task ``faulted`` too. The task graph
+publishes why a task cannot run and follows registry changes.
 """
 
 from __future__ import annotations
@@ -14,12 +16,12 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
-from session_support import context, flush
+from session_support import attached_graph, context, flush
 from task_support import completed, deferred, eventually, open_tasks
 
 from pi_durable import define_extension, define_task
@@ -27,7 +29,8 @@ from pi_durable.context import Context
 from pi_durable.harness.harness import Harness
 from pi_durable.harness.registry import create_registry
 from pi_durable.storage.sqlite.posix import open_posix_sqlite_storage
-from pi_durable.types import Seq, StorageWrite
+from pi_durable.testing import commit_writes
+from pi_durable.types import StorageWrite
 
 _directories: list[Path] = []
 #: Storages of killed Harnesses, never closed by them: closed after each test.
@@ -121,7 +124,7 @@ class _KillableStorage:
 
 
 class _FailingOnceStorage:
-    """A Storage whose first ``commit`` rejects, as on a platform reset."""
+    """A Storage whose first ``commit_batches`` call rejects, as on a platform reset."""
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -131,16 +134,16 @@ class _FailingOnceStorage:
         value = getattr(self._inner, name)
         if not callable(value):
             return value
-        if name != "commit":
+        if name != "commit_batches":
             return value
 
-        async def commit(writes: Sequence[StorageWrite], commit_context: Context) -> Seq:
+        async def commit_batches(batches: Any, receive: Any, commit_context: Context) -> Any:
             if self.fail_next:
                 self.fail_next = False
                 raise RuntimeError("reset")
-            return await value(writes, commit_context)
+            return await value(batches, receive, commit_context)
 
-        return commit
+        return commit_batches
 
 
 async def _open_with(
@@ -204,32 +207,39 @@ async def test_keeps_the_hosts_wake_active_until_opens_recovery_pass_has_landed(
     record.pop("memos", None)
     record["state"] = {"status": "completing", "outcome": {"status": "completed", "result": None}}
     writes: list[StorageWrite] = [{"type": "task", "value": task_write(record)}]
-    await raw.commit(writes, context)
+    await commit_writes(raw, writes, context)
     await raw.close(context)
 
     # That pass's commit fails, as on a platform reset.
     inner = await open_posix_sqlite_storage(str(path))
     failing = _FailingOnceStorage(inner)
     wakes: list[dict[str, Any]] = []
-    opened = await open_tasks(
-        failing, [], {"registry": registry, "on_wake": wakes.append}
-    )
+    opened = await open_tasks(failing, [], {"registry": registry, "on_wake": wakes.append})
     harness = opened["harness"]
     closed = await harness.closed
-    assert closed["reason"] == "failed"
+    assert closed["kind"] == "failed"
     # The host was told work is underway, and never that it ended: its recovery alarm stays.
     assert wakes == [{"active": True}]
     await inner.close(context)
 
 
-async def test_parks_a_task_cut_off_restart_limit_times_in_a_row_and_runs_it_again_on_retry() -> None:
+async def test_faults_an_extension_task_cut_off_restart_limit_times_instead_of_running_it_again() -> None:
+    """Upstream ``harness-blocked.test.ts`` :137: nothing is parked, the task ends ``faulted``.
+
+    A task of a kind that does not end itself at the limit — any extension's kind — is ended
+    ``faulted`` by the reservation that would have run it again, with one ``task_faulted`` report.
+    """
+
     path = _sqlite_path()
     state = {"crashing": True, "started": 0}
     registry = create_registry()
-    _register(registry, "loop", _crash_loop(state))
+    Loop = _crash_loop(state)
+    _register(registry, "loop", Loop)
     settings: dict[str, Any] = {"restart_limit": 3}
     opened = await _open_with(path, registry, settings)
-    id = await _root_task(opened["harness"], _crash_loop(state))
+    root = await opened["harness"].root(context)
+    id = await _root_task(opened["harness"], Loop)
+
     # Each open runs the phase, and each crash cuts it off: three restarts.
     def reached(count: int) -> Callable[[], bool]:
         return lambda: state["started"] == count
@@ -237,37 +247,34 @@ async def test_parks_a_task_cut_off_restart_limit_times_in_a_row_and_runs_it_aga
     for run in range(1, 4):
         opened["harness"].resume()
         await eventually(reached(run))
-        opened["kill"]()
+        opened["kill"]()  # a crash: a close would not count
         opened = await _open_with(path, registry, settings)
     harness = opened["harness"]
-    record = await harness.get_task(id, context)
-    assert record["restarts"] == 3
-    assert opened["infos"] == [
-        {
-            "type": "task_parked",
-            "task": {"id": id, "kind": "test.crash-loop", "conversationId": 1},
-            "extension": "loop",
-        }
-    ]
+    assert (await harness.get_task(id, context))["restarts"] == 3
+    # Nothing is parked: the task is ready, and the host is asked to run, which ends it.
     inspection = await harness.inspect(context)
     found = next(task for task in inspection["tasks"] if task["record"]["id"] == id)
-    assert found["state"] == {"kind": "blocked", "reason": "restart_limit"}
-    graph = await harness.task_graph(context)
-    assert graph.value["tasks"][str(id)]["blocked"] == "restart_limit"
-    # Parked work needs no process: nothing is active.
-    await eventually(lambda: not harness.wake()["active"])
-    assert harness.wake() == {"active": False}
+    assert found["state"] == {"kind": "pending", "migrates": False}
+    assert harness.wake()["active"] is True
     harness.resume()
-    # A scheduling pass runs within a few turns; it leaves the parked task out.
-    for _turn in range(5):
-        await flush()
+    settled = await harness.wait_for_task(id, context)
+    assert settled["state"]["outcome"] == {
+        "status": "faulted",
+        "error": {
+            "message": f"Task {id} (test.crash-loop) was cut off 3 times without progress",
+            "detail": {"reason": "restart_limit"},
+        },
+    }
     assert state["started"] == 3
-
-    state["crashing"] = False
-    await harness.retry_task(id, context)
-    assert (await harness.wait_for_task(id, context))["state"]["outcome"]["status"] == "completed"
-    assert state["started"] == 4
-    graph.dispose()
+    await eventually(lambda: opened["infos"] != [])
+    assert opened["infos"] == [
+        {
+            "kind": "task_faulted",
+            "task": {"id": id, "kind": "test.crash-loop", "conversationId": root.id},
+            "extension": "loop",
+            "reason": "restart_limit",
+        }
+    ]
     await harness.close(context)
 
 
@@ -370,7 +377,7 @@ async def test_faults_a_task_whose_abort_handler_is_cut_off_restart_limit_times(
     await eventually(lambda: opened["infos"] != [])
     assert opened["infos"] == [
         {
-            "type": "task_faulted",
+            "kind": "task_faulted",
             "task": {"id": id, "kind": "test.stuck-abort", "conversationId": 1},
             "extension": "stuck",
             "reason": "restart_limit",
@@ -379,7 +386,13 @@ async def test_faults_a_task_whose_abort_handler_is_cut_off_restart_limit_times(
     await opened["harness"].close(context)
 
 
-async def test_runs_a_parked_task_once_a_raised_restart_limit_no_longer_parks_it() -> None:
+async def test_reads_restart_limit_when_it_reserves_the_task_a_raised_one_runs_it_again() -> None:
+    """Upstream ``harness-blocked.test.ts``: the limit is read when the task is reserved.
+
+    Nothing parks the task between opens, so a raised limit lets the very next pass run it; there is
+    no retry entry point to ask for that.
+    """
+
     path = _sqlite_path()
     state = {"crashing": True, "started": 0}
     registry = create_registry()
@@ -392,24 +405,18 @@ async def test_runs_a_parked_task_once_a_raised_restart_limit_no_longer_parks_it
     await eventually(lambda: state["started"] == 1)
     opened["kill"]()  # a crash: a close would not count
     opened = await _open_with(path, registry, settings)
-    harness = opened["harness"]
-    graph = await harness.task_graph(context)
-    harness.resume()
-    await eventually(lambda: graph.value["tasks"][str(id)].get("blocked") == "restart_limit")
-    # Let a scheduling pass leave the parked task out.
-    for _turn in range(5):
-        await flush()
+    assert (await opened["harness"].get_task(id, context))["restarts"] == 1
     state["crashing"] = False
-    # The host's live settings change; the next pass runs the task.
+    # The host's live settings change before the task is reserved; it runs instead of ending.
     settings["restart_limit"] = float("inf")
-    harness.resume()
-    assert (await harness.wait_for_task(id, context))["state"]["outcome"]["status"] == "completed"
+    opened["harness"].resume()
+    assert (await opened["harness"].wait_for_task(id, context))["state"]["outcome"]["status"] == "completed"
     assert state["started"] == 2
-    graph.dispose()
-    await harness.close(context)
+    await opened["harness"].close(context)
 
 
-async def test_still_runs_the_abort_handler_of_a_parked_task() -> None:
+async def test_runs_the_abort_handler_of_a_task_at_the_limit() -> None:
+    """Upstream ``harness-blocked.test.ts``: an abort mark at the limit still runs its handler."""
     path = _sqlite_path()
     state = {"crashing": True, "started": 0}
     aborted: list[Any] = []
@@ -454,9 +461,7 @@ async def test_does_not_count_the_same_checkpoint_committed_again_as_progress() 
     async def run(task: Any, runtime: Any, ctx: Any) -> None:
         state["started"] += 1
         # Intent before an effect, then the effect never returns: the checkpoint is unchanged.
-        await runtime.commit(
-            lambda: {"status": "running", "checkpoint": task["state"]["checkpoint"]}, ctx
-        )
+        await runtime.commit(lambda: {"status": "running", "checkpoint": task["state"]["checkpoint"]}, ctx)
         await _hang_until_aborted(runtime.signal)
 
     Intent = define_task(
@@ -473,6 +478,7 @@ async def test_does_not_count_the_same_checkpoint_committed_again_as_progress() 
     settings: dict[str, Any] = {"restart_limit": 2}
     opened = await _open_with(path, registry, settings)
     id = await _root_task(opened["harness"], Intent)
+
     def started_once(count: int) -> Callable[[], bool]:
         return lambda: state["started"] == count
 
@@ -484,8 +490,12 @@ async def test_does_not_count_the_same_checkpoint_committed_again_as_progress() 
         opened = await _open_with(path, registry, settings)
     record = await opened["harness"].get_task(id, context)
     assert record["restarts"] == 2
-    inspection = await opened["harness"].inspect(context)
-    assert inspection["tasks"][0]["state"] == {"kind": "blocked", "reason": "restart_limit"}
+    opened["harness"].resume()
+    settled = await opened["harness"].wait_for_task(id, context)
+    outcome = settled["state"]["outcome"]
+    assert outcome["status"] == "faulted"
+    assert outcome["error"]["detail"] == {"reason": "restart_limit"}
+    assert state["started"] == 2
     await opened["harness"].close(context)
 
 
@@ -578,7 +588,7 @@ async def test_tells_the_graph_and_the_host_when_a_migration_fails() -> None:
     _register(second, "v2", V2)
     opened = await _open_with(path, second)
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     harness.resume()
     await eventually(lambda: graph.value["tasks"][str(id)].get("blocked") == "migration_failed")
     await eventually(lambda: not harness.wake()["active"])
@@ -611,7 +621,7 @@ async def test_shows_an_abandoned_task_waiting_for_its_definition_as_blocked() -
     # The next open marks it `restart`; without its definition, it waits for one to clean up.
     opened = await _open_with(path, create_registry())
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
     harness.resume()
     await eventually(_abort_reason(harness, id, "restart"))
     await eventually(lambda: graph.value["tasks"][str(id)].get("blocked") == "missing_task")
@@ -632,7 +642,7 @@ async def test_shows_a_task_without_a_definition_as_blocked_and_wakes_the_host_o
     path = _sqlite_path()
     opened = await _open_with(path, registry)
     harness = opened["harness"]
-    graph = await harness.task_graph(context)
+    graph = await attached_graph(harness, context)
 
     async def run(_task: Any, runtime: Any, ctx: Any) -> None:
         await runtime.commit(lambda: completed(None), ctx)

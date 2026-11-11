@@ -11,7 +11,10 @@ from pi_durable.ids import (
     SubmissionId,
     TaskId,
 )
+from pi_durable.testing import commit_writes
 from pi_durable.types import (
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
@@ -38,9 +41,16 @@ class FakeStorage:
     def __init__(self) -> None:
         self.closed = False
 
-    async def commit(self, writes: Sequence[StorageWrite], context: Context) -> Seq:
+    async def commit_batches(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
         assert context is BACKGROUND_CONTEXT
-        return Seq(1)
+        for index in range(len(batches)):
+            receive(index, Seq(index + 1))
+        return {"stored": len(batches)}
 
     async def mint_id(self) -> ConversationId:
         return ConversationId(2)
@@ -144,7 +154,7 @@ def test_storage_protocol_is_structural() -> None:
 
 def test_storage_protocol_matches_the_reference_operation_names() -> None:
     assert {
-        "commit",
+        "commit_batches",
         "mint_id",
         "conversation",
         "scan_conversations",
@@ -178,11 +188,22 @@ def test_both_entry_overloads_take_a_context() -> None:
         assert "context" in inspect.signature(overload).parameters
 
 
+def test_the_single_write_commit_form_is_gone_from_the_protocol() -> None:
+    """The storage protocol has exactly one commit shape: the retired signature is not a member."""
+
+    assert "commit" not in set(Storage.__dict__)
+
+
 async def test_minimal_storage_operations_round_trip() -> None:
     storage = FakeStorage()
     assert isinstance(storage, Storage)
     assert await storage.mint_id() == 2
-    assert await storage.commit([], BACKGROUND_CONTEXT) == 1
+    assert (
+        await commit_writes(
+            storage, [{"type": "conversation", "value": {"id": ConversationId(1)}}], BACKGROUND_CONTEXT
+        )
+        == 1
+    )
     assert await storage.conversation(ConversationId(1), BACKGROUND_CONTEXT) is None
     assert await storage.entry(EntryId(2), BACKGROUND_CONTEXT) is None
     assert await storage.entry(ConversationId(1), EntryId(2), BACKGROUND_CONTEXT) is None

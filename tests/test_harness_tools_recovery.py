@@ -28,6 +28,7 @@ from tool_support import (
 
 from pi_durable import GenerationTask, LiveDoc, ToolTask
 from pi_durable.storage.sqlite.posix import open_posix_sqlite_storage
+from pi_durable.testing import commit_writes
 
 
 def call(name: str, call_id: str = "c1") -> dict[str, Any]:
@@ -389,14 +390,14 @@ async def test_migrates_a_version_1_tool_record_and_answers_it_as_model_issued(t
         "assistant": record["input"]["assistant"],
         "callId": record["input"]["callId"],
     }
-    await storage.commit([{"type": "task", "value": legacy}], context)
+    await commit_writes(storage, [{"type": "task", "value": legacy}], context)
     await storage.close(context)
 
     opened = await open_path(path, setup)
     submission = await opened["harness"].submission(submission_id, context)
     assert (await submission.wait(context))["status"] == "done"
     migrated = await opened["harness"].get_task(task_id, context)
-    assert migrated["version"] == 2
+    assert migrated["version"] == ToolTask.definition.version
     assert migrated["input"]["kind"] == "model"
     [tool_result] = results(await all_entries(opened["root"]))
     assert result_text(tool_result) == (

@@ -13,6 +13,18 @@ what remains different.
 **Scope records:** [ADR 0001](./adr/0001-parity-baseline-and-boundary.md) (baseline and boundary)
 and [ADR 0002](./adr/0002-upstream-1-4-0-scope.md) (the 1.4.0 exclusions).
 
+> **What this record is.** It is the v1.4.0 audit as it closed at tag `v1.4.0`, and it is read that
+> way: every claim below — the 61-suite result, the suite list, the file names it cites, the
+> deviations, the seams each guarantee is proved on, and the line above that every contract row is
+> `tested` or `excluded` — states that baseline, not the tree at a later one. Two of the files it
+> names are gone with the surfaces upstream deleted at 1.5.0: `test_harness_events.py` and
+> `test_session_states.py`. A later sync writes beside this file and never over it. The v1.5.0
+> record has one owner,
+> [`parity-report-1.5.0.md`](./parity-report-1.5.0.md): the suites this baseline deleted or remapped
+> (`harness-events` went with the agent event stream, and the state-getter suite `session-states`
+> went with the getters), the content the telemetry bullet below counts on the event stream for, and
+> every 1.5.0 exclusion and completion claim are recorded there and read from there.
+
 ## Result
 
 - All 61 in-scope upstream `test/*.test.ts` suites have a Python translation.

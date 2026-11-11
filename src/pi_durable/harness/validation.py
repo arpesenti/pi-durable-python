@@ -34,6 +34,44 @@ class ToolArgumentError(ValueError):
     """Invalid arguments for a tool call, with the message the model reads."""
 
 
+class ToolSchemaError(ValueError):
+    """A tool's JSON Schema is refused where it is compiled, because a ``$ref`` names nothing.
+
+    Upstream compiles a tool's schemas with ``@earendil-works/pi-schema``'s ``compile()``, whose
+    resolver throws for a reference that names nothing (``packages/schema/src/resolver.ts``). Both
+    of its call sites pass ``unresolvedRefs: "reject"``, which instead resolves the dangling place
+    to ``false`` so no value passes there; the words for it are ``unresolved reference <ref>``
+    (``packages/schema/src/explain.ts:108``). The port refuses the schema where it is compiled,
+    which is where its own validator is built, because ``jsonschema`` would otherwise discover the
+    dangling reference lazily while a value is checked. The message is upstream's own words.
+    """
+
+
+# ── Object schemas are closed unless they are opened ────────────────────────
+
+#: The keywords that make a schema the builder's ``obj()`` shape: it names the properties a value
+#: may carry, so an unmentioned property is one the tool never declared. Upstream's ``obj()`` always
+#: writes ``properties`` (``packages/schema/src/builders.ts:194-198``) and ``map()`` always writes
+#: ``additionalProperties`` (``builders.ts:137``), so neither builder ever leaves an object naming
+#: neither; a raw schema that does constrains no property name, and stays open.
+_OBJECT_SHAPE_KEYWORDS = ("properties", "required")
+
+
+def is_closed_by_default(schema: Any) -> bool:
+    """Whether ``schema`` is an object schema the port compiles closed.
+
+    Upstream's ``obj()`` builder writes ``additionalProperties: false`` unless it is passed
+    ``{open: true}`` -- ``...(open === true ? {} : { additionalProperties: false })``,
+    ``@earendil-works/pi-schema`` ``packages/schema/src/builders.ts:197``. With no builder here, a
+    plain mapping says the same thing by naming its properties and leaving ``additionalProperties``
+    unwritten; ``additionalProperties: true`` is the port's spelling of ``{open: true}``.
+    """
+
+    if not isinstance(schema, Mapping) or "additionalProperties" in schema:
+        return False
+    return any(keyword in schema for keyword in _OBJECT_SHAPE_KEYWORDS)
+
+
 def validate_tool_arguments(tool: Any, call: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a call's arguments against the tool's schema, returning the coerced arguments.
 
@@ -214,7 +252,7 @@ def _object_errors(value: dict[str, Any], schema: Mapping[str, Any], path: str) 
         if name in properties:
             found.extend(_errors(item, properties[name], item_path))
             continue
-        additional = schema.get("additionalProperties")
+        additional = schema.get("additionalProperties", False if is_closed_by_default(schema) else True)
         if additional is False:
             found.append((_path_of(item_path), "Expected not to have additional properties"))
         elif isinstance(additional, Mapping):
@@ -403,12 +441,210 @@ _STRUCTURED_VALIDATORS: OrderedDict[int, tuple[Any, Any]] = OrderedDict()
 first, so a long-lived process with many short-lived tools does not accumulate them."""
 
 
+#: The base URI references in a schema without an ``$id`` resolve against. The same one upstream's
+#: validator uses, so a relative reference means the same thing in both.
+DEFAULT_BASE = "https://json-schema.invalid/root.json"
+
+
+def structured_output_path(pointer: str) -> str:
+    """A JSON Pointer as the dotted path a diagnostic names: ``/edits/0/oldText`` -> ``edits.0.oldText``.
+
+    Upstream's rule, transcribed from ``formatValidationPath`` in pi-ai 1.5.0
+    ``src/utils/validation.ts:21``, which both of its validators use: the empty pointer is ``root``;
+    otherwise drop the leading ``/``, split on ``/``, unescape ``~1`` as ``/`` and ``~0`` as ``~``,
+    and join with ``.``.
+    """
+
+    if not pointer:
+        return "root"
+    segments = [
+        segment.replace("~1", "/").replace("~0", "~") for segment in pointer.removeprefix("/").split("/")
+    ]
+    return ".".join(segments)
+
+
+def invalid_structured_output_message(name: str, pointer: str, message: str | None) -> str:
+    """Upstream's ``invalid_structured_output`` wording for a value that breaks its schema.
+
+    Verbatim from ``src/harness/tool.ts:777-801`` ``structuredOutputError``, including the ``invalid``
+    fallback when the validator gives the first error no message. Only the validator behind
+    ``message`` is the port's own (``jsonschema``); see ``PARITY.md`` Allowed deviations.
+    """
+
+    return (
+        f"Tool {name} returned structuredOutput that does not match its schema: "
+        f"{structured_output_path(pointer)}: {message or 'invalid'}"
+    )
+
+
+def _each_schema(node: Any) -> Any:
+    """Every schema ``node`` holds, itself first, walking only the keywords that hold subschemas.
+
+    A ``$ref`` or ``additionalProperties`` inside ``enum``, ``const`` or an unknown keyword names
+    nothing and closes nothing, so those values are not walked -- the discipline upstream's
+    resolver keeps for the same reason.
+    """
+
+    if isinstance(node, list):
+        for item in node:
+            yield from _each_schema(item)
+        return
+    if not isinstance(node, Mapping):
+        return
+    yield node
+    for key, value in list(node.items()):
+        if key in _SCHEMA_KEYWORDS:
+            yield from _each_schema(value)
+        elif key in _SCHEMA_MAP_KEYWORDS and isinstance(value, Mapping):
+            for item in value.values():
+                yield from _each_schema(item)
+
+
+_ESCAPE_TABLE = (("~", "~0"), ("/", "~1"))
+
+
+def _escape_pointer(segment: str) -> str:
+    for character, escape in _ESCAPE_TABLE:
+        segment = segment.replace(character, escape)
+    return segment
+
+
+_REF_KEYWORDS = ("$ref", "$dynamicRef")
+
+#: Keywords whose value is a schema, or an array of schemas.
+_SCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalItems",
+        "additionalProperties",
+        "allOf",
+        "anyOf",
+        "contains",
+        "else",
+        "if",
+        "items",
+        "not",
+        "oneOf",
+        "prefixItems",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+
+#: Keywords whose value is an object naming schemas.
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {
+        "$defs",
+        "definitions",
+        "dependencies",
+        "dependentSchemas",
+        "patternProperties",
+        "properties",
+    }
+)
+
+
+def _closed_copy(schema: Any) -> Any:
+    """A copy of the schema with every closed-by-default object told so.
+
+    The data spelling of upstream's builder default: ``obj()`` writes ``additionalProperties:
+    false``, and omits the keyword for ``{open: true}`` (``builders.ts:197``). Here the authored
+    mapping omits it to say closed and writes ``true`` to say opened, so closing is the only
+    addition and an opened object is left exactly as authored.
+    """
+
+    closed = copy_json(schema)
+    for node in _each_schema(closed):
+        if isinstance(node, dict) and is_closed_by_default(node):
+            node["additionalProperties"] = False
+    return closed
+
+
+def without_open_marker(schema: Any) -> Any:
+    """A copy of ``schema`` with the port's ``{open: true}`` spelling dropped: what a host is told.
+
+    ``additionalProperties: true`` says a tool author opened an object, which is an authoring option
+    upstream keeps in ``obj()`` and never emits. It is not part of the wire contract either, so a
+    declaration hands back the schema as it would have been written without it -- and an object
+    carrying a real subschema for the keyword keeps it.
+    """
+
+    emitted = copy_json(schema)
+    for node in _each_schema(emitted):
+        if isinstance(node, dict) and node.get("additionalProperties") is True:
+            del node["additionalProperties"]
+    return emitted
+
+
+def _refuse_unresolved_refs(schema: Any) -> None:
+    """Resolve every reference now, and refuse the schema where one names nothing.
+
+    ``jsonschema`` resolves lazily, deep inside ``iter_errors``, so a tool whose schema dangles
+    would fail on a value rather than where it is compiled. Upstream's resolver throws for a
+    reference that names nothing; the port throws :class:`ToolSchemaError` at the moment its own
+    validator is built, in the words upstream's explainer uses for the broken reference.
+    """
+
+    try:
+        from referencing import Registry
+        from referencing.exceptions import Unresolvable
+        from referencing.jsonschema import DRAFT202012
+    except ImportError as error:  # pragma: no cover - arrives with the same extra as jsonschema
+        raise ImportError(
+            "JSON Schema validation requires the 'schema' extra: install pi-durable-python[schema]"
+        ) from error
+    base = schema.get("$id") if isinstance(schema, Mapping) else None
+    base = base if isinstance(base, str) else DEFAULT_BASE
+    resolver = Registry().with_resource(base, DRAFT202012.create_resource(schema)).resolver(base)
+    for node in _each_schema(schema):
+        for keyword in _REF_KEYWORDS:
+            reference = node.get(keyword)
+            if not isinstance(reference, str):
+                continue
+            try:
+                resolver.lookup(reference)
+            except Unresolvable as error:
+                raise ToolSchemaError(f"unresolved reference {reference}") from error
+
+
+def structured_output_validator(schema: Any) -> Any:
+    """Compile a tool's ``structuredOutputSchema``: objects closed, references resolved.
+
+    Needs the optional ``schema`` extra, imported only here so the core package has no runtime
+    dependency. Raises :class:`ToolSchemaError` when a reference names nothing.
+    """
+
+    cached = _STRUCTURED_VALIDATORS.get(id(schema))
+    if cached is not None and cached[0] is schema:
+        _STRUCTURED_VALIDATORS.move_to_end(id(schema))
+        return cached[1]
+    try:
+        from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+    except ImportError as error:
+        # The core package keeps no runtime dependency; only a schema tool needs the extra.
+        raise ImportError(
+            "JSON Schema validation requires the 'schema' extra: "
+            "install pi-durable-python[schema]"
+        ) from error
+    closed = _closed_copy(schema)
+    _refuse_unresolved_refs(closed)
+    validator = Draft202012Validator(closed)
+    _STRUCTURED_VALIDATORS[id(schema)] = (schema, validator)
+    _STRUCTURED_VALIDATORS.move_to_end(id(schema))
+    while len(_STRUCTURED_VALIDATORS) > _VALIDATOR_CACHE_SIZE:
+        _STRUCTURED_VALIDATORS.popitem(last=False)
+    return validator
+
+
 def structured_output_error(tool: Any, result: Mapping[str, Any]) -> str | None:
     """Why a result's ``structuredOutput`` breaks the tool's contract, or ``None`` when it keeps it.
 
     A tool that declares ``structured_output_schema`` must return a matching value, except on an
-    error result, where it may omit it; a tool without one must not return one. Validation needs
-    the optional ``schema`` extra, imported only here so the core package has no dependencies.
+    error result, where it may omit it; a tool without one must not return one. The three messages
+    are upstream's, read from ``src/harness/tool.ts:777-801`` ``structuredOutputError``; the first
+    error the validator reports -- its words and the pointer it names -- is what the substituted
+    validator produces (``PARITY.md`` Allowed deviations), formatted by upstream's own path rule.
     """
 
     name = str(getattr(tool, "name", ""))
@@ -423,38 +659,21 @@ def structured_output_error(tool: Any, result: Mapping[str, Any]) -> str | None:
         if result.get("isError") is True:
             return None
         return f"Tool {name} returned no structuredOutput"
-    validator = _structured_validator(schema)
-    errors = list(validator.iter_errors(value))
-    if not errors:
+    validator = structured_output_validator(schema)
+    first = next(iter(validator.iter_errors(value)), None)
+    if first is None:
         return None
-    first = errors[0]
-    path = ".".join(str(item) for item in first.absolute_path) or "root"
-    return f"Tool {name} returned structuredOutput that does not match its schema: {path}: {first.message}"
-
-
-def _structured_validator(schema: Any) -> Any:
-    cached = _STRUCTURED_VALIDATORS.get(id(schema))
-    if cached is not None and cached[0] is schema:
-        _STRUCTURED_VALIDATORS.move_to_end(id(schema))
-        return cached[1]
-    try:
-        from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-    except ImportError as error:
-        # The core package keeps no runtime dependency; only a schema tool needs the extra.
-        raise ImportError(
-            "JSON Schema validation requires the 'schema' extra: "
-            "install pi-durable-python[schema]"
-        ) from error
-    validator = Draft202012Validator(schema)
-    _STRUCTURED_VALIDATORS[id(schema)] = (schema, validator)
-    _STRUCTURED_VALIDATORS.move_to_end(id(schema))
-    while len(_STRUCTURED_VALIDATORS) > _VALIDATOR_CACHE_SIZE:
-        _STRUCTURED_VALIDATORS.popitem(last=False)
-    return validator
+    pointer = "".join(f"/{_escape_pointer(str(item))}" for item in first.absolute_path)
+    return invalid_structured_output_message(name, pointer, first.message)
 
 
 __all__ = [
     "ToolArgumentError",
+    "ToolSchemaError",
+    "invalid_structured_output_message",
     "structured_output_error",
+    "structured_output_path",
+    "structured_output_validator",
     "validate_tool_arguments",
+    "without_open_marker",
 ]

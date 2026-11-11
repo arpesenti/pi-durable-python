@@ -6,7 +6,8 @@ import asyncio
 from typing import Any
 
 import pytest
-from session_support import ControlledStorage, context, flush
+from harness_support import hold_line
+from session_support import ControlledStorage, context, flush, settle_line
 from task_support import (
     aborted_with,
     completed,
@@ -17,7 +18,7 @@ from task_support import (
     with_signal,
 )
 
-from pi_durable import MemoryStorage
+from pi_durable import CompactionTask, GenerationTask, MemoryStorage, ToolTask
 from pi_durable.context import AbortController
 from pi_durable.documents import define_doc
 from pi_durable.entries import define_entry
@@ -559,7 +560,9 @@ async def test_rejects_runtime_operations_after_the_invocation_ends() -> None:
         captured.append(runtime)
         handler_context.append(ctx)
         watch = await runtime.watch_doc(Notes, ctx)
-        watch.start(lambda value, _ops, _ctx: delivered.append((value or {}).get("text", "retired")))
+        watch.start(
+            lambda call, _ctx: delivered.append((call["value"] or {}).get("text", "retired"))
+        )
         watch_closed.append(watch.closed)
         await runtime.commit(lambda: completed(None), ctx)
 
@@ -573,7 +576,7 @@ async def test_rejects_runtime_operations_after_the_invocation_ends() -> None:
     id = await start(opened["root"], Watcher)
     opened["harness"].resume()
     await opened["harness"].wait_for_task(id, context)
-    assert await watch_closed[0] == {"reason": "stopped"}
+    assert await watch_closed[0] == {"kind": "stopped"}
 
     async def later(tx: Any) -> None:
         (await tx.doc(Notes)).text = "after"
@@ -643,7 +646,9 @@ async def test_reads_documents_and_context_through_the_runtime() -> None:
     await opened["harness"].wait_for_task(id, context)
     assert seen == ["two", "one", 1, 2, 1234]
     assert [str(error) for error in opened["reports"]] == ["reported"]
-    await flush()
+    # The step that ends the invocation is queued behind the completing commit: the line's own bound
+    # says when it is done, rather than a guessed number of turns.
+    await settle_line(opened["harness"])
     with pytest.raises(Exception, match="invocation has ended"):
         await captured[0].snapshot(Notes, opened["root"].id, context)
     with pytest.raises(Exception, match="invocation has ended"):
@@ -652,6 +657,13 @@ async def test_reads_documents_and_context_through_the_runtime() -> None:
 
 
 async def test_orders_runtime_commits_against_the_step() -> None:
+    """Upstream: "orders runtime commits against the step: one queued before it lands, one after it rejects".
+
+    One upstream case, one port case. Upstream holds Storage to keep the line's commit in flight; group
+    commit stores off the line, so the same hold here is a commit whose callback waits (upstream's
+    ``holdLine``): what must stay in flight is the line, not the call.
+    """
+
     storage = ControlledStorage()
     before: list[Any] = []
     after: list[Any] = []
@@ -659,8 +671,9 @@ async def test_orders_runtime_commits_against_the_step() -> None:
     harness_ref: list[Any] = []
 
     async def run(task: Any, runtime: Any, ctx: Any) -> None:
-        gate = storage.hold_commits()
-        held.append(gate)
+        # The line is held by a commit whose callback waits: group commit stores off the line, so a
+        # held Storage call would no longer keep the jobs queued behind it from running.
+        held.append(hold_line(harness_ref[0]))
         asyncio.ensure_future(
             harness_ref[0].commit(
                 lambda tx: tx.append_entry(runtime.conversation_id, {"kind": "blocker"}), context
@@ -679,12 +692,14 @@ async def test_orders_runtime_commits_against_the_step() -> None:
     id = await start(opened["root"], Detached)
     opened["harness"].resume()
     await eventually(lambda: bool(held))
-    await held[0].entered.wait()
+    await held[0].entered.promise
     await eventually(lambda: bool(after))
     held[0].release()
     await before[0]
     receipt = await opened["harness"].wait_for_task(id, context)
     assert receipt["state"]["outcome"] == {"status": "completed", "result": "before"}
+    # Upstream's own assertion is an alternation: the commit queued after the step may be refused by
+    # either of the two guards, and the port reaches the scheduler's `Task <id> is terminal`.
     with pytest.raises(Exception, match="invocation has ended|is terminal"):
         await after[0]
     await opened["harness"].close(context)
@@ -706,7 +721,7 @@ async def test_fails_the_harness_on_a_failed_reservation_commit(recovery: bool) 
     failure = RuntimeError("disk gone")
     storage.fail_next_commit(failure)
     opened["harness"].resume()
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert opened["reports"] == [failure]
     with pytest.raises(Exception) as error:
         await waiting
@@ -741,7 +756,7 @@ async def test_fails_the_harness_instead_of_running_a_task_again_when_its_fault_
     opened = await open_root([Throws], {"storage": storage})
     id = await start(opened["root"], Throws)
     opened["harness"].resume()
-    assert await opened["harness"].closed == {"reason": "failed", "error": failure}
+    assert await opened["harness"].closed == {"kind": "failed", "error": failure}
     assert runs[0] == 1
     assert opened["reports"] == [failure]
     await opened["harness"].close(context)
@@ -1356,30 +1371,29 @@ async def test_close_seals_admission_before_signalling_handlers_and_stops_watche
     await opened["harness"].close(context)
     with pytest.raises(Exception, match="closed"):
         await state["from_listener"]
-    assert state["watch_end"] == {"reason": "session_closed"}
+    assert state["watch_end"] == {"kind": "ended"}
 
 
 async def test_writes_no_fault_when_close_seals_before_the_failed_phase_step() -> None:
     storage = ControlledStorage()
     state: dict[str, Any] = {}
+    harness_ref: list[Any] = []
 
     async def throws(task: Any, runtime: Any, ctx: Any) -> None:
-        state["held"] = storage.hold_commits()
-        asyncio.ensure_future(
-            opened["harness"].commit(
-                lambda tx: tx.append_entry(runtime.conversation_id, {"kind": "blocker"}),
-                context,
-            )
-        )
-        await state["held"].entered.wait()
+        # The step after this phase queues behind a job that holds the line.
+        state["held"] = hold_line(harness_ref[0])
+        # Upstream's ``harness.commit()`` registers on the line in the body it runs synchronously; a
+        # Python coroutine body starts when the loop runs it, so let the hold arrive before throwing.
+        await flush()
         raise RuntimeError("would fault")
 
     Throws = one_step("test.close-fault", throws)
     opened = await open_root([Throws], {"storage": storage})
+    harness_ref.append(opened["harness"])
     id = await start(opened["root"], Throws)
     opened["harness"].resume()
     await eventually(lambda: bool(state))
-    await state["held"].entered.wait()
+    await state["held"].entered.promise
     await flush()
     closing = asyncio.ensure_future(opened["harness"].close(context))
     state["held"].release()
@@ -1433,25 +1447,22 @@ async def test_starts_no_abort_handler_whose_reservation_settles_while_closing()
 async def test_rejects_a_runtime_commit_queued_on_the_line_when_close_sealed() -> None:
     storage = ControlledStorage()
     state: dict[str, Any] = {}
+    harness_ref: list[Any] = []
     proceed = deferred()
 
     async def queued(task: Any, runtime: Any, ctx: Any) -> None:
-        state["held"] = storage.hold_commits()
-        asyncio.ensure_future(
-            opened["harness"].commit(
-                lambda tx: tx.append_entry(runtime.conversation_id, {"kind": "blocker"}),
-                context,
-            )
-        )
+        state["held"] = hold_line(harness_ref[0])
         state["queued"] = asyncio.ensure_future(runtime.commit(lambda: completed(None), ctx))
+        # Ignores the close signal, so the invocation is still alive when the queued commit reaches the line.
         await proceed.promise
 
     Queued = one_step("test.close-queued-commit", queued)
     opened = await open_root([Queued], {"storage": storage})
+    harness_ref.append(opened["harness"])
     id = await start(opened["root"], Queued)
     opened["harness"].resume()
     await eventually(lambda: bool(state))
-    await state["held"].entered.wait()
+    await state["held"].entered.promise
     await flush()
     closing = asyncio.ensure_future(opened["harness"].close(context))
     state["held"].release()
@@ -1542,3 +1553,28 @@ async def test_joins_a_reservation_that_settles_while_closing_without_starting_i
     written = [write for write in storage.commits[-1] if write["type"] == "task"]
     assert written[0]["value"]["id"] == id
     assert written[0]["value"]["state"]["status"] == "pending"
+
+
+def test_hook_rejects_a_handler_name_outside_the_builtin_tasks_hooks() -> None:
+    """A typo'd hook name is refused at registration, not silently never dispatched.
+
+    The set a built-in task's handlers may name is the one its hook TypedDict spells — the
+    ``GenerationHooks``, ``ToolHooks``, and ``CompactionHooks`` keys — and ``hook()`` refuses a
+    name outside it. A task of its own dispatches whatever names it asks, so its handlers keep
+    any name.
+    """
+
+    with pytest.raises(TypeError, match="beforeProvdierRequest"):
+        hook(GenerationTask, {"beforeProvdierRequest": lambda: None})
+    # One built-in task's hooks are not another's.
+    with pytest.raises(TypeError, match="beforeCompact"):
+        hook(GenerationTask, {"beforeCompact": lambda: None})
+    with pytest.raises(TypeError, match="beforeProviderRequest"):
+        hook(ToolTask, {"beforeProviderRequest": lambda: None})
+    with pytest.raises(TypeError, match="afterTool"):
+        hook(CompactionTask, {"afterTool": lambda: None})
+    # The ported name is in the generation's set, and the sets stay the registered names.
+    hook(GenerationTask, {"beforeProviderRequest": lambda: None})
+    hook(ToolTask, {"beforeTool": lambda: None})
+    hook(CompactionTask, {"beforeCompact": lambda: None})
+    hook(one_step("test.hooks-free", lambda *_args: None), {"ping": lambda: None})

@@ -1,9 +1,12 @@
-"""Translated kept-range and retention cases of the upstream ``harness-context`` suite.
+"""Translated kept-range and retention cases of the upstream ``harness-context`` suite, plus the
+``harness-context-range`` suite's one case.
 
 The derivation cases live in ``test_harness_context.py``; this file adds the Harness-level cases:
 extended reads, equivalent derivation under random edits, baseline discovery in added entries,
 returned-view and freeze guarantees, eviction on a timer or zero retention, and the late read a
-finished task must not keep.
+finished task must not keep. Its last case is upstream's own file,
+``test/harness-context-range.test.ts``: the ``current`` flag a kept range carries, which
+``advance_range`` refuses to move.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import Any
 
 import pytest
 from harness_support import assistant, describe_message, system, tool_result, user
-from session_support import context
+from session_support import context, settle_line
 from task_support import completed, deferred, open_tasks
 
 from pi_durable import MemoryStorage
@@ -72,13 +75,14 @@ async def test_extends_a_tasks_context_read_with_only_newer_entries() -> None:
                 "model": [{"role": "assistant", "content": [], "timestamp": 2}],
             }
         )
+        # The kept range took the three new entries as they were committed: no scan, bounds included.
         extended = await read()
-        assert extended["rows"] == 4
+        assert extended["rows"] == 0
         assert extended["view"] == await root.context(ctx)
         seen["extended"] = extended["view"]
         await write({"kind": "edit", "edits": [{"target": holder["first"]["id"], "action": "omit"}]})
         edited = await read()
-        assert edited["rows"] == 2
+        assert edited["rows"] == 0
         assert edited["view"] == await root.context(ctx)
         assert "user:first" not in [describe_message(message) for message in edited["view"]["messages"]]
         seen["edited"] = edited["view"]
@@ -206,7 +210,7 @@ async def test_drops_the_kept_range_when_retention_is_zero() -> None:
         )
         await opened["harness"].wait_for_task(id, context)
         await root.wait_for_idle(context)
-    assert rows == {"first": 4, "second": 4}
+    assert rows == {"first": 3, "second": 3}
     await opened["harness"].close(context)
 
 
@@ -221,9 +225,7 @@ async def counting_setup(
     harness = opened["harness"]
     root = await harness.root(context)
     first = await root.commit(
-        lambda tx: tx.append_entry(
-            root.id, {"kind": "message", "model": [user("first")]}
-        ),
+        lambda tx: tx.append_entry(root.id, {"kind": "message", "model": [user("first")]}),
         context,
     )
     for index in range(20):
@@ -260,9 +262,7 @@ async def test_keeps_a_context_read_across_tasks_and_through_the_retention_perio
 
     async def child_run(_task: Any, runtime: Any, ctx: Any) -> None:
         async def write(tx: Any) -> None:
-            await tx.append_entry(
-                holder["root"].id, {"kind": "message", "model": [user("from child")]}
-            )
+            await tx.append_entry(holder["root"].id, {"kind": "message", "model": [user("from child")]})
 
         await runtime.commit(write, ctx)
         await read("child", runtime, ctx)
@@ -335,9 +335,7 @@ async def test_keeps_a_context_read_across_tasks_and_through_the_retention_perio
     harness = opened["harness"]
     harness.resume()
     options = {"ownership": {"kind": "conversation"}, "conversationId": opened["root"].id}
-    parent = await harness.commit(
-        lambda tx: tx.create_task(Parent, {}, options), context
-    )
+    parent = await harness.commit(lambda tx: tx.create_task(Parent, {}, options), context)
     assert (await harness.wait_for_task(parent, context))["state"]["outcome"] == {
         "status": "completed",
         "result": None,
@@ -345,18 +343,14 @@ async def test_keeps_a_context_read_across_tasks_and_through_the_retention_perio
     await opened["root"].wait_for_idle(context)
 
     async def probe(name: str) -> None:
-        id = await harness.commit(
-            lambda tx: tx.create_task(Probe, {"name": name}, options), context
-        )
-        assert (await harness.wait_for_task(id, context))["state"]["outcome"] == completed(None)[
-            "outcome"
-        ]
+        id = await harness.commit(lambda tx: tx.create_task(Probe, {"name": name}, options), context)
+        assert (await harness.wait_for_task(id, context))["state"]["outcome"] == completed(None)["outcome"]
         await opened["root"].wait_for_idle(context)
 
     await probe("idle")
     clock["now"] += 600_000
     await probe("expired")
-    assert rows == {"parent": 22, "child": 2, "after": 1, "idle": 1, "expired": 23}
+    assert rows == {"parent": 21, "child": 0, "after": 0, "idle": 0, "expired": 22}
     await harness.close(context)
 
 
@@ -532,16 +526,12 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
         assert result["messages"][0] == "user:first"
         await append(root, {"kind": "pi.system", "model": [system({"plan": "Plan."})]})
         extended = await read(root)
-        assert extended["rows"] == 2
+        assert extended["rows"] == 0
         assert extended["messages"][:3] == ["system:plan", "user:first", "assistant:old 0"]
 
-        fork = await root.fork(
-            holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx
-        )
+        fork = await root.fork(holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx)
         await append(fork, {"kind": "message", "model": [assistant("answer")]})
-        await append(
-            fork, {"kind": "host.system", "model": [system({"note": "Note."})]}
-        )
+        await append(fork, {"kind": "host.system", "model": [system({"note": "Note."})]})
         assert (await read(fork))["messages"] == [
             "user:first",
             "assistant:answer",
@@ -549,7 +539,7 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
         ]
         await append(fork, {"kind": "pi.system", "model": [system({"note": None})]})
         extended = await read(fork)
-        assert extended["rows"] == 2
+        assert extended["rows"] == 0
         assert extended["messages"] == [
             "user:first",
             "assistant:answer",
@@ -557,13 +547,9 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
             "system:note",
         ]
 
-        omitted = await root.fork(
-            holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx
-        )
+        omitted = await root.fork(holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx)
         await append(omitted, {"kind": "message", "model": [assistant("answer")]})
-        host = await append(
-            omitted, {"kind": "host.system", "model": [system({"legacy": "Legacy."})]}
-        )
+        host = await append(omitted, {"kind": "host.system", "model": [system({"legacy": "Legacy."})]})
         await append(
             omitted,
             {"kind": "edit", "edits": [{"target": host["id"], "action": "omit"}]},
@@ -571,22 +557,20 @@ async def test_finds_the_baseline_among_the_entries_an_extended_read_adds() -> N
         assert (await read(omitted))["messages"] == ["user:first", "assistant:answer"]
         await append(omitted, {"kind": "pi.system", "model": [system({"legacy": None})]})
         extended = await read(omitted)
-        assert extended["rows"] == 2
+        assert extended["rows"] == 0
         assert extended["messages"] == [
             "user:first",
             "assistant:answer",
             "system:legacy",
         ]
 
-        empty = await root.fork(
-            holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx
-        )
+        empty = await root.fork(holder["first"]["id"], {"ownership": {"kind": "ownerless"}}, ctx)
         await append(empty, {"kind": "pi.system"})
         await append(empty, {"kind": "message", "model": [assistant("answer")]})
         assert (await read(empty))["messages"] == ["user:first", "assistant:answer"]
         await append(empty, {"kind": "pi.system", "model": [system({"s": "Delta."})]})
         extended = await read(empty)
-        assert extended["rows"] == 2
+        assert extended["rows"] == 0
         assert extended["messages"] == ["user:first", "assistant:answer", "system:s"]
         await runtime.commit(lambda: completed(None), ctx)
 
@@ -653,9 +637,7 @@ async def test_freezes_kept_entries_deeply_even_when_storage_freezes_them_shallo
     harness = opened["harness"]
     root = await harness.root(context)
     await root.commit(
-        lambda tx: tx.append_entry(
-            root.id, {"kind": "message", "model": [user("hello")]}
-        ),
+        lambda tx: tx.append_entry(root.id, {"kind": "message", "model": [user("hello")]}),
         context,
     )
     harness.resume()
@@ -681,9 +663,7 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None
     async def late_run(_task: Any, runtime: Any, ctx: Any) -> None:
         holder["storage"].hold_next_range_scan = scans.promise
         late = asyncio.ensure_future(runtime.context(holder["root"].id, ctx))
-        late.add_done_callback(
-            lambda done: done.exception() if not done.cancelled() else None
-        )
+        late.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         holder["late"] = late
         await runtime.commit(lambda: completed(None), ctx)
 
@@ -713,23 +693,21 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None
             "abort": lambda task, runtime, ctx: runtime.commit(abort_state, ctx),
         }
     )
-    opened = await counting_setup(
-        (Late, Probe), {"settings": {"context_retention_ms": 0}}
-    )
+    opened = await counting_setup((Late, Probe), {"settings": {"context_retention_ms": 0}})
     harness, root = opened["harness"], opened["root"]
     holder["root"], holder["storage"] = root, opened["storage"]
     harness.resume()
     options = {"ownership": {"kind": "conversation"}, "conversationId": root.id}
-    late_id = await harness.commit(
-        lambda tx: tx.create_task(Late, {}, options), context
-    )
+    late_id = await harness.commit(lambda tx: tx.create_task(Late, {}, options), context)
     assert (await harness.wait_for_task(late_id, context))["state"]["outcome"] == {
         "status": "completed",
         "result": None,
     }
-    probe_id = await harness.commit(
-        lambda tx: tx.create_task(Probe, {}, options), context
-    )
+    probe_id = await harness.commit(lambda tx: tx.create_task(Probe, {}, options), context)
+    # Upstream's ``runtime.commit()`` registers the step that ends the invocation in the body it runs
+    # synchronously; a Python coroutine is scheduled later, so the step is still queued when the test
+    # creates the probe. The line being idle is the seam that says it has run.
+    await settle_line(harness)
     scans.resolve()
     await asyncio.gather(holder["late"], return_exceptions=True)
     probe_start.resolve()
@@ -737,7 +715,7 @@ async def test_does_not_keep_a_read_that_finishes_after_its_task_ended() -> None
         "status": "completed",
         "result": None,
     }
-    assert rows == {"probe": 22}
+    assert rows == {"probe": 21}
     await harness.close(context)
 
 
@@ -760,15 +738,11 @@ async def test_drops_an_idle_conversations_context_read_on_a_timer_when_nothing_
             "abort": lambda task, runtime, ctx: runtime.commit(abort_state, ctx),
         }
     )
-    opened = await open_tasks(
-        storage, [Probe], {"settings": {"context_retention_ms": 40}}
-    )
+    opened = await open_tasks(storage, [Probe], {"settings": {"context_retention_ms": 40}})
     harness = opened["harness"]
     root = await harness.root(context)
     first = await root.commit(
-        lambda tx: tx.append_entry(
-            root.id, {"kind": "message", "model": [user("first")]}
-        ),
+        lambda tx: tx.append_entry(root.id, {"kind": "message", "model": [user("first")]}),
         context,
     )
     for index in range(20):
@@ -783,9 +757,7 @@ async def test_drops_an_idle_conversations_context_read_on_a_timer_when_nothing_
     options = {"ownership": {"kind": "conversation"}, "conversationId": root.id}
 
     async def probe(name: str) -> None:
-        id = await harness.commit(
-            lambda tx: tx.create_task(Probe, {"name": name}, options), context
-        )
+        id = await harness.commit(lambda tx: tx.create_task(Probe, {"name": name}, options), context)
         assert (await harness.wait_for_task(id, context))["state"]["outcome"] == {
             "status": "completed",
             "result": None,
@@ -797,6 +769,64 @@ async def test_drops_an_idle_conversations_context_read_on_a_timer_when_nothing_
     await probe("warm")
     await asyncio.sleep(0.12)
     await probe("second")
-    assert rows == {"first": 22, "warm": 1, "second": 22}
+    assert rows == {"first": 21, "warm": 0, "second": 21}
     assert first["id"] is not None
     await harness.close(context)
+
+
+class PausedStorage(MemoryStorage):
+    """Memory storage that pauses once inside a range scan, after Storage answered it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause = False
+        self.entered: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self.release: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+    async def scan_entries(self, query: Any, limit: int, cursor: Any, scan_context: Any) -> Any:
+        page = await super().scan_entries(query, limit, cursor, scan_context)
+        if self.pause:
+            self.pause = False
+            self.entered.set_result(None)
+            await self.release
+        return page
+
+
+async def test_is_not_advanced_when_an_entry_was_committed_while_its_scan_ran_off_the_line() -> None:
+    """Upstream ``harness-context-range.test.ts:8``."""
+
+    from pi_durable.harness.context import advance_range, read_context, read_context_from
+    from pi_durable.session.session import SessionImpl
+
+    storage = PausedStorage()
+    session = SessionImpl(storage)
+    created = await session.commit(
+        lambda tx: tx.create_conversation({"ownership": {"kind": "ownerless"}}), context
+    )
+    conversation_id = created["id"]
+    await session.commit(lambda tx: tx.append_entry(conversation_id, {"kind": "first"}), context)
+    storage.pause = True
+    read = asyncio.ensure_future(
+        read_context_from(session, storage, conversation_id, context, None, None)
+    )
+    await storage.entered
+    # A commit lands while the range scan is paused: the bounds were taken before it.
+    await session.commit(lambda tx: tx.append_entry(conversation_id, {"kind": "missed"}), context)
+    storage.release.set_result(None)
+    _view, range_value = await read
+    assert range_value is not None
+    assert range_value["current"] is False
+
+    last = await session.commit(lambda tx: tx.append_entry(conversation_id, {"kind": "last"}), context)
+    # Not current: left as it is, so the next read extends it from Storage instead of skipping "missed".
+    assert advance_range(range_value, [last]) is range_value
+
+    again_view, again = await read_context_from(
+        session, storage, conversation_id, context, None, range_value
+    )
+    fresh = await read_context(session, storage, conversation_id, context)
+    assert [entry["kind"] for entry in again_view["entries"]] == ["first", "missed", "last"]
+    assert again_view == fresh
+    assert again is not None
+    assert again["current"] is True
+    await session.close(context)

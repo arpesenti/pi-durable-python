@@ -19,7 +19,7 @@ from ..documents import (
     materialize_document,
     resolve_address,
 )
-from ..errors import SessionFailed, StorageRequestError, is_failure
+from ..errors import ReadOnlySession, SessionFailed, StorageRequestError, is_failure
 from ..harness.context import read_context
 from ..harness.types import LISTENER, ContextView, ReportInfo, SetTimer, host_error
 from ..ids import ConversationId, DocumentId, EntryId, Seq, TaskId
@@ -27,20 +27,32 @@ from ..json import JsonObject
 from ..timers import host_timers
 from ..types import (
     CommitChange,
+    CommitObservation,
+    CommitObserver,
+    CommitOptions,
     CommitPublication,
+    CommitPublicationScope,
+    CommitReceipt,
+    CommitResult,
     ConversationQuery,
     ConversationRecord,
     Cursor,
     DocumentAddress,
     DocumentCommitChange,
+    DocumentCommittedChange,
+    DocumentContent,
     DocumentPoint,
     DocumentQuery,
     DocumentRecord,
+    DocumentRetiredChange,
     EntryLookup,
     EntryQuery,
     EntryRecord,
     EntryWithHead,
+    ObservedCommit,
+    Observer,
     Page,
+    PublishingStorage,
     SessionEnd,
     Storage,
     StorageWrite,
@@ -50,18 +62,41 @@ from ..types import (
     TaskQuery,
     TaskRecord,
 )
+from .conversation_tails import ConversationTails
+from .keys import ALL_KEYS, GatedStorage, document_key, incarnation_key
 from .observation import (
-    CommittedState,
+    ENDED,
+    AttachedObservation,
+    AttachedObserver,
     CommittedWatch,
-    ObservedDocumentValue,
-    observed_operations,
+    GuardedObserver,
+    contained,
+    session_closed_error,
 )
-from .transaction import LoadedDocument, Transaction, TransactionScope
+from .transaction import (
+    AdoptedDocuments,
+    HeldChanges,
+    HeldDocument,
+    LoadedDocument,
+    PendingOps,
+    Transaction,
+    TransactionScope,
+    store_held,
+)
+from .writer import PartSpec, PublishFailure, Writer
 
 #: Default document retention: ten minutes, as for kept contexts.
 _DEFAULT_DOCUMENT_RETENTION_MS = 600_000
 
+#: Jobs admitted to the line whose outcome is not delivered yet, beyond which the line waits. A
+#: count, not bytes: what waits is bounded by what one commit can hold (tool output by its output
+#: limits), times the count (spec §4).
+MAX_OUTSTANDING = 256
+
 _default_document_retention: int | float = _DEFAULT_DOCUMENT_RETENTION_MS
+
+#: Default ``within_ms`` of a deferred commit: ``settings.progress.persist_within_ms``.
+_DEFAULT_PERSIST_WITHIN_MS = 1_000
 
 
 def set_default_document_retention(ms: int | float) -> None:
@@ -81,6 +116,20 @@ def document_retention(ms: int | float | None) -> int | float:
     if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0:
         return ms
     return _default_document_retention
+
+
+def persist_within(ms: int | float | None) -> int | float:
+    """Return a deferred commit's default window as given when it is a number of milliseconds,
+    ``0`` or more.
+
+    ``Infinity`` waits for another trigger -- a commit that reads or writes the document, a drop of
+    its tracker, or close. A value that is not a number of milliseconds means the default; unlike a
+    commit's own :meth:`SessionImpl._deferral`, a setting never throws.
+    """
+
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0:
+        return ms
+    return _DEFAULT_PERSIST_WITHIN_MS
 
 
 def create_session(storage: Storage, options: dict[str, Any] | None = None, **kwargs: Any) -> SessionImpl:
@@ -124,13 +173,75 @@ def _record_address_id(record: DocumentRecord) -> str:
     return address_id(address)
 
 
+def _owner_task_of(loaded: LoadedDocument) -> TaskId | None:
+    """The task whose end ends a follower of this document's address, if the address is a task's.
+
+    A task document belongs to its task: when that task goes terminal the document retires and is
+    never created again, so the terminal write is the last change a follower of it will ever see.
+    """
+
+    scope = loaded.record["scope"]
+    return scope["taskId"] if scope["kind"] == "task" else None
+
+
+def _ends_the_owner(writes: Sequence[StorageWrite], owner_task_id: TaskId | None) -> bool:
+    """Whether one of this commit's writes makes the owner task of a task document terminal.
+
+    The one commit that ends a task document's owner is recognised by the task record it writes, not
+    by the retirement beside it: a commit that retires the document without ending the task leaves
+    both the watch and the observer following the address (spec §9.1).
+    """
+
+    if owner_task_id is None:
+        return False
+    return any(
+        write["type"] == "task"
+        and write["value"]["id"] == owner_task_id
+        and write["value"]["state"]["status"] == "terminal"
+        for write in writes
+    )
+
+
 @dataclass(slots=True)
 class _WatchAttachment:
-    """One watch subscribed to a committed incarnation, and the incarnation it pins."""
+    """One follower of a document address — a watch or an observer — and the incarnation it pins.
 
-    record_id: DocumentId
-    watch: CommittedWatch
-    release: Callable[[], None]
+    Both followers follow the address rather than one incarnation, so a retirement unpins what the
+    attachment held and a document created at that address later is pinned again for the same
+    attachment (spec §9.2). The follower decides what it does with the change: a watch folds it
+    behind its listener, an observer mirrors it synchronously. ``owner_task_id`` is the task whose
+    terminal write ends the follower, for the address of a task document: that write is the last
+    that can change the address, so the pin goes and the follower ends with it.
+    """
+
+    address_id: str
+    record_id: DocumentId | None
+    follower: CommittedWatch | AttachedObserver
+    release: Callable[[], None] | None
+    owner_task_id: TaskId | None = None
+
+
+@dataclass(slots=True)
+class _Hold(HeldDocument):
+    """A held document as the Session keeps it: its queue, its earliest deadline, and its pin.
+
+    The pin is what keeps the held changes alive past the moment their address has no reader left;
+    it is released with the hold, never by a sweep (spec §4.1).
+    """
+
+    #: When the earliest of its held commits must be stored, on the Session clock.
+    deadline: int | float = 0
+    unpin: Callable[[], None] = lambda: None
+
+
+@dataclass(slots=True)
+class _HoldTimer:
+    """The armed store of held documents: one foreground timer for the earliest deadline."""
+
+    at: int | float
+    disarm: Callable[[], None]
+    #: Set when it fired and cleared once its job ran: a fired timer stays, so nothing re-arms behind it.
+    fired: bool = False
 
 
 @dataclass(slots=True)
@@ -148,43 +259,72 @@ class DocumentCacheSizes(TypedDict):
     idle: int
     attached: int
     sweeps: int
+    held: int
 
 
-class DocumentState(CommittedState):
-    """Disposable, read-only committed state bound to one document incarnation."""
+@dataclass(slots=True)
+class _LineJob:
+    """One job on the line: its index in line order, and whether a touch of it waited for a gate."""
 
-    __slots__ = ("_observed_version", "_record_id", "_session")
+    index: int
+    hit: bool = False
+    # Called once its outcome settles: its commit published, or never to be (:meth:`SessionImpl.on_job_end`).
+    ends: list[Callable[[], None]] | None = None
 
-    def __init__(
-        self,
-        session: SessionImpl,
-        record_id: DocumentId,
-        value: JsonObject,
-        observed_version: int,
-        release: Callable[[], None],
-    ) -> None:
-        super().__init__(value, release, session.report)
+
+@dataclass(slots=True)
+class _Ran:
+    """A line job's result: its value, delivered once ``after`` -- its commit's publication -- settles."""
+
+    value: Any
+    after: asyncio.Future[None] | None = None
+
+
+@dataclass(slots=True)
+class _LineEntry:
+    """A queued line job and the future its line part settles."""
+
+    job: _LineJob
+    ran: asyncio.Future[Any]
+
+
+class _WriterHost:
+    """What the writer needs of the Session: storage, the publication scope, and the failure latch."""
+
+    def __init__(self, session: SessionImpl) -> None:
         self._session = session
-        self._record_id = record_id
-        self._observed_version = observed_version
 
-    @property
-    def value(self) -> JsonObject | None:
-        return cast(JsonObject | None, self._value)
+    async def commit(
+        self,
+        batches: Sequence[Sequence[StorageWrite]],
+        receive: CommitReceipt,
+        context: Context,
+    ) -> CommitResult:
+        return await self._session._storage.commit_batches(batches, receive, context)  # noqa: SLF001
 
-    def dispose(self) -> None:
-        """Idempotently stop future deliveries; the last value remains readable."""
+    def publishing(self, publish: Callable[[], None], context: Context) -> Awaitable[None] | None:
+        return self._session._publishing(publish, context)  # noqa: SLF001
 
-        if self._disposed:
-            return
-        super().dispose()
-        self._session._detach_state(self)
+    def stored(self, writes: Sequence[StorageWrite]) -> None:
+        # The read caches of what just became durable, applied right before it is published.
+        self._session._apply_stored_tails(writes)  # noqa: SLF001
+
+    def failure(self) -> BaseException | None:
+        return self._session._failure  # noqa: SLF001
+
+    def fail(self, error: BaseException, at: int, own: Sequence[int]) -> None:
+        self._session.fail(error, at, own)
+
+    def report(self, error: BaseException, context: Context) -> None:
+        self._session.report(error, LISTENER)
 
 
 class _SessionHost:
     def __init__(self, session: SessionImpl) -> None:
         self._session = session
-        self.storage = cast(Storage, session._storage)  # noqa: SLF001
+        # A transaction's every read touches its key: it never observes what an earlier job admitted
+        # and the writer has not published.
+        self.storage = cast(Storage, session._gated)  # noqa: SLF001
 
     def now(self) -> int:
         return self._session._clock()
@@ -212,7 +352,18 @@ class _SessionHost:
 
 
 class SessionImpl:
-    """Session kernel over one guarded storage backend."""
+    """Session kernel over one guarded storage backend.
+
+    Only committed state is observable. The mutation line runs one job at a time -- a commit's
+    callback and settlement, or a read on the line; a commit with writes then joins the writer's
+    pending batch (logical admission) and the line goes on, so the storage of several commits
+    overlaps while their callbacks stay serial. The writer stores every commit admitted while no
+    call is in flight in one :meth:`~pi_durable.types.Storage.commit_batches` call off the line and
+    publishes them one by one, in line order, once Storage made them durable. No job observes what
+    an unpublished commit wrote: every read of a job touches its key and waits while an admitted
+    commit that writes it is unpublished, and a job that waits holds the line, so the unpublished
+    writes only shrink.
+    """
 
     def __init__(
         self,
@@ -220,26 +371,54 @@ class SessionImpl:
         now: Callable[[], int] | None = None,
         document_retention_ms: int | float | Callable[[], int | float | None] | None = None,
         set_timer: SetTimer | None = None,
+        read_only: bool = False,
+        persist_within_ms: int | float | Callable[[], int | float | None] | None = None,
     ) -> None:
+        self._read_only = read_only
+        #: The newest entry and newest head marker of each recently used conversation, kept current from
+        #: this Session's commits. A read-only Session shows a Storage another process writes, so nothing
+        #: it reads stays current and none is kept.
+        self._tails: ConversationTails | None = None if read_only else ConversationTails()
         self._documents: dict[str, LoadedDocument] = {}
         # Cached documents with no observer attached, by address, oldest use first.
         self._idle_documents: dict[str, int | float] = {}
         # Observers attached per incarnation (record ID); a cached incarnation with any stays.
         self._attached_documents: dict[DocumentId, int] = {}
+        # Documents with held changes, by incarnation; each is pinned in the cache until stored.
+        self._holds: dict[DocumentId, _Hold] = {}
+        self._hold_timer: _HoldTimer | None = None
         self._document_sweep: _DocumentSweep | None = None
         self._sweep_jobs = 0
-        self._sweep_tasks: set[asyncio.Task[None]] = set()
         self._document_timers_unavailable = False
-        self._states: list[DocumentState] = []
         self._watches: list[_WatchAttachment] = []
-        self._commit_listeners: list[Callable[[CommitPublication, Context], Any]] = []
+        # Host observers of one document address each, following the address as a watch does.
+        self._observers: list[_WatchAttachment] = []
+        # Host observers of every stored commit (`observe_commits`), ended at the close's last publication.
+        self._commit_observers: list[GuardedObserver] = []
         # The Session's own components follow every commit; a throw leaves their state behind storage.
-        self._internal_listeners: list[Callable[[CommitPublication, Context], Any]] = []
+        self._internal_listeners: list[Callable[[ObservedCommit, Context], Any]] = []
         self._close_listeners: list[Callable[[], Any]] = []
-        self._line = asyncio.Lock()
+        # The end of the last line job: the line runs one job at a time. Never raises.
+        self._tail: asyncio.Future[None] = _settled_future(_current_loop())
+        # Line index of the next job; outcomes are delivered in this order.
+        self._next_index = 0
+        # The job on the line, while one runs.
+        self._current: _LineJob | None = None
+        # Settles once every job so far has its outcome delivered.
+        self._fence: asyncio.Future[None] = _settled_future(_current_loop())
+        self._last_delivered = -1
+        # Jobs that started on the line and have no outcome delivered yet (``MAX_OUTSTANDING``).
+        self._outstanding = 0
+        self._room: asyncio.Future[None] | None = None
+        # The line index whose outcome the failure is: every later job's outcome is ``SessionFailed``.
+        self._fail_at: int | None = None
+        # Later jobs whose outcome is their own error all the same: the other parts of a call that rejected.
+        self._own_outcomes: set[int] = set()
+        # Line jobs and outcome chains, kept strongly while the loop holds only a weak reference.
+        self._line_tasks: set[asyncio.Task[None]] = set()
+        loop = _current_loop()
         self._closing: asyncio.Future[None] | None = None
         self._failure: BaseException | None = None
-        loop = _current_loop()
         self._failed: asyncio.Future[SessionFailed] = loop.create_future()
         self._closed: asyncio.Future[SessionEnd] = loop.create_future()
         self._failed.add_done_callback(lambda future: future.exception())
@@ -258,9 +437,19 @@ class SessionImpl:
             except Exception:
                 return document_retention(None)
 
+        def within() -> int | float:
+            try:
+                value = persist_within_ms() if callable(persist_within_ms) else persist_within_ms
+                return persist_within(value)
+            except Exception:
+                return persist_within(None)
+
         self._clock = clock
         self._document_retention_ms = retention
+        self._persist_within_ms = within
         self._storage = GuardedStorage(storage, self)
+        self._gated = GatedStorage(cast(Storage, self._storage), self.touch)
+        self._writer = Writer(_WriterHost(self))
         self._host = _SessionHost(self)
         self._timers = host_timers(
             set_timer,
@@ -289,28 +478,125 @@ class SessionImpl:
 
         return cast(Storage, self._storage)
 
+    def known_latest_entry_id(self, conversation_id: ConversationId) -> EntryId | None:
+        """Internal: the newest entry ID of ``conversation_id`` as known from this Session's commits,
+        without reading; ``None`` when it is not known (and always for a read-only Session).
+
+        ``None`` and "the conversation has no entries" are not told apart here, and a caller need not:
+        both mean the range it holds cannot be shown to be current, so it is not advanced (upstream
+        ``session.ts:391-393``, whose ``undefined`` reaches the same check).
+        """
+
+        return None if self._tails is None else self._tails.peek(conversation_id)
+
+    async def latest_entry_id(
+        self, conversation_id: ConversationId, context: Context
+    ) -> EntryId | None:
+        """Internal, on the Session line: the newest entry ID visible from ``conversation_id``.
+
+        Known from the Session's own commits when it owns its Storage, so it costs no Storage read after
+        the first. Read after touching the conversation's appends, so no commit that appends to it is
+        unpublished and what Storage answers stays current.
+        """
+
+        async def read() -> EntryId | None:
+            page = await self._gated.scan_entries(
+                {"conversationId": conversation_id}, 1, None, context
+            )
+            return page["items"][0]["id"] if page["items"] else None
+
+        tails = self._tails
+        if tails is None:
+            return cast(EntryId | None, await self._gated._after_entries(conversation_id, read))
+        return cast(
+            EntryId | None,
+            await self._gated._after_entries(
+                conversation_id, lambda: tails.latest(conversation_id, read)
+            ),
+        )
+
+    async def latest_head_marker(
+        self,
+        conversation_id: ConversationId,
+        at_or_before: EntryId | None,
+        context: Context,
+    ) -> EntryWithHead | None:
+        """Internal, on the Session line: the newest visible head marker of ``conversation_id`` at or
+        before ``at_or_before``, any when ``None``; known from the Session's own commits as
+        :meth:`latest_entry_id` is.
+        """
+
+        async def read() -> EntryWithHead | None:
+            return cast(
+                EntryWithHead | None,
+                await self._gated.find_latest_head_marker(conversation_id, at_or_before, context),
+            )
+
+        tails = self._tails
+        if tails is None:
+            return await read()
+        return cast(
+            EntryWithHead | None,
+            await self._gated._after_entries(
+                conversation_id, lambda: tails.marker(conversation_id, at_or_before, read)
+            ),
+        )
+
+    def _apply_stored_tails(self, writes: Sequence[StorageWrite]) -> None:
+        """Keep the newest entry and head marker of every conversation a stored batch wrote.
+
+        Applied right before the batch is published, so a value kept here stays valid until the next
+        entry of that conversation, and a read of that conversation's newest entry costs no scan.
+        """
+
+        if self._tails is not None:
+            self._tails.apply(writes)
+
+    def owns_transaction(self, tx: Any) -> bool:
+        """Internal: whether ``tx`` is the transaction of one of this Session's commits.
+
+        A wrapper that forwards attribute reads is not one of them: only a Transaction this Session
+        created, holding this Session's own host, is.
+        """
+
+        return type(tx) is Transaction and tx._host is self._host
+
     @property
     def failed(self) -> asyncio.Future[SessionFailed]:
         return self._failed
 
-    def fail(self, error: BaseException) -> None:
+    def fail(
+        self,
+        error: BaseException,
+        at: int | None = None,
+        own: Sequence[int] | None = None,
+    ) -> None:
         """Fail the Session once; the first failure wins and close listeners run immediately.
 
         A teardown signal is not a failure: cancellation and interpreter shutdown unwind the work
         that is running instead of ending the Session.
+
+        ``at`` is the line index of the job whose outcome the failure is -- by default the job on the
+        line -- so every later job's outcome becomes ``SessionFailed``; ``own`` names the later jobs
+        whose outcome is their own error all the same, the other parts of a storage call that
+        rejected (spec §10.1).
         """
 
         if not is_failure(error) or self._failure is not None:
             return
         self._failure = error
+        now = self._current.index if self._current is not None else self._last_delivered
+        self._fail_at = at if at is not None else now
+        if own is not None:
+            self._own_outcomes.update(own)
         if not self._failed.done():
             self._failed.set_exception(SessionFailed(error))
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._close_after_failure())
-        self.report(error, {"type": "session_failed"})
+        self._keep(loop.create_task(self._close_after_failure()))
+        self.report(error, {"kind": "storage_failed"})
 
     async def _close_after_failure(self) -> None:
         try:
@@ -324,66 +610,689 @@ class SessionImpl:
         ``info`` defaults to a listener. A plain Session has no external report sink.
         """
 
+    # ── The mutation line ───────────────────────────────────────────────────
+
+    def touch(self, key: str) -> Awaitable[None] | None:
+        """Internal, on the line: wait while ``key`` has an unpublished writer.
+
+        For :data:`~pi_durable.session.keys.ALL_KEYS`, wait while anything is unpublished. Returns
+        ``None`` when there is nothing to wait for; otherwise an awaitable that checks the Session is
+        healthy once the writer published. A job's every read touches its key first, so it never
+        observes state an earlier job admitted and the writer has not published.
+        """
+
+        gate = self._writer.drained() if key == ALL_KEYS else self._writer.gate(key)
+        if gate is None:
+            return None
+        if self._current is not None:
+            self._current.hit = True
+        return self._wait_gate(gate)
+
+    async def _wait_gate(self, gate: asyncio.Future[None]) -> None:
+        await gate
+        self._assert_healthy()
+
+    def on_job_end(self, end: Callable[[], None]) -> None:
+        """Internal, on the line: run ``end`` once the job on the line has its outcome.
+
+        Off the line, ``end`` runs at once: there is no job to wait for. The scheduler pins the nodes
+        a chain load installed for the job on the line this way, so the sweep keeps them until the
+        job's commit is published or fails.
+        """
+
+        job = self._current
+        if job is None:
+            end()
+            return
+        if job.ends is None:
+            job.ends = [end]
+        else:
+            job.ends.append(end)
+
+    def _ended(self, job: _LineJob) -> None:
+        """The job's outcome settled: run what waited for it (:meth:`on_job_end`)."""
+
+        ends = job.ends
+        if ends is None:
+            return
+        job.ends = None
+        for end in ends:
+            end()
+
+    @property
+    def line_sizes(self) -> dict[str, int]:
+        """Internal, for tests that bound memory: jobs with no outcome delivered yet, and keys with
+        an unpublished writer. Both are 0 once the line is idle.
+
+        Upstream reports a third size, the record cache's reads in flight; this port carries no
+        read-side record cache, so there is nothing to bound there.
+        """
+
+        return {
+            "outstanding": self._outstanding,
+            "unpublished": self._writer.unpublished,
+        }
+
+    def _enqueue(
+        self, work: Callable[[_LineJob], Awaitable[Any]], exempt: bool = False
+    ) -> Awaitable[Any]:
+        """Run ``work`` on the line, after every job before it, and deliver its outcome in line order.
+
+        The line part of a commit ends at logical admission, so the next callback runs while the
+        writer is still storing; the outcome comes once the job's commit, if it admitted one, is
+        published, and after every outcome before it. At most ``MAX_OUTSTANDING`` admitted jobs wait
+        for their delivery; beyond it the line waits.
+
+        ``exempt`` is upstream's ``#enqueue(work, true)``: a job that admitted no write and waited at
+        no gate is equivalent to having run before every unpublished commit, so its outcome is
+        delivered as soon as it has one rather than behind the outcomes of others. Whether it is such
+        a job is only known once it ran, which is why the exempt path looks at the line result first
+        (``session.ts:1645-1652``).
+        """
+
+        ran = self._queue_line(work, bounded=True)
+        before = self._fence
+        # One task, shared by the outcome fence and by the job's own waiter: a coroutine awaited
+        # twice would never resolve the second time.
+        outcome = asyncio.ensure_future(self._outcome_of(ran))
+        # The job's own outcome, not its delivery: what :meth:`on_job_end` registered runs as soon as
+        # the commit published, or never will, not once the caller's turn behind the fence arrives.
+        outcome.add_done_callback(lambda _done: self._ended(ran.job))
+        self._fence = self._chain(before, outcome)
+        if not exempt:
+            return self._deliver(ran.job, before, outcome)
+        return self._deliver_exempt(ran, before, outcome)
+
+    async def _maintain(self, work: Callable[[_LineJob], Awaitable[Any]]) -> Any:
+        """Run a job of the Session's own upkeep on the line: no outcome to deliver, so no fence."""
+
+        return await self._queue_line(work, bounded=False).ran
+
+    def _queue_line(self, work: Callable[[_LineJob], Awaitable[Any]], bounded: bool) -> _LineEntry:
+        loop = asyncio.get_running_loop()
+        job = _LineJob(index=self._next_index)
+        self._next_index += 1
+        ran: asyncio.Future[Any] = loop.create_future()
+        ran.add_done_callback(_consumed)
+        previous = self._tail
+
+        async def run() -> None:
+            await _quiet(previous)
+            if bounded:
+                while self._outstanding >= MAX_OUTSTANDING:
+                    if self._room is None:
+                        self._room = loop.create_future()
+                    await self._room
+                self._outstanding += 1
+            try:
+                ran.set_result(await self._on_line(job, work))
+            except BaseException as error:
+                if not ran.done():
+                    ran.set_exception(error)
+
+        self._tail = self._spawn(run())
+        return _LineEntry(job, ran)
+
+    async def _on_line(self, job: _LineJob, work: Callable[[_LineJob], Awaitable[Any]]) -> Any:
+        """Hold the line for ``job`` until its line part is done. Gates are its touches' own."""
+
+        self._current = job
+        try:
+            return await work(job)
+        finally:
+            self._current = None
+
+    async def _outcome_of(self, ran: _LineEntry) -> Any:
+        """The job's value, once its commit -- if it admitted one -- is published, or never will be."""
+
+        result: _Ran = await ran.ran
+        if result.after is not None:
+            await result.after
+        return result.value
+
+    def _chain(self, before: asyncio.Future[None], outcome: asyncio.Future[Any]) -> asyncio.Future[None]:
+        """A future that settles once every job so far has its outcome delivered."""
+
+        # Pending, not settled: a job behind this fence waits for the outcome before it, which is the
+        # ordering the fence exists for. Starting it settled would let a later job whose own outcome is
+        # ready -- a read behind a commit still in Storage -- go first (``session.ts:1632-1634``).
+        fence = _pending_future(asyncio.get_running_loop())
+
+        async def follow() -> None:
+            await _quiet(before)
+            await _quiet(outcome)
+            if not fence.done():
+                fence.set_result(None)
+
+        self._spawn(follow())
+        return fence
+
+    async def _deliver(
+        self,
+        job: _LineJob,
+        before: asyncio.Future[None],
+        outcome: asyncio.Future[Any],
+        fenced: bool = True,
+    ) -> Any:
+        try:
+            if fenced:
+                await before
+            value = await outcome
+        except BaseException as error:
+            self._delivered(job, fenced)
+            raise self._poison(job, error) from error
+        self._delivered(job, fenced)
+        poisoned = self._poisoned(job, None)
+        if poisoned is not None:
+            raise poisoned
+        return value
+
+    async def _deliver_exempt(
+        self,
+        entry: _LineEntry,
+        before: asyncio.Future[None],
+        outcome: asyncio.Future[Any],
+    ) -> Any:
+        """Deliver an exempt job's outcome once it is known whether it has to wait behind anything.
+
+        A job that wrote nothing and never touched a gate is equivalent to having run before every
+        unpublished commit, so its caller -- scheduler code, and scheduler code only -- is handed the
+        outcome without waiting for the outcomes of others. A job that wrote, or that waited at a gate,
+        or that ran close listeners waits like any other: no invocation may start on a reservation that
+        is not durable (``session.ts:1645-1652``, ``session.ts:480-493``).
+        """
+
+        try:
+            result: _Ran = await entry.ran
+            fenced = entry.job.hit or result.after is not None
+        except BaseException:
+            fenced = entry.job.hit
+        return await self._deliver(entry.job, before, outcome, fenced)
+
+    def _poison(self, job: _LineJob, error: BaseException) -> BaseException:
+        """The error the job gets: the Session's failure once anything failed, its own until then."""
+
+        return error if (poisoned := self._poisoned(job, error)) is None else poisoned
+
+    def _poisoned(self, job: _LineJob, error: BaseException | None) -> BaseException | None:
+        """``SessionFailed`` instead of ``error`` when ``job`` comes after the failure's boundary."""
+
+        if self._fail_at is None or job.index <= self._fail_at or job.index in self._own_outcomes:
+            return error
+        return SessionFailed(self._failure)
+
+    def _delivered(self, job: _LineJob, fenced: bool = True) -> None:
+        """Job ``job`` has its outcome: let the line go on past ``MAX_OUTSTANDING``.
+
+        Only a delivery that waited behind the outcomes before it marks the line as delivered: an
+        exempt job ran as if before every unpublished commit, so it says nothing about where the
+        failure's boundary falls (``session.ts:1722-1724``).
+        """
+
+        if fenced:
+            self._last_delivered = job.index
+        self._outstanding -= 1
+        room = self._room
+        if room is not None and self._outstanding < MAX_OUTSTANDING:
+            self._room = None
+            if not room.done():
+                room.set_result(None)
+
+    def _spawn(self, coroutine: Any) -> asyncio.Future[None]:
+        """Run ``coroutine`` as a task the loop must not collect early; settles when it is over."""
+
+        loop = asyncio.get_running_loop()
+        settled: asyncio.Future[None] = _pending_future(loop)
+        task = loop.create_task(coroutine)
+        self._keep(task)
+
+        def done(finished: asyncio.Task[None]) -> None:
+            self._line_tasks.discard(finished)
+            if not settled.done():
+                settled.set_result(None)
+
+        task.add_done_callback(done)
+        return settled
+
+    def _keep(self, task: asyncio.Task[None]) -> None:
+        """Keep a strong reference: the loop holds only a weak one to a task it runs."""
+
+        self._line_tasks.add(task)
+        task.add_done_callback(self._line_tasks.discard)
+
+    async def _drained(self) -> None:
+        """A ``*`` barrier: once every part admitted so far is published, or never will be."""
+
+        drained = self._writer.drained()
+        if drained is not None:
+            await drained
+
+    # ── Commits ─────────────────────────────────────────────────────────────
+
     async def commit(
         self,
         change: Callable[[Transaction], Any],
         context: Context,
+        options: CommitOptions | None = None,
     ) -> Any:
-        return await self.commit_with(change, context)
+        return await self.commit_with(change, context, None, options)
 
     async def commit_with(
         self,
         change: Callable[[Transaction], Any],
         context: Context,
         scope: TransactionScope | None = None,
+        options: CommitOptions | None = None,
     ) -> Any:
-        try:
-            self.assert_usable()
-        except Exception as error:
-            raise error
-        async with self._line:
-            self._assert_healthy()
-            signal = context.abort_signal
-            if signal is not None:
-                signal.raise_if_aborted()
-            tx = Transaction(self._host, context, scope)
-            try:
-                result = await change(tx)
-                self._assert_healthy()
-            except BaseException:
-                await tx.settle_failure()
-                self._sweep_documents()
-                raise
-            try:
-                writes = await tx.settle_success()
-            except BaseException:
-                self._sweep_documents()
-                raise
-            if not writes:
-                tx.discard()
-                self._sweep_documents()
-                return result
-            try:
-                seq = await self._storage.commit(writes, without_abort_signal(context))
-            except BaseException:
-                tx.discard()
-                raise
-            try:
-                documents = tx.adopt(seq)
-            except BaseException as error:
-                self.fail(error)
-                raise
-            for document in documents:
-                self._touch_document(_record_address_id(document["record"]))
-            self._publish(seq, writes, documents, context)
-            self._sweep_documents()
-            return result
-
-    async def read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
         self.assert_usable()
-        return await self._read_on_line(job)
+        return await self._enqueue(
+            partial(self._run_commit, change, context, scope, self._deferral(options))
+        )
 
-    async def read_queued_before_close(self, job: Callable[[], Awaitable[Any]]) -> Any:
+    def _deferral(self, options: CommitOptions | None) -> int | float | None:
+        """How long this commit may wait to be stored, or ``None`` to store it before it resolves.
+
+        One mark covers both kinds: whether Storage gets the commit is not something the callback can
+        steer, so an ordinary :meth:`Session.commit` can be deferred too. Only the shape of
+        ``persistence`` is trusted, and a request with no ``within_ms`` gets the Session's default. A
+        ``within_ms`` that is not a number of milliseconds, ``0`` or more, is refused here rather than
+        at the timer: the types cannot check a caller's number (``session.ts:515-524``).
+        """
+
+        persistence = options.get("persistence") if options is not None else None
+        if persistence is None:
+            return None
+        if persistence["kind"] != "deferred":
+            return None
+        within = persistence.get("within_ms")
+        if within is None:
+            return self._persist_within_ms()
+        if isinstance(within, bool) or not isinstance(within, (int, float)) or not within >= 0:
+            raise TypeError(
+                "CommitPersistence.within_ms must be a number of milliseconds, 0 or more"
+            )
+        return within
+
+    async def commit_internal(
+        self,
+        change: Callable[[Transaction], Any],
+        context: Context,
+    ) -> Any:
+        """``commit_with`` for a commit of the scheduler's own whose outcome goes only to scheduler code.
+
+        When it writes nothing and waited at no gate its outcome is delivered at once, ahead of the
+        outcomes of other jobs: it is equivalent to having run before every unpublished commit. One
+        that writes is never exempt -- its outcome waits for its own publication and for every earlier
+        outcome, so no invocation starts on a reservation that is not durable. It takes no scope and no
+        deferral, because it is not a caller's commit (``session.ts:486-493``).
+        """
+
+        self.assert_usable()
+        # No scope and no deferral: upstream passes `undefined` for both, so a commit of the
+        # scheduler's own is never held (`session.ts:486-493`).
+        return await self._enqueue(
+            partial(self._run_commit, change, context, None, None), exempt=True
+        )
+
+    async def _run_commit(
+        self,
+        change: Callable[[Transaction], Any],
+        context: Context,
+        scope: TransactionScope | None,
+        within_ms: int | float | None,
+        job: _LineJob,
+    ) -> _Ran:
+        """One commit's line part: its callback, its settlement, and its logical admission."""
+
+        self._assert_healthy()
+        signal = context.abort_signal
+        if signal is not None:
+            signal.raise_if_aborted()
+        tx = Transaction(self._host, context, scope)
+        try:
+            result = await change(tx)
+            self._assert_healthy()
+        except BaseException:
+            await tx.settle_failure()
+            self._sweep_documents()
+            raise
+        try:
+            writes = await tx.settle_success()
+        except BaseException:
+            self._sweep_documents()
+            raise
+        if not writes:
+            tx.discard()
+            self._sweep_documents()
+            return _Ran(result)
+        if self._read_only:
+            # Refused before Storage: the Session stays healthy, and the caller sees why.
+            tx.discard()
+            self._sweep_documents()
+            raise ReadOnlySession("a commit with writes")
+        # Nothing fallible is left, so the hold is allowed to move memory ahead of Storage. A
+        # deferred commit whose every write may wait is held in memory instead; anything else, and any
+        # commit not asked to wait, is stored.
+        held: list[HeldChanges] | None = tx.holdable() if within_ms is not None else None
+        taken: list[_Hold] = []
+        # Only a commit that is stored declares the extra keys it writes: a held commit writes nothing
+        # yet, so it declares the documents it holds and nothing else (`session.ts:1118-1152`).
+        membership: Sequence[str] = ()
+        if held is None:
+            # Logical admission asks for the keys a commit writes besides its records' -- a Harness
+            # adds the ownership memberships its task changes write -- before the commit is admitted,
+            # on the line, so a later job that reads one of them waits for it.
+            declared = self.membership_keys(tx)
+            if not isinstance(declared, list):
+                try:
+                    declared = await cast(Awaitable[Sequence[str]], declared)
+                except BaseException:
+                    tx.discard()
+                    self._sweep_documents()
+                    raise
+            membership = declared
+            # An immediate commit stores what earlier deferred commits adopted in memory before its
+            # own changes, so Storage stays complete below it. Taken before the keys, so the documents
+            # it stores held changes of are its writes too: a later job that reads one waits for it
+            # instead of storing them again.
+            taken = tx.take_held(self._hold_of)
+        assert held is None or within_ms is not None
+        publish: Callable[[Seq | None], PublishFailure | None] = (
+            partial(self._hold, tx, held, within_ms, context)
+            if held is not None and within_ms is not None
+            else partial(self._adopt, tx, writes, taken, context)
+        )
+        # Logical admission: the writer stores it, off the line, and the line goes on. Its keys join
+        # the unpublished write set here, so a later job that touches one waits for its publication.
+        part = self._writer.admit(
+            PartSpec(
+                index=job.index,
+                # A deferred commit that holds its changes gives the writer nothing at all, and its
+                # publication adopts it in memory and queues the store instead of publishing a commit.
+                writes=None if held is not None else writes,
+                keys=[*tx.write_keys(), *membership],
+                context=context,
+                publish=publish,
+                discard=tx.discard,
+            )
+        )
+        self._sweep_documents()
+        return _Ran(result, part.outcome)
+
+    def membership_keys(self, tx: Transaction) -> Sequence[str] | Awaitable[Sequence[str]]:
+        """Keys a commit writes besides its records' (:meth:`Transaction.write_keys`), at its admission,
+        on the line: a Harness adds the ownership memberships its task changes write. A plain Session
+        adds none.
+        """
+
+        return []
+
+    def _hold(
+        self,
+        tx: Transaction,
+        held: list[HeldChanges],
+        within_ms: int | float,
+        context: Context,
+        _seq: Seq | None,
+    ) -> PublishFailure | None:
+        """Adopt one commit's changes in memory only, queue their store, and show them now.
+
+        Its callers are already released; the writer publishes it with no sequence number and no commit
+        observer, because it is not a durable commit yet. Watches, document observers, and the internal
+        commit listener still see it, because they follow committed state as memory holds it, not as
+        Storage holds it (spec §4.1).
+        """
+
+        try:
+            documents = tx.adopt_held()
+        except Exception as error:
+            return PublishFailure("adoption", error)
+        deadline = self._clock() + within_ms
+        for changes in held:
+            loaded = changes.loaded
+            id = loaded.record["id"]
+            entry = self._holds.get(id)
+            if entry is None:
+                # Pin the document, so the held changes survive the moment their address has no
+                # reader left; the unpin belongs to this hold, not to the count.
+                entry = _Hold(
+                    loaded=loaded,
+                    pending=PendingOps(),
+                    base=False,
+                    deadline=deadline,
+                    unpin=self._pin_document(loaded.address_id, id),
+                )
+                self._holds[id] = entry
+            else:
+                entry.deadline = min(entry.deadline, deadline)
+            entry.pending.push(changes.ops)
+            if changes.base:
+                entry.base = True
+        self._arm_hold_timer()
+        failure = self._advance_followers(documents, (), {"kind": "memory", "changes": documents}, context)
+        return None if failure is None else PublishFailure("listener", failure)
+
+    def _hold_of(self, id: DocumentId) -> _Hold | None:
+        """The queued changes of a cached incarnation, for one commit to store before its own."""
+
+        return self._holds.get(id)
+
+    def _hold_of_id(self, id: DocumentId) -> list[_Hold]:
+        """One incarnation's hold as a ``select`` argument, or none when it has nothing held."""
+
+        entry = self._holds.get(id)
+        return [] if entry is None else [entry]
+
+    async def _store_holds(
+        self,
+        select: Callable[[], Sequence[_Hold]],
+        context: Context,
+    ) -> None:
+        """Store the held changes ``select`` returns, in one storage transaction, from a job on the line.
+
+        A barrier: they are selected once every commit admitted before is published. Memory already has
+        them, so the Session's own followers were shown each one when it was adopted and see nothing
+        here; only the host's commit observers do, published as the writer publishes it. A failure fails
+        the Session, as every Storage failure does (``session.ts:1249-1281``).
+        """
+
+        await self._drained()
+        holds = list(select())
+        if not holds:
+            return
+        writes: list[StorageWrite] = []
+        contents: list[DocumentContent] = []
+        changes: list[CommitChange] = []
+        keys: list[str] = []
+        for entry in holds:
+            loaded = entry.loaded
+            content, ops = store_held(entry, [], loaded.value, loaded.value_version)
+            contents.append(content)
+            writes.append(
+                cast(
+                    StorageWrite,
+                    {"type": "document.change", "id": loaded.record["id"], "content": content},
+                )
+            )
+            keys.append(document_key(loaded.address_id))
+            keys.append(incarnation_key(loaded.record["id"]))
+            scope = loaded.record["scope"]
+            changes.append(
+                {
+                    "type": "document",
+                    "kind": "change",
+                    "record": loaded.record,
+                    # Held documents are conversation documents.
+                    "conversationId": (
+                        scope["conversationId"] if scope["kind"] == "conversation" else None
+                    ),
+                    "version": loaded.value_version,
+                    "value": loaded.value,
+                    "ops": ops,
+                }
+            )
+
+        def publish(seq: Seq | None) -> PublishFailure | None:
+            for index, entry in enumerate(holds):
+                if contents[index]["kind"] == "base":
+                    entry.loaded.deltas_since_base = 0
+                else:
+                    entry.loaded.deltas_since_base += 1
+            if seq is not None and self._commit_observers:
+                self._advance_commit_observers({"seq": seq, "changes": changes}, context)
+            self._release(holds)
+            return None
+
+        assert self._current is not None
+        part = self._writer.admit(
+            PartSpec(
+                index=self._current.index,
+                writes=writes,
+                keys=keys,
+                context=context,
+                publish=publish,
+                discard=lambda: None,
+            )
+        )
+        await part.outcome
+
+    def _release(self, holds: Sequence[_Hold]) -> None:
+        """After their store: forget ``holds``, unpin their documents, and move the timer on."""
+
+        for entry in holds:
+            id = entry.loaded.record["id"]
+            if self._holds.get(id) is entry:
+                del self._holds[id]
+                entry.unpin()
+        self._arm_hold_timer()
+
+    def _arm_hold_timer(self) -> None:
+        """Keep one foreground timer for the earliest deadline among the held documents.
+
+        When it fires, every held document is stored, in one storage transaction: a deadline is the
+        latest time any one of them may wait, and the others cost little more in the same transaction.
+        Once a timer has fired it stays until its job ran, so nothing re-arms behind it. Workers refuse
+        a background timer, and this store is the commit's own durability rather than upkeep the host
+        may skip, so it is armed foreground (``session.ts:1295-1322``). Nothing polls or counts turns:
+        the host's timer is the only thing that decides when, and each store re-arms it for what is
+        still held.
+        """
+
+        if self._closing is not None:
+            return
+        deadline: int | float = float("inf")
+        for entry in self._holds.values():
+            if entry.deadline < deadline:
+                deadline = entry.deadline
+        armed = self._hold_timer
+        if armed is not None and (armed.fired or armed.at == deadline):
+            return
+        self._disarm_hold_timer()
+        # A document held behind `within_ms: Infinity` waits for another trigger; there is nothing to
+        # arm, and nothing to keep armed from a previous document (`session.ts:1305-1311`).
+        if deadline == float("inf"):
+            return
+        timer = _HoldTimer(at=deadline, disarm=lambda: None)
+
+        def run() -> None:
+            timer.fired = True
+
+            async def store(_job: _LineJob) -> None:
+                if self._hold_timer is timer:
+                    self._hold_timer = None
+                # Close stores what is held itself.
+                if self._closing is not None or self._failure is not None:
+                    return
+                await self._store_holds(lambda: list(self._holds.values()), BACKGROUND_CONTEXT)
+
+            # Upstream's timer calls `#maintain`, which attaches the job to the tail the moment it is
+            # called (`session.ts:1310-1318`); queueing a task would insert a turn upstream does not
+            # have, and that turn decides where the store lands on the line. Nothing awaits it, so its
+            # failure is retrieved, not carried -- as for the document sweep's job.
+            self._queue_line(store, bounded=False)
+
+        self._hold_timer = timer
+        timer.disarm = self._timers.foreground(run, max(0.0, deadline - self._clock()))
+
+    def _disarm_hold_timer(self) -> None:
+        timer = self._hold_timer
+        if timer is not None:
+            timer.disarm()
+            self._hold_timer = None
+
+    def _adopt(
+        self,
+        tx: Transaction,
+        writes: Sequence[StorageWrite],
+        taken: Sequence[_Hold],
+        context: Context,
+        seq: Seq | None,
+    ) -> PublishFailure | None:
+        """Publish a stored commit: adopt it in memory and run its publication.
+
+        A throw of the adoption leaves memory behind durable state; the writer fails the Session with
+        it and publishes no later part of the call.
+        """
+
+        assert seq is not None
+        try:
+            documents = tx.adopt(seq)
+        except Exception as error:
+            return PublishFailure("adoption", error)
+        failure = self._publish(seq, writes, documents, context)
+        self._release(taken)
+        for document in documents.stored:
+            self._touch_document(_record_address_id(document["record"]))
+        return None if failure is None else PublishFailure("listener", failure)
+
+    def _publishing(self, publish: Callable[[], None], context: Context) -> Awaitable[None] | None:
+        """Run one commit's publication inside the storage's own scope, or directly without one.
+
+        The optional ``publishing`` member (see
+        :class:`~pi_durable.types.PublishingStorage`) lets a storage that owns a batch take each
+        publication inside that batch, so what the publication marks lands together. No bundled
+        backend has one, so the Session normally publishes directly. A storage that throws instead
+        of running the publication is reported and the publication runs anyway: the commit is
+        stored, so it must be published. Returns ``None`` when it ran at once, else an awaitable that
+        settles once it ran -- the writer publishes the next part only then.
+        """
+
+        scope = self._storage.publishing
+        if scope is None:
+            publish()
+            return None
+        done: asyncio.Future[None] = _pending_future(_current_loop())
+        ran = False
+
+        def once() -> None:
+            nonlocal ran
+            if ran:
+                return
+            ran = True
+            try:
+                publish()
+            finally:
+                if not done.done():
+                    done.set_result(None)
+
+        try:
+            scope(once, context)
+        except BaseException as error:
+            self.report(error, LISTENER)
+            once()
+        return None if ran else done
+
+    async def read_on_line(self, job: Callable[[Storage], Awaitable[Any]]) -> Any:
+        """Run a read-only job on the mutation line, reading through the gated Storage view.
+
+        Its reads wait for the publication of what the line admitted before them, and its outcome
+        comes after theirs.
+        """
+
+        self.assert_usable()
+        return await self._enqueue(partial(self._read_job, job))
+
+    async def read_queued_before_close(self, job: Callable[[Storage], Awaitable[Any]]) -> Any:
         """Run a read admitted before ``close()`` sealed admission; a later read rejects.
 
         The Harness uses this for ``inspect()``: an inspection already queued on the Session line at
@@ -394,14 +1303,13 @@ class SessionImpl:
         self._assert_healthy()
         if self._closing is not None:
             raise self._closed_error()
-        return await self._read_on_line(job)
+        return await self._enqueue(partial(self._read_job, job))
 
-    async def _read_on_line(self, job: Callable[[], Awaitable[Any]]) -> Any:
-        async with self._line:
-            self._assert_healthy()
-            if self._closed.done():
-                raise self._closed_error()
-            return await job()
+    async def _read_job(self, read: Callable[[Storage], Awaitable[Any]], _job: _LineJob) -> _Ran:
+        self._assert_healthy()
+        if self._closed.done():
+            raise self._closed_error()
+        return _Ran(await read(self._gated))
 
     async def context(
         self,
@@ -444,11 +1352,11 @@ class SessionImpl:
             return
         loop = asyncio.get_running_loop()
         closing: asyncio.Future[None] = loop.create_future()
-        closing.add_done_callback(lambda future: future.exception())
+        closing.add_done_callback(_consumed)
         self._closing = closing
         self._notify_close()
         try:
-            loop.create_task(self._run_close())
+            self._keep(loop.create_task(self._run_close()))
         except BaseException:
             self._closing = None
             raise
@@ -465,43 +1373,69 @@ class SessionImpl:
                 await self.before_close()
             except Exception as close_error:
                 self.report(close_error)
-            async with self._line:
-                self._commit_listeners.clear()
-                self._internal_listeners.clear()
-                self._documents.clear()
-                self._idle_documents.clear()
-                self._attached_documents.clear()
-                for state in list(self._states):
-                    state._close_session()
-                self._states.clear()
-                try:
-                    await self._storage.close(without_abort_signal(BACKGROUND_CONTEXT))
-                except BaseException as close_error:
-                    error = close_error
-                    if self._failure is None:
-                        self._failure = close_error
-                        self.report(close_error, {"type": "session_failed"})
-                    raise
+            await self._maintain(self._close_job)
         except BaseException as caught:
             error = caught
         finally:
-            if not self._closed.done():
-                if self._failure is None:
-                    self._closed.set_result({"reason": "closed"})
-                else:
-                    self._closed.set_result({"reason": "failed", "error": self._failure})
+            self._settle_closed(
+                {"kind": "closed"} if self._failure is None else {"kind": "failed", "error": self._failure}
+            )
             if not self._closing.done():
                 if error is None:
                     self._closing.set_result(None)
                 else:
                     self._closing.set_exception(error)
 
+    async def _close_job(self, _job: _LineJob) -> None:
+        """The line part of close: drain what the writer still owes, then drop the trackers and close Storage.
+
+        Every commit admitted before the seal settled, and the writes at close went through the
+        writer, so no storage call is in flight when the backend closes.
+        """
+
+        await self._drained()
+        # Last, after the writes at close and while the trackers are still here. A failed Session
+        # writes nothing; a failing store fails it, and the backend still closes -- so the store's
+        # error is kept and thrown only after the close ran (`session.ts:788-818`).
+        unstored: BaseException | None = None
+        if self._failure is None and self._holds:
+            try:
+                await self._store_holds(
+                    lambda: list(self._holds.values()), without_abort_signal(BACKGROUND_CONTEXT)
+                )
+            except BaseException as store_error:
+                unstored = store_error
+        # After the last publication: every commit admitted before the seal has settled, so a commit
+        # observer's end follows the last publication it was handed.
+        commit_observers, self._commit_observers = self._commit_observers, []
+        closed = self._failure if self._failure is not None else session_closed_error()
+        for observer in commit_observers:
+            observer.close_session(closed)
+        self._internal_listeners.clear()
+        self._documents.clear()
+        self._idle_documents.clear()
+        self._attached_documents.clear()
+        self._holds.clear()
+        self._observers.clear()
+        try:
+            await self._storage.close(without_abort_signal(BACKGROUND_CONTEXT))
+        except BaseException as close_error:
+            if self._failure is None:
+                self._failure = close_error
+                self.report(close_error, {"kind": "storage_failed"})
+            raise
+        if unstored is not None:
+            raise unstored
+
+    def _settle_closed(self, end: SessionEnd) -> None:
+        """Settle ``closed``, once, with the end the Session ended by."""
+
+        if not self._closed.done():
+            self._closed.set_result(end)
+
     def _notify_close(self) -> None:
         self._cancel_document_sweep()
-        for task in list(self._sweep_tasks):
-            task.cancel()
-        for state in list(self._states):
-            state._close_session()
+        self._disarm_hold_timer()
         listeners = self._close_listeners
         self._close_listeners = []
         for listener in listeners:
@@ -509,28 +1443,46 @@ class SessionImpl:
         watches = self._watches
         self._watches = []
         for entry in watches:
-            entry.watch.close_session(self._failure)
+            entry.follower.close_session(self._failure)
+        observers = self._observers
+        self._observers = []
+        # One close, one error: an observer follows the Session through its close, so the close ends
+        # it `failed` — the `ended` kind stays for an observed owner that ended (spec §9.1).
+        closed = self._failure if self._failure is not None else session_closed_error()
+        for entry in observers:
+            entry.follower.close_session(closed)
 
-    def subscribe_commits(
-        self,
-        listener: Callable[[CommitPublication, Context], Any],
-    ) -> Callable[[], None]:
+    def observe_commits(self, observer: CommitObserver) -> CommitObservation:
+        """Attach a synchronous observer of every stored commit (spec §9.1).
+
+        Its ``advance`` is handed exactly what Storage made durable, one microtask from the commit's
+        publication, and its ``end`` gets the Session's close after its last publication. The
+        detach is idempotent: no call and no end follows it.
+        """
+
         self.assert_usable()
-        self._commit_listeners.append(listener)
-        return lambda: self._commit_listeners.remove(listener) if listener in self._commit_listeners else None
+        guarded = GuardedObserver(
+            observer,
+            lambda: (
+                self._commit_observers.remove(guarded)
+                if guarded in self._commit_observers
+                else None
+            ),
+            lambda error: self.report(error, LISTENER),
+        )
+        self._commit_observers.append(guarded)
+        return AttachedObservation(None, guarded)
 
-    def observe_commits(
+    def observe_stored_commits(
         self,
-        listener: Callable[[CommitPublication, Context], Any],
+        listener: Callable[[ObservedCommit, Context], Any],
     ) -> Callable[[], None]:
         """Internal: a commit listener whose state follows storage; a throw fails the Session."""
 
         self.assert_usable()
         self._internal_listeners.append(listener)
-        return (
-            lambda: self._internal_listeners.remove(listener)
-            if listener in self._internal_listeners
-            else None
+        return lambda: (
+            self._internal_listeners.remove(listener) if listener in self._internal_listeners else None
         )
 
     def subscribe_close(self, listener: Callable[[], Any]) -> Callable[[], None]:
@@ -541,61 +1493,194 @@ class SessionImpl:
     def _publish(
         self,
         seq: Seq,
-        writes: list[StorageWrite],
-        documents: list[DocumentCommitChange],
+        writes: Sequence[StorageWrite],
+        documents: AdoptedDocuments,
         context: Context,
-    ) -> None:
+    ) -> BaseException | None:
+        """Publish one stored commit to memory and to the Session's observers.
+
+        Returns the error the first of the Session's own observers threw, or ``None``: the commit is
+        durable, so a failing observer neither fails the commit nor skips the others, and the writer
+        fails the Session with it once the host listeners had the commit.
+
+        The two audiences differ. The Session's own followers -- its watches, its observers, and the
+        internal commit listener -- see what memory adopted, which is what a held commit already
+        showed them; the host's ``observe_commits()`` observer sees what Storage made durable, held
+        changes a later commit stored included (spec §4.1).
+        """
+
         if (
-            not self._commit_listeners
-            and not self._internal_listeners
-            and not self._states
+            not self._internal_listeners
+            and not self._commit_observers
             and not self._watches
+            and not self._observers
         ):
-            return
-        changes: list[CommitChange] = [
+            return None
+        tables: list[CommitChange] = [
             cast(CommitChange, write)
             for write in writes
             if write["type"] in ("conversation", "entry", "task", "submission")
         ]
-        changes.extend(documents)
-        publication: CommitPublication = {"seq": seq, "changes": changes}
-        for state in list(self._states):
-            for change in documents:
-                if change["type"] != "document" or change["record"]["id"] != state._record_id:
-                    continue
-                ops, version = observed_operations(state._observed_version, change)
-                # A migration-only base changes nothing for an observer of the new version.
-                if not ops:
-                    continue
-                state._observed_version = version
-                # A retired incarnation never changes again: its observers pin nothing.
-                if change["value"] is None:
-                    state._release_pin()
-                state._advance(change["value"], context)
-        for entry in list(self._watches):
-            for change in documents:
-                if change["type"] != "document" or change["record"]["id"] != entry.record_id:
-                    continue
-                if change["value"] is None:
-                    entry.release()
-                entry.watch.advance(change, context)
-        for listener in list(self._internal_listeners):
-            contained(partial(listener, publication, context), self.fail)
-        for listener in list(self._commit_listeners):
-            contained(
-                partial(listener, publication, context),
-                lambda error: self.report(error, LISTENER),
+        changes: list[CommitChange] = [*tables, *documents.observed]
+        observed: ObservedCommit = {"kind": "stored", "seq": seq, "changes": changes}
+        # The dispatch is taken only when an observer is attached at the publication (spec §9.1):
+        # one an own observer attaches during it gets the commit only when one was already attached,
+        # so this is read before the own followers run, and the dispatch reads the set at delivery.
+        host_attached = bool(self._commit_observers)
+        failure = self._advance_followers(documents.observed, writes, observed, context)
+        if host_attached:
+            # One publication for both audiences, unless the commit also stored held changes: those
+            # belong to the host's observer alone, because memory was shown them when each deferred
+            # commit was adopted.
+            stored: CommitPublication = (
+                {"seq": seq, "changes": changes}
+                if documents.stored is documents.observed
+                else {"seq": seq, "changes": [*tables, *documents.stored]}
             )
+            self._advance_commit_observers(stored, context)
+        return failure
+
+    def _advance_followers(
+        self,
+        documents: Sequence[DocumentCommitChange],
+        writes: Sequence[StorageWrite],
+        publication: ObservedCommit,
+        context: Context,
+    ) -> BaseException | None:
+        """Show one commit's adopted documents to the Session's own followers.
+
+        Watches, document observers, and the internal commit listener all follow committed state as
+        memory holds it, so a deferred commit -- adopted, never stored -- reaches them through here
+        too, with nothing but its own document changes (``writes`` empty). Returns the first error an
+        own follower threw.
+        """
+
+        if not self._internal_listeners and not self._watches and not self._observers:
+            return None
+        for entry in list(self._observers):
+            self._advance_observer(entry, documents, writes, context)
+        for entry in list(self._watches):
+            watch = cast(CommittedWatch, entry.follower)
+            if watch.ending:
+                # The commit that ended the owner already took this watch off the line: no later
+                # change reaches it, and only its pending end remains (§9.1).
+                continue
+            for settled in documents:
+                if (
+                    settled["type"] != "document"
+                    or _record_address_id(settled["record"]) != entry.address_id
+                ):
+                    continue
+                # A watch follows its address: while it is absent the watch pins nothing, and a new
+                # incarnation is pinned for the same watch.
+                self._follow_address(entry, settled)
+                watch.advance_document(settled, context)
+            if _ends_the_owner(writes, entry.owner_task_id):
+                # The commit that made the owner task terminal retired the task's document, and that
+                # retirement is this watch's last call: the pin goes with the line, and the watch
+                # ends once that call returned — or at the Session's close or failure, if its
+                # listener never starts to deliver it (spec §9.1).
+                self._release_pin(entry)
+                watch.end_after_delivery()
+        failures: list[BaseException] = []
+
+        def keep(error: BaseException) -> None:
+            if not failures:
+                failures.append(error)
+
+        if self._internal_listeners:
+            for listener in list(self._internal_listeners):
+                contained(partial(listener, publication, context), keep)
+        return failures[0] if failures else None
+
+    def _advance_commit_observers(self, publication: CommitPublication, context: Context) -> None:
+        """Hand the host's commit observers what Storage made durable, in line order.
+
+        It is read at delivery: an observer that an earlier advance detached — its own or another
+        observer's — takes nothing of the commit it was attached for (§9.1).
+        """
+
+        for observer in list(self._commit_observers):
+            if observer.attached:
+                observer.advance(publication, context)
+
+    def _follow_address(
+        self,
+        entry: _WatchAttachment,
+        settled: DocumentCommittedChange | DocumentRetiredChange,
+    ) -> None:
+        """Move one attachment's pin to the incarnation its address now holds.
+
+        A watch and an observer follow their address the same way: while it is absent nothing is
+        pinned for them, and a document created at it later is pinned again for the same attachment.
+        """
+
+        if settled["kind"] == "retire":
+            self._release_pin(entry)
+            entry.record_id = None
+        elif entry.record_id != settled["record"]["id"]:
+            self._release_pin(entry)
+            entry.record_id = settled["record"]["id"]
+            entry.release = self._pin_document(entry.address_id, settled["record"]["id"])
+
+    def _release_pin(self, entry: _WatchAttachment) -> None:
+        """Release the pin one attachment holds, once, leaving it free to take another."""
+
+        release, entry.release = entry.release, None
+        if release is not None:
+            release()
+
+    def _advance_observer(
+        self,
+        entry: _WatchAttachment,
+        documents: Sequence[DocumentCommitChange],
+        writes: Sequence[StorageWrite],
+        context: Context,
+    ) -> None:
+        """Hand one observer every change of this commit at its address, unfolded and in line order.
+
+        The observer may detach in one of its own calls, or throw and be detached by the guard: what
+        is left of the commit then reaches neither it nor a pin taken for it. A commit that makes the
+        owner task of a task document terminal is the one case an observer ends on its own: its
+        retirement is the task document's last change, and the end follows it on the same publication
+        (spec §9.1).
+        """
+
+        follower = cast(AttachedObserver, entry.follower)
+        for change in documents:
+            # A call of this same commit may have detached the observer, its own or another
+            # observer's: the rest of the commit then reaches neither it nor a pin taken for it.
+            if not follower.attached:
+                return
+            if (
+                change["type"] != "document"
+                or _record_address_id(change["record"]) != entry.address_id
+            ):
+                continue
+            self._follow_address(entry, change)
+            follower.advance_document(change, context)
+            if not follower.attached:
+                return
+        owner = entry.owner_task_id
+        if owner is None:
+            return
+        if _ends_the_owner(writes, owner):
+            follower.end(ENDED)
 
     # ── Document cache ─────────────────────────────────────────────────────
 
     def _cached(self, address_id: str) -> LoadedDocument | None:
+        if self._read_only:
+            # A read-only Session shows a Storage another process writes, so nothing it reads stays current.
+            return None
         cached = self._documents.get(address_id)
         if cached is not None:
             self._touch_document(address_id)
         return cached
 
     def _install(self, document: LoadedDocument) -> None:
+        if self._read_only:
+            return
         self._documents[document.address_id] = document
         self._touch_document(document.address_id)
 
@@ -611,11 +1696,19 @@ class SessionImpl:
         address: DocumentAddress,
         context: Context,
     ) -> LoadedDocument | None:
+        # What an unpublished commit wrote at the address is in neither the cache nor what Storage
+        # shows yet: wait for its publication first.
+        gate = self.touch(document_key(address_id))
+        if gate is not None:
+            await gate
         cached = self._documents.get(address_id)
         if cached is not None and cached.value_version == definition.version:
             self._touch_document(address_id)
             return cached
         if cached is not None:
+            # The reload must find what memory holds: held changes are stored before their tracker goes,
+            # after a barrier.
+            await self._store_holds(partial(self._hold_of_id, cached.record["id"]), context)
             self._drop_document(address_id)
         record = await self._storage.find_document(address, "current", context)
         if record is None:
@@ -635,16 +1728,19 @@ class SessionImpl:
         self._install(loaded)
         return loaded
 
-    def _detach_state(self, state: DocumentState) -> None:
-        if state in self._states:
-            self._states.remove(state)
-
     async def unload_documents(self) -> None:
-        """Drop every loaded document value; later access cold-loads from Storage."""
+        """Drop every loaded document value on the mutation line, held changes stored first.
 
-        async with self._line:
+        Later access cold-loads from Storage, so the store is a barrier before the trackers go.
+        """
+
+        async def drop(_job: _LineJob) -> None:
+            if self._failure is None:
+                await self._store_holds(lambda: list(self._holds.values()), BACKGROUND_CONTEXT)
             self._documents.clear()
             self._idle_documents.clear()
+
+        await self._maintain(drop)
 
     # ── Document reads and observation ─────────────────────────────────────
 
@@ -668,46 +1764,86 @@ class SessionImpl:
         definition = token.definition
         resolved = resolve_address(definition, args)
         context = args[resolved.next_argument]
-        # A cached document serves its committed revision without waiting for an in-flight commit,
-        # which holds the mutation line until Storage settles.
+        # A cached document serves its committed revision without waiting for an in-flight commit.
         cached = self._documents.get(resolved.id)
         if cached is not None and cached.value_version == definition.version:
             self._touch_document(resolved.id)
             _validate_document(definition, cached)
             return cached.value
-        async with self._line:
+
+        async def load(_job: _LineJob) -> _Ran:
             self._assert_healthy()
             loaded = await self._load_document(definition, resolved.id, resolved.address, context)
+            return _Ran(loaded)
+
+        loaded = await self._enqueue(load)
         if loaded is None:
             return None
         _validate_document(definition, loaded)
         return loaded.value
 
-    async def document_state(self, token: AnyDocToken, *args: Any) -> DocumentState | None:
-        self.assert_usable()
+    async def observe_doc(self, token: AnyDocToken, *args: Any) -> AttachedObservation | None:
+        """Attach a synchronous observer of one document address (spec §9.1).
+
+        The attachment is atomic on the mutation line: it takes the committed revision with no
+        commit between the read and the attachment, so a commit queued behind the attachment is
+        already in the value the observation hands back, and every later change at the address
+        reaches the observer in line order. An absent address attaches nothing and answers ``None``.
+        The detach is idempotent and unpins the document.
+        """
+
         definition = token.definition
         resolved = resolve_address(definition, args)
         context = args[resolved.next_argument]
-        async with self._line:
-            self._assert_healthy()
-            loaded = await self._load_document(definition, resolved.id, resolved.address, context)
-            if loaded is None:
-                return None
-            _validate_document(definition, loaded)
-            # Close seals admission while the load was underway: no observer, and so no pin, remains.
-            self.assert_usable()
-            release = self._pin_document(loaded.address_id, loaded.record["id"])
-            state = DocumentState(
-                self, loaded.record["id"], loaded.value, loaded.value_version, release
-            )
-            self._states.append(state)
-            return state
+
+        definition = token.definition
+        resolved = resolve_address(definition, args)
+        observer = cast(Observer, args[resolved.next_argument])
+        context = args[resolved.next_argument + 1]
+        return await self._attach_document(
+            definition,
+            resolved,
+            context,
+            lambda loaded: self._attach_observer(definition, loaded, observer),
+            lambda observation: observation.detach(),
+        )
 
     async def watch_doc(self, token: AnyDocToken, *args: Any) -> CommittedWatch | None:
-        self.assert_usable()
         definition = token.definition
         resolved = resolve_address(definition, args)
         context = args[resolved.next_argument]
+        signal = context.abort_signal
+
+        def create(loaded: LoadedDocument) -> CommittedWatch:
+            watch = self._attach_watch(definition, loaded)
+            if signal is not None:
+                watch.observe_cancellation(signal)
+            return watch
+
+        return await self._attach_document(
+            definition,
+            resolved,
+            context,
+            create,
+            lambda watch: watch.abort_acquisition(),
+        )
+
+    async def _attach_document(
+        self,
+        definition: DocDefinition,
+        resolved: Any,
+        context: Context,
+        attach: Callable[[LoadedDocument], Any],
+        cancel: Callable[[Any], None],
+    ) -> Any:
+        """Load one document on the line and attach one follower to its address.
+
+        One acquisition serves a watch and an observer alike, which differ only in what they build
+        from the loaded document and in how an acquisition cancelled while it waited on the line
+        undoes itself: a watch aborts its acquisition, an observation detaches (spec §9.2).
+        """
+
+        self.assert_usable()
         signal = context.abort_signal
         cancelled = signal is not None and signal.aborted
         remove_listener: Callable[[], None] | None = None
@@ -725,22 +1861,23 @@ class SessionImpl:
                 signal.raise_if_aborted()
 
         try:
-            async with self._line:
+
+            async def acquire(_job: _LineJob) -> _Ran:
                 self._assert_healthy()
                 raise_if_cancelled()
-                loaded = await self._load_document(
-                    definition, resolved.id, resolved.address, context
-                )
+                loaded = await self._load_document(definition, resolved.id, resolved.address, context)
                 raise_if_cancelled()
                 if loaded is None:
-                    return None
-                watch = self._attach_watch(definition, loaded)
+                    return _Ran(None)
+                return _Ran(attach(loaded))
+
+            attached = await self._enqueue(acquire)
+            if attached is None:
+                return None
             if cancelled:
-                watch.cancel()
+                cancel(attached)
                 raise_if_cancelled()
-            if signal is not None:
-                watch.observe_cancellation(signal)
-            return watch
+            return attached
         finally:
             if remove_listener is not None:
                 remove_listener()
@@ -752,17 +1889,67 @@ class SessionImpl:
         release = self._pin_document(loaded.address_id, loaded.record["id"])
 
         def detach() -> None:
-            self._watches = [entry for entry in self._watches if entry.watch is not watch]
-            release()
+            self._watches = [
+                held for held in self._watches if held.follower is not watch
+            ]
+            # What is unpinned is what the address holds now, not what it held at acquisition.
+            release_now, attachment.release = attachment.release, None
+            if release_now is not None:
+                release_now()
 
         watch = CommittedWatch(
-            cast(ObservedDocumentValue, loaded.value),
+            loaded.value,
             detach,
             self.report,
             loaded.value_version,
+            loaded.record["id"],
         )
-        self._watches.append(_WatchAttachment(loaded.record["id"], watch, release))
+        attachment = _WatchAttachment(
+            loaded.address_id,
+            loaded.record["id"],
+            watch,
+            release,
+            _owner_task_of(loaded),
+        )
+        self._watches.append(attachment)
         return watch
+
+    def _attach_observer(
+        self, definition: DocDefinition, loaded: LoadedDocument, observer: Observer
+    ) -> AttachedObservation:
+        """Follow one address with a host observer, pinned the way a watch of it is pinned."""
+
+        _validate_document(definition, loaded)
+        # Close seals admission while the load was underway: no observer, and so no pin, remains.
+        self.assert_usable()
+        release = self._pin_document(loaded.address_id, loaded.record["id"])
+
+        def detach() -> None:
+            self._observers = [
+                held for held in self._observers if held.follower is not follower
+            ]
+            # What is unpinned is what the address holds now, not what it held at attachment.
+            release_now, attachment.release = attachment.release, None
+            if release_now is not None:
+                release_now()
+
+        follower = AttachedObserver(
+            observer,
+            detach,
+            self.report,
+            loaded.value,
+            loaded.value_version,
+            loaded.record["id"],
+        )
+        attachment = _WatchAttachment(
+            loaded.address_id,
+            loaded.record["id"],
+            follower,
+            release,
+            _owner_task_of(loaded),
+        )
+        self._observers.append(attachment)
+        return AttachedObservation(loaded.value, follower)
 
     async def snapshot_as_of(self, token: AnyDocToken, *args: Any) -> JsonObject | None:
         self.assert_usable()
@@ -777,9 +1964,10 @@ class SessionImpl:
         if not isinstance(at_value, int) or isinstance(at_value, bool) or at_value < 1:
             raise TypeError("Session.snapshot_as_of() requires an entry ID")
         context = args[resolved.next_argument + 1]
-        async with self._line:
+
+        async def read(_job: _LineJob) -> _Ran:
             self._assert_healthy()
-            stored_entry = await self._storage.entry(conversation_id, EntryId(at_value), context)
+            stored_entry = await self._gated.entry(conversation_id, EntryId(at_value), context)
             if stored_entry is None:
                 raise ValueError(f"Entry {at_value} is not visible from conversation {conversation_id}")
             address = dict(resolved.address)
@@ -787,15 +1975,17 @@ class SessionImpl:
                 "kind": "conversation",
                 "conversationId": stored_entry["entry"]["conversationId"],
             }
-            record = await self._storage.find_document(
+            record = await self._gated.find_document(
                 cast(DocumentAddress, address), stored_entry["commitSeq"], context
             )
             if record is None:
-                return None
-            stored = await self._storage.document(record["id"], stored_entry["commitSeq"], context)
+                return _Ran(None)
+            stored = await self._gated.document(record["id"], stored_entry["commitSeq"], context)
             if stored is None:
                 raise ValueError(f"Historical document {record['id']} ({record['kind']}) cannot be read")
-            return materialize_document(definition, stored)
+            return _Ran(materialize_document(definition, stored))
+
+        return await self._enqueue(read)
 
     @property
     def document_cache_sizes(self) -> DocumentCacheSizes:
@@ -806,6 +1996,7 @@ class SessionImpl:
             idle=len(self._idle_documents),
             attached=len(self._attached_documents),
             sweeps=self._sweep_jobs,
+            held=len(self._holds),
         )
 
     def _touch_document(self, address_id: str) -> None:
@@ -828,6 +2019,9 @@ class SessionImpl:
             self._schedule_document_sweep()
 
     def _drop_document(self, address_id: str) -> None:
+        # Nothing here asks whether the document has held changes: the hold pins it out of the idle
+        # set, and the store at unload, at a version reload, and at close is what keeps its changes
+        # from being dropped unstored (`session.ts:996-999`).
         self._documents.pop(address_id, None)
         self._idle_documents.pop(address_id, None)
 
@@ -901,25 +2095,24 @@ class SessionImpl:
             sweep.disarm()
 
     def _queue_sweep_job(self, sweep: _DocumentSweep) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        task = loop.create_task(self._run_sweep_job(sweep))
-        self._sweep_tasks.add(task)
-        task.add_done_callback(self._sweep_tasks.discard)
+        """Put the sweep on the line where it was called, the way upstream's ``#maintain`` does.
 
-    async def _run_sweep_job(self, sweep: _DocumentSweep) -> None:
-        try:
-            async with self._line:
-                if self._document_sweep is sweep:
-                    self._document_sweep = None
-                if self._closing is None:
-                    self._sweep_documents()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
+        Upstream's scheduled sweep runs ``#maintain`` synchronously inside the callback it hands
+        ``queueMicrotask`` (``session.ts:1021-1031``), and ``#maintain`` attaches the job to ``#tail``
+        the moment it is called (``session.ts:1667-1677``). Queueing a task here instead would insert
+        a turn upstream does not have, and that turn is a race: the sweep's place on the line would be
+        decided by which of it and a resuming caller reached the tail first. Nothing awaits the job, so
+        its failure is retrieved, not carried -- and ``_closing`` is what keeps a sweep fired during
+        close from evicting anything.
+        """
+
+        async def sweep_documents(_job: _LineJob) -> None:
+            if self._document_sweep is sweep:
+                self._document_sweep = None
+            if self._closing is None:
+                self._sweep_documents()
+
+        self._queue_line(sweep_documents, bounded=False)
 
     def _sweep_documents(self) -> None:
         """On the line: evict the idle documents whose retention passed, then schedule the next."""
@@ -928,6 +2121,11 @@ class SessionImpl:
         for cached_id, since in list(self._idle_documents.items()):
             if since > expired:
                 break
+            # A document with an unpublished change stays until its publication touches it -- the
+            # held changes of a deferred commit are exactly that, and their part is admitted before
+            # this sweep runs and published after it (`session.ts:1052-1053`).
+            if self._writer.gate(document_key(cached_id)) is not None:
+                continue
             self._drop_document(cached_id)
         self._schedule_document_sweep()
 
@@ -940,24 +2138,34 @@ class SessionImpl:
         """Run after close seals admission and before the line closes Storage; a Harness joins tasks here."""
 
     async def write_at_close(self, writes: Callable[[], Sequence[StorageWrite]]) -> None:
-        """Internal, for ``before_close()``: on the line, after every commit admitted before the
-        seal has settled, write what ``writes()`` returns straight to Storage.
+        """Internal, for ``before_close()``: through the writer, after every commit admitted before
+        the seal has settled, store what ``writes()`` returns.
 
         Nothing is published, since the Session is closing; a failed Session writes nothing.
         """
 
-        async def job() -> None:
+        async def store(job: _LineJob) -> None:
+            await self._drained()
             if self._failure is not None:
                 return
             batch = list(writes())
-            if batch:
-                await self._storage.commit(batch, without_abort_signal(BACKGROUND_CONTEXT))
+            if not batch:
+                return
+            part = self._writer.admit(
+                PartSpec(
+                    index=job.index,
+                    writes=batch,
+                    keys=[],
+                    context=BACKGROUND_CONTEXT,
+                    publish=lambda _seq: None,
+                    discard=lambda: None,
+                )
+            )
+            await part.outcome
 
-        async with self._line:
-            await job()
+        await self._maintain(store)
 
     # ── Internal ───────────────────────────────────────────────────────────
-
 
 
 class GuardedStorage:
@@ -973,11 +2181,23 @@ class GuardedStorage:
         if self._session.failure is not None:
             raise SessionFailed(self._session.failure)
 
+    @property
+    def publishing(self) -> CommitPublicationScope | None:
+        """The backend's own scope for a publication, when it carries one; not a call to guard."""
+
+        return self._storage.publishing if isinstance(self._storage, PublishingStorage) else None
+
     async def _call(self, read: Context | None, run: Callable[[], Awaitable[Any]]) -> Any:
         self._assert_healthy()
         if self._closing:
             raise RuntimeError("Session is closed")
-        call = asyncio.ensure_future(run())
+        # Spawned, not awaited inline: close waits for every call underway, and the task boundary is
+        # what lets a close that begins meanwhile reach Storage before a read between two pages can
+        # start the next one (group-commit document §3.4).
+        call: asyncio.Future[Any] = asyncio.ensure_future(run())
+        # Registered for close alone; the caller has the result too. A call nobody waits for must not
+        # report an unhandled rejection.
+        call.add_done_callback(_consumed)
         self._underway.add(call)
         try:
             result = await call
@@ -997,8 +2217,34 @@ class GuardedStorage:
         self._assert_healthy()
         return result
 
-    async def commit(self, writes: Any, context: Context) -> Seq:
-        return cast(Seq, await self._call(None, lambda: self._storage.commit(writes, context)))
+    async def commit_batches(self, batches: Any, receive: CommitReceipt, context: Context) -> CommitResult:
+        """Guarded like every call, but its outcome is the writer's to judge.
+
+        It publishes the batches it received first, then fails the Session for a refusal or a
+        rejection, and for a Session that failed meanwhile (group-commit document §3.3): a storage
+        error here is not this guard's to latch.
+        """
+
+        self._assert_healthy()
+        if self._closing:
+            raise RuntimeError("Session is closed")
+        call: asyncio.Future[None] = _current_loop().create_future()
+        # The caller has the result; this one is only for close. A call nobody waits for must not
+        # report an unhandled rejection.
+        call.add_done_callback(_consumed)
+        self._underway.add(call)
+        try:
+            result = await self._storage.commit_batches(batches, receive, context)
+        except BaseException as error:
+            if not call.done():
+                call.set_exception(error)
+            raise
+        else:
+            if not call.done():
+                call.set_result(None)
+            return result
+        finally:
+            self._underway.discard(call)
 
     async def mint_id(self) -> int:
         return cast(int, await self._call(None, lambda: self._storage.mint_id()))
@@ -1140,6 +2386,38 @@ def _current_loop() -> asyncio.AbstractEventLoop:
         return asyncio.new_event_loop()
 
 
+def _settled_future(loop: asyncio.AbstractEventLoop) -> asyncio.Future[None]:
+    """A future no job can fail: the line and the outcome fence start settled."""
+
+    future = _pending_future(loop)
+    future.set_result(None)
+    return future
+
+
+def _pending_future(loop: asyncio.AbstractEventLoop) -> asyncio.Future[None]:
+    """A future that only ever settles successfully: nobody awaits its failure."""
+
+    future: asyncio.Future[None] = loop.create_future()
+    future.add_done_callback(lambda settled: settled.exception() if not settled.cancelled() else None)
+    return future
+
+
+async def _quiet(future: asyncio.Future[Any]) -> None:
+    """Await a chained future without carrying its failure onward."""
+
+    try:
+        await future
+    except Exception:
+        pass
+
+
+def _consumed(future: asyncio.Future[Any]) -> None:
+    """Retrieve a settled future's exception: nobody has to await every queued job's result."""
+
+    if not future.cancelled():
+        future.exception()
+
+
 async def _await_with_context(awaitable: Awaitable[Any], context: Context) -> Any:
     signal = context.abort_signal
     if signal is None:
@@ -1169,30 +2447,6 @@ async def _await_with_context(awaitable: Awaitable[Any], context: Context) -> An
     raise AssertionError("unreachable")
 
 
-def contained(callback: Callable[[], Any], on_error: Callable[[BaseException], None]) -> None:
-    """Run a host callback without failing its caller; a throw or rejection goes to ``on_error``."""
-
-    try:
-        result = callback()
-        if not hasattr(result, "__await__"):
-            return
-        future = asyncio.ensure_future(result)
-
-        def settle(done: asyncio.Future[Any]) -> None:
-            if done.cancelled():
-                return
-            try:
-                error = done.exception()
-            except BaseException as caught:
-                error = caught
-            if error is not None:
-                on_error(error)
-
-        future.add_done_callback(settle)
-    except BaseException as error:
-        on_error(error)
-
-
 def _abort_error(signal: Any) -> BaseException:
     reason = signal.reason
     if isinstance(reason, BaseException):
@@ -1204,7 +2458,6 @@ def _abort_error(signal: Any) -> BaseException:
 
 __all__ = [
     "DocumentCacheSizes",
-    "DocumentState",
     "SessionImpl",
     "contained",
     "create_session",

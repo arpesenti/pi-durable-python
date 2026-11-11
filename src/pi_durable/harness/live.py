@@ -9,7 +9,7 @@ or waits out a retry backoff, and the newest failure stays for a client to show.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from ..documents import define_doc
 from ..errors import error_message
@@ -17,15 +17,92 @@ from ..ids import ConversationId, EntryId, SubmissionId, TaskId
 from ..json import JsonValue
 from ..session.drafts import DocumentDraft
 from ..session.transaction import Transaction
-from ..types import SubmissionSettlement, TaskRecord
+from ..types import CommitOptions, SubmissionSettlement, TaskRecord, UnansweredSubmissionSettlement
 from .types import CompactionReason, ToolDiagnostic
 
+RunFailureReason = Literal[
+    "model_error",
+    "no_model",
+    "aborted",
+    "reset",
+    "faulted",
+    "orphaned",
+    "interrupted",
+    "restart_limit",
+    "nothing_to_answer",
+    "turn_limit",
+]
+"""Why a run ended without an answer (spec section 8.2).
 
-class RunState(TypedDict):
+``model_error``: the response failed after any retries, or the compaction a request needed failed.
+``no_model``: no model is configured, or the configured one is not available. ``aborted``: the run
+was aborted; ``detail`` says when its abort handler was cut off ``restart_limit`` times and did not
+finish. ``reset``: a queued reset started a new context at the post-tools boundary. ``faulted``: the
+run's task threw where it cannot recover, or storage rejected its commit. ``orphaned``: its task was
+aborted while no registered definition could take it. ``interrupted``: the host stopped while the
+model was answering, more often than ``retry`` retries. ``restart_limit``: the generation was cut off
+``restart_limit`` times in a row. ``nothing_to_answer``: the context did not end in a user message or
+tool results, so no request was sent. ``turn_limit``: a tool round reached the conversation's
+``max_turns``; a continue resumes on its results.
+"""
+
+
+class RunFailure(TypedDict):
+    """The newest run that ended without an answer.
+
+    ``taskId``, ``inputs`` and ``reason`` are required, as upstream declares them
+    (``src/harness/live.ts:121-140``); ``detail`` and ``first`` carry meaning only for some reasons.
+    """
+
+    taskId: TaskId
+    """The task that ended the run: the run's task at its end."""
+    inputs: list[SubmissionId]
+    """The run's inputs, settled ``unanswered``."""
+    reason: RunFailureReason
+    detail: NotRequired[str]
+    """``model_error``: the error text; ``no_model``: which model is missing; ``faulted``: the error
+    message; ``orphaned``: why the task could not run; ``interrupted`` and ``restart_limit``: what was
+    cut off, and how often; ``turn_limit``: the tool rounds the run took."""
+    first: NotRequired[EntryId]
+    """The failed run's ``run.first``, so a continue's ``afterRun`` hooks see its history too."""
+
+
+class RunState(TypedDict, total=False):
     """The task that settles the run's inputs and those inputs; present exactly while busy."""
 
     taskId: TaskId
     inputs: list[SubmissionId]
+    turns: int
+    """Tool rounds this run has taken; the count a turn limit bounds, and that a stored run starts at 0."""
+    first: NotRequired[EntryId]
+    """The run's first entry: the first one the boundary that started it placed, a continue's the
+    failed run's it continues; otherwise its first tool-calling answer. A run started before it was
+    recorded may lack it; ``afterRun`` hooks then get the answer as the first entry."""
+    afterRun: NotRequired[dict[str, Any]]
+    """Present once the run answered and its generation waits for the tasks ``afterRun`` hooks asked
+    for, listed once created: queued items stay queued until they are terminal, and the run then ends
+    without a failure."""
+
+
+class RunEndDone(TypedDict):
+    """The run answered."""
+
+    status: Literal["done"]
+    answer: EntryId
+
+
+class RunEndUnanswered(TypedDict, total=False):
+    """The run ended without an answer, settling its inputs ``unanswered`` and recording why."""
+
+    status: Literal["unanswered"]
+    reason: RunFailureReason
+    detail: str
+    settlement: NotRequired[SubmissionSettlement]
+    """The inputs' settlement; default ``unanswered`` with ``reason`` and ``detail``."""
+
+
+RunEnd = RunEndDone | RunEndUnanswered
+"""How a run ends."""
 
 
 class SlotProgress(TypedDict, total=False):
@@ -44,12 +121,13 @@ class SlotProgress(TypedDict, total=False):
 class ToolSlot(SlotProgress):
     """Presentation of one tool call of the current round.
 
-    ``taskId`` is absent for a call not started yet (a sequential round) and for a call its request
-    did not offer, which starts ``done`` with the ``entry`` generation wrote. ``entry`` is absent
-    when the tool task faulted or was orphaned.
+    ``taskId`` is absent for a call not started yet (a sequential round). ``unoffered`` marks a call
+    to a tool its request did not offer: its task settles ``tool_unavailable`` without ever
+    resolving the name. ``entry`` is absent when the tool task faulted or was orphaned.
     """
 
     taskId: NotRequired[TaskId]
+    unoffered: NotRequired[Literal[True]]
     entry: NotRequired[EntryId]
 
 
@@ -76,7 +154,7 @@ class CompactionStatus(TypedDict, total=False):
     """Presentation of one live compaction task (spec section 8.7)."""
 
     taskId: TaskId
-    reason: CompactionReason
+    trigger: CompactionReason
     blocking: bool
     attempt: int
     retry: dict[str, JsonValue]
@@ -86,7 +164,7 @@ class CompactionFailure(TypedDict):
     """The newest compaction that failed since a compaction last produced a summary."""
 
     taskId: TaskId
-    reason: CompactionReason
+    trigger: CompactionReason
     error: str
 
 
@@ -99,6 +177,10 @@ class LiveState(TypedDict, total=False):
     nestedTools: list[NestedToolSlot]
     compactions: list[CompactionStatus]
     compactionFailure: CompactionFailure
+    runFailure: RunFailure
+    """Why the newest run ended without an answer, so a client can show it after the run ended. Set in
+    the commit that ends the run; removed when a later commit starts a run. A run started in the same
+    commit, by ``afterFailedRun: "continue"`` or after a reset, keeps it."""
 
 
 def _checkpoint_when(value: dict[str, Any], _ops: Any, _info: Any) -> bool:
@@ -113,14 +195,49 @@ def _checkpoint_when(value: dict[str, Any], _ops: Any, _info: Any) -> bool:
     return True
 
 
+def _rename_reason(value: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of a version 1 compaction status or failure with ``reason`` renamed ``trigger``.
+
+    The keys keep their stored order: a migrated value is compared with one written fresh, and the
+    port's JSON keeps the order its members were set in.
+    """
+
+    return {"trigger" if key == "reason" else key: field for key, field in value.items()}
+
+
+def _migrate(value: Mapping[str, Any], _version: int) -> dict[str, Any]:
+    """Carry a stored version 1 or 2 ``pi.live`` forward to version 3.
+
+    Version 1 named a compaction's trigger ``reason``, in ``compactions`` and ``compactionFailure``;
+    version 2 already names it ``trigger``, so renaming leaves it alone. Versions before ``run.turns``
+    was stored may lack the count: a run in flight across the upgrade counts its turns from 0. An
+    absent member stays absent — a migration never materialises one.
+    """
+
+    migrated = dict(value)
+    run = value.get("run")
+    if run is not None:
+        turns = run.get("turns")
+        counted = turns if isinstance(turns, (int, float)) and not isinstance(turns, bool) else 0
+        migrated["run"] = {**run, "turns": counted}
+    compactions = value.get("compactions")
+    if compactions is not None:
+        migrated["compactions"] = [_rename_reason(status) for status in compactions]
+    failure = value.get("compactionFailure")
+    if failure is not None:
+        migrated["compactionFailure"] = _rename_reason(failure)
+    return migrated
+
+
 LiveDoc = define_doc(
     {
         "kind": "pi.live",
-        "version": 1,
+        "version": 3,
         "scope": "conversation",
         "history": "latest",
         "fork": "initial",
         "initial": lambda: {},
+        "migrate": _migrate,
         "checkpoint_when": _checkpoint_when,
     }
 )
@@ -128,7 +245,47 @@ LiveDoc = define_doc(
 GENERATION_TASK_NAME = "pi.generation"
 TOOL_TASK_KIND = "pi.tool"
 COMPACTION_TASK_KIND = "pi.compaction"
+#:
+#: How the progress throttles commit a partial answer and running tool output into ``pi.live``: deferred,
+#: so Storage gets them together, at the next commit that reads or writes ``pi.live`` or after
+#: ``settings.progress.persist_within_ms``. Every commit that consumes or clears streamed fields reads
+#: ``pi.live``, so it stores them with its own changes (`live.ts:230-235`).
+PROGRESS_COMMIT: CommitOptions = {"persistence": {"kind": "deferred"}}
+
 RUN_TASK_KINDS = frozenset({GENERATION_TASK_NAME})
+
+LIMITS_RESTARTS = frozenset({*RUN_TASK_KINDS, TOOL_TASK_KIND, COMPACTION_TASK_KIND})
+"""Built-in task kinds that end themselves once cut off ``settings.restart_limit`` times
+(``TaskRecord.restarts``); the scheduler faults a task of any other kind instead (spec §5.4).
+"""
+
+
+def cut_off_too_often(task: Mapping[str, Any], runtime: Any) -> bool:
+    """Whether ``task`` was cut off ``settings.restart_limit`` times in a row, so its phase ends it
+    instead of running again.
+
+    The settings are read only for a task that was cut off at all, so the normal path resolves the
+    host's settings nothing more often than before the limit applied to every kind.
+    """
+
+    restarts = task.get("restarts")
+    return bool(restarts is not None and restarts >= runtime.settings.restart_limit)
+
+
+def salvageable(task: Mapping[str, Any], runtime: Any) -> bool:
+    """Whether a task at the limit may still do the cleanup it does when it ends, such as converting a
+    partial: only at the limit. Past it, that cleanup may be what cut the task off, so it ends without
+    it.
+    """
+
+    return bool(int(task.get("restarts") or 0) <= runtime.settings.restart_limit)
+
+
+def cut_off_count(task: Mapping[str, Any]) -> str:
+    """How often a task was cut off, for a message: ``once``, or ``3 times in a row``."""
+
+    restarts = int(task.get("restarts") or 0)
+    return "once" if restarts == 1 else f"{restarts} times in a row"
 
 
 async def start_generation(
@@ -137,13 +294,14 @@ async def start_generation(
     live: Any,
     inputs: list[SubmissionId],
     registry: Any,
+    first: EntryId | None = None,
 ) -> None:
     """Create the registry's generation task and give it run control of ``inputs``."""
 
     task = registry.task(GENERATION_TASK_NAME)
     if task is None:
         raise RuntimeError("Registry lacks the pi.generation task")
-    await start_run(tx, conversation_id, live, inputs, task)
+    await start_run(tx, conversation_id, live, inputs, task, first)
 
 
 async def start_run(
@@ -152,29 +310,76 @@ async def start_run(
     live: DocumentDraft,
     inputs: list[SubmissionId],
     task: Any,
+    first: EntryId | None = None,
+    *,
+    keep_failure: bool = False,
 ) -> None:
-    """Create the generation task and give it run control of ``inputs``."""
+    """Create the generation task and give it run control of ``inputs``.
+
+    ``first`` is the run's first entry, ``LiveRun.first``: the first entry the boundary that starts it
+    placed, or a continue's the failed run's. The run failure is removed unless ``keep_failure``: a run
+    started in the commit that ended the failed one -- the queue's next run under
+    ``afterFailedRun: "continue"``, or the run a reset starts -- keeps its failure, so it is shown
+    until a later run starts.
+    """
 
     task_id = await tx.create_task(
         task,
         {},
         {"ownership": {"kind": "conversation"}, "conversationId": conversation_id},
     )
-    live["run"] = {"taskId": task_id, "inputs": list(inputs)}
+    run: RunState = {"taskId": task_id, "inputs": list(inputs), "turns": 0}
+    if first is not None:
+        run["first"] = first
+    live["run"] = run
+    if not keep_failure and "runFailure" in live:
+        del live["runFailure"]
+
+
+def _unanswered_settlement(reason: RunFailureReason, detail: str | None) -> UnansweredSubmissionSettlement:
+    """The default settlement of a run's inputs: ``unanswered`` with the run's reason and detail."""
+
+    settlement: UnansweredSubmissionSettlement = {"status": "unanswered", "reason": reason}
+    if detail is not None:
+        settlement["detail"] = detail
+    return settlement
 
 
 def end_run(
     tx: Transaction,
     live: DocumentDraft,
     task_id: TaskId,
-    settlement: SubmissionSettlement,
+    end: RunEnd,
 ) -> None:
-    """End the run owned by ``task_id``: settle its inputs and remove run control."""
+    """End the run owned by ``task_id``: settle its inputs, remove run control, and record why.
+
+    Without an answer the run's reason stays on the live document as ``runFailure``, and the inputs
+    settle ``unanswered`` with that reason unless ``end`` carries its own ``settlement``. A run that
+    answered already, and runs only its ``afterRun`` tasks, records no failure, however it ends. Always
+    removes ``generation``, ``tools`` and ``nestedTools``, whose presentation belongs to the ending run.
+    """
 
     run = live.get("run")
     if run is not None and run["taskId"] == task_id:
-        for id in run["inputs"]:
-            tx.settle_submission(cast(SubmissionId, id), settlement)
+        inputs = list(run["inputs"])
+        first = run.get("first")
+        if end["status"] == "done":
+            for id in inputs:
+                tx.settle_submission(cast(SubmissionId, id), {"status": "done", "answer": end["answer"]})
+        elif run.get("afterRun") is None:
+            reason = end["reason"]
+            detail = end.get("detail")
+            settlement: SubmissionSettlement = end.get("settlement") or _unanswered_settlement(
+                reason, detail
+            )
+            for submitted in inputs:
+                tx.settle_submission(submitted, settlement)
+            failure: RunFailure = {"taskId": task_id, "inputs": inputs, "reason": reason}
+            if detail is not None:
+                failure["detail"] = detail
+            if first is not None:
+                failure["first"] = first
+            live["runFailure"] = failure
         del live["run"]
     for key in ("generation", "tools", "nestedTools"):
         if key in live:
@@ -228,7 +433,7 @@ def fail_compaction_status(live: Any, task_id: TaskId, error: str) -> None:
     if status is not None:
         live["compactionFailure"] = {
             "taskId": status["taskId"],
-            "reason": status["reason"],
+            "trigger": status["trigger"],
             "error": error,
         }
     remove_compaction_status(live, task_id)
@@ -296,7 +501,13 @@ def clear_progress(slot: Any) -> None:
 
 
 async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome: dict[str, Any]) -> None:
-    """Harness cleanup for a terminal outcome the scheduler writes itself (faulted or orphaned)."""
+    """Harness cleanup for a terminal outcome the scheduler writes itself (faulted or orphaned).
+
+    Only an abort handler is faulted for the limit here -- the built-in phases end themselves -- so the
+    task keeps the meaning it had: an aborted run still ends ``aborted`` with the limit as its detail,
+    and an aborted compaction is no failure. Past the limit the abort handler may have died doing the
+    cleanup, so it is not attempted again (spec §5.4).
+    """
 
     if record["kind"] == TOOL_TASK_KIND:
         live = await tx.doc(LiveDoc, record["conversationId"])
@@ -305,14 +516,20 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
             finish_slot(slot)
         remove_nested_slots(live, record["id"])
         return
+    error = outcome.get("error") or {}
+    detail = error.get("detail") if outcome.get("status") == "faulted" else None
+    cut_off = isinstance(detail, Mapping) and detail.get("reason") == "restart_limit"
     if record["kind"] == COMPACTION_TASK_KIND:
-        failure_text = (
-            str(cast(Mapping[str, Any], outcome.get("error") or {}).get("message", ""))
-            if outcome.get("status") == "faulted"
-            else str(outcome.get("reason", ""))
-        )
+        live = await tx.doc(LiveDoc, record["conversationId"])
+        if cut_off:
+            remove_compaction_status(live, record["id"])
+            return
         fail_compaction_status(
-            await tx.doc(LiveDoc, record["conversationId"]), record["id"], failure_text
+            live,
+            record["id"],
+            str(error.get("message", ""))
+            if outcome.get("status") == "faulted"
+            else str(outcome.get("reason", "")),
         )
         return
     if record["kind"] not in RUN_TASK_KINDS:
@@ -323,16 +540,17 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
         return
     from .generation import convert_partial
 
-    await convert_partial(tx, live, record["conversationId"])
+    # Cut off, the abort handler may have died converting the partial: the run ends without it.
+    if not cut_off:
+        await convert_partial(tx, live, record["conversationId"])
     if outcome.get("status") == "faulted":
-        error = outcome.get("error") or {}
         end_run(
             tx,
             live,
             record["id"],
             {
                 "status": "unanswered",
-                "reason": "faulted",
+                "reason": "aborted" if cut_off else "faulted",
                 "detail": error.get("message", error_message(error)),
             },
         )
@@ -341,13 +559,19 @@ async def settle_scheduler_outcome(tx: Transaction, record: TaskRecord, outcome:
         tx,
         live,
         record["id"],
-        {"status": "unanswered", "reason": outcome.get("reason", "aborted")},
+        {
+            "status": "unanswered",
+            "reason": "orphaned",
+            "detail": str(outcome.get("reason", "")),
+            "settlement": {"status": "unanswered", "reason": outcome.get("reason", "aborted")},
+        },
     )
 
 
 __all__ = [
     "COMPACTION_TASK_KIND",
     "GENERATION_TASK_NAME",
+    "LIMITS_RESTARTS",
     "CompactionFailure",
     "CompactionStatus",
     "LiveDoc",
@@ -355,6 +579,11 @@ __all__ = [
     "NestedToolSlot",
     "NestedToolSummary",
     "RUN_TASK_KINDS",
+    "RunEnd",
+    "RunEndDone",
+    "RunEndUnanswered",
+    "RunFailure",
+    "RunFailureReason",
     "RunState",
     "TOOL_TASK_KIND",
     "ToolSlot",
@@ -362,12 +591,15 @@ __all__ = [
     "clear_compaction_failure",
     "clear_progress",
     "compaction_status",
+    "cut_off_count",
+    "cut_off_too_often",
     "end_run",
     "fail_compaction_status",
     "finish_slot",
     "remove_compaction_status",
     "remove_nested_slots",
     "settle_scheduler_outcome",
+    "PROGRESS_COMMIT",
     "start_generation",
     "start_run",
     "tool_slot",
